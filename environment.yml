@@ -1,0 +1,12 @@
+name: phonon-negf
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - numba
+  - mpi4py
+  - jupyter
+prefix: /home/users/astar/ihpc/zhouhb/app/miniconda3/envs/phonon-negf
