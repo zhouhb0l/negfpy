@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
 
 Array = np.ndarray
+KPar = tuple[float, ...] | None
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,16 @@ class LeadBlocks:
 
     d00: Array
     d01: Array
+
+
+@dataclass(frozen=True)
+class LeadKSpace:
+    """k_parallel-dependent lead block provider."""
+
+    blocks_builder: Callable[[KPar], tuple[Array, Array]]
+
+    def blocks(self, kpar: KPar = None) -> tuple[Array, Array]:
+        return self.blocks_builder(kpar)
 
 
 @dataclass(frozen=True)
@@ -39,3 +51,13 @@ class Device1D:
     @property
     def dof_per_layer(self) -> int:
         return int(self.onsite_blocks[0].shape[0])
+
+
+@dataclass(frozen=True)
+class DeviceKSpace:
+    """k_parallel-dependent device block provider."""
+
+    device_builder: Callable[[KPar], Device1D]
+
+    def device(self, kpar: KPar = None) -> Device1D:
+        return self.device_builder(kpar)
