@@ -7,6 +7,8 @@ from .lattice_kspace import (
     square_lattice_device,
     square_lattice_lead,
 )
+from .material_kspace import MaterialKspaceParams, material_kspace_device, material_kspace_lead
+from .multidof import MultiDofCellParams, multidof_device, multidof_lead_blocks
 
 __all__ = [
     "ChainParams",
@@ -20,4 +22,10 @@ __all__ = [
     "square_lattice_device",
     "cubic_lattice_lead",
     "cubic_lattice_device",
+    "MaterialKspaceParams",
+    "material_kspace_lead",
+    "material_kspace_device",
+    "MultiDofCellParams",
+    "multidof_lead_blocks",
+    "multidof_device",
 ]

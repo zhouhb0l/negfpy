@@ -19,6 +19,14 @@ class LeadBlocks:
     d00: Array
     d01: Array
 
+    def __post_init__(self) -> None:
+        if self.d00.ndim != 2 or self.d00.shape[0] != self.d00.shape[1]:
+            raise ValueError("d00 must be a square 2D array.")
+        if self.d01.ndim != 2:
+            raise ValueError("d01 must be a 2D array.")
+        if self.d01.shape != self.d00.shape:
+            raise ValueError("d01 must have the same shape as d00.")
+
 
 @dataclass(frozen=True)
 class LeadKSpace:
@@ -43,6 +51,15 @@ class Device1D:
             raise ValueError("Device must contain at least one principal layer.")
         if len(self.coupling_blocks) != n_layers - 1:
             raise ValueError("coupling_blocks length must be n_layers - 1.")
+        first_shape = self.onsite_blocks[0].shape
+        if len(first_shape) != 2 or first_shape[0] != first_shape[1]:
+            raise ValueError("Each onsite block must be a square 2D array.")
+        for block in self.onsite_blocks:
+            if block.shape != first_shape:
+                raise ValueError("All onsite blocks must share the same shape.")
+        for block in self.coupling_blocks:
+            if block.shape != first_shape:
+                raise ValueError("All coupling blocks must match onsite block shape.")
 
     @property
     def n_layers(self) -> int:
