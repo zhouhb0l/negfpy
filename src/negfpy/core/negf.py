@@ -6,7 +6,7 @@ import numpy as np
 from scipy.sparse import csc_matrix, eye, lil_matrix
 from scipy.sparse.linalg import splu
 
-from .surface_gf import surface_gf_sancho_rubio
+from .surface_gf import surface_gf
 from .types import Device1D, DeviceKSpace, KPar, LeadBlocks, LeadKSpace
 
 
@@ -19,8 +19,14 @@ ContactIndices = slice | list[int] | tuple[int, ...] | Array | None
 def _resolve_lead_blocks(lead: LeadLike, kpar: KPar) -> LeadBlocks:
     if isinstance(lead, LeadBlocks):
         return lead
-    d00, d01 = lead.blocks(kpar=kpar)
-    return LeadBlocks(d00=d00, d01=d01)
+    blocks = lead.blocks(kpar=kpar)
+    if len(blocks) == 2:
+        d00, d01 = blocks
+        return LeadBlocks(d00=d00, d01=d01)
+    if len(blocks) == 3:
+        d00, d01, d10 = blocks
+        return LeadBlocks(d00=d00, d01=d01, d10=d10)
+    raise ValueError("LeadKSpace blocks_builder must return (d00,d01) or (d00,d01,d10).")
 
 
 def _resolve_device(device: DeviceLike, kpar: KPar) -> Device1D:
@@ -53,8 +59,17 @@ def _self_energy_contact(
     lead: LeadBlocks,
     device_to_lead: Array,
     eta: float,
+    *,
+    surface_gf_method: str,
 ) -> Array:
-    gsurf = surface_gf_sancho_rubio(omega=omega, d00=lead.d00, d01=lead.d01, eta=eta)
+    gsurf = surface_gf(
+        omega=omega,
+        d00=lead.d00,
+        d01=lead.d01,
+        d10=lead.d10,
+        eta=eta,
+        method=surface_gf_method,
+    )
     vdl = np.asarray(device_to_lead, dtype=np.complex128)
     if vdl.ndim != 2:
         raise ValueError("device_to_lead coupling must be a 2D array.")
@@ -119,6 +134,7 @@ def _build_system_matrix_and_contact_sigmas(
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
 ) -> tuple[csc_matrix, Array, Array, Array, Array]:
     dev = _resolve_device(device=device, kpar=kpar)
     left = _resolve_lead_blocks(lead=lead_left, kpar=kpar)
@@ -130,7 +146,7 @@ def _build_system_matrix_and_contact_sigmas(
 
     if device_to_lead_left is None:
         # Backward-compatible default for periodic matched contacts.
-        vdl_left = left.d01.conj().T
+        vdl_left = left.d10 if left.d10 is not None else left.d01.conj().T
     else:
         vdl_left = np.asarray(device_to_lead_left, dtype=np.complex128)
     if device_to_lead_right is None:
@@ -163,8 +179,20 @@ def _build_system_matrix_and_contact_sigmas(
         )
 
     dmat = _assemble_device_matrix_sparse(dev)
-    sigma_l_block = _self_energy_contact(omega=omega, lead=left, device_to_lead=vdl_left, eta=eta)
-    sigma_r_block = _self_energy_contact(omega=omega, lead=right, device_to_lead=vdl_right, eta=eta)
+    sigma_l_block = _self_energy_contact(
+        omega=omega,
+        lead=left,
+        device_to_lead=vdl_left,
+        eta=eta,
+        surface_gf_method=surface_gf_method,
+    )
+    sigma_r_block = _self_energy_contact(
+        omega=omega,
+        lead=right,
+        device_to_lead=vdl_right,
+        eta=eta,
+        surface_gf_method=surface_gf_method,
+    )
 
     z = (omega + 1j * eta) ** 2
     a = (z * eye(dim, dtype=np.complex128, format="csc") - dmat).tolil()
@@ -185,6 +213,7 @@ def device_green_function(
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
 ) -> tuple[Array, Array, Array]:
     """Return (G, Sigma_L, Sigma_R) for the finite device."""
 
@@ -204,6 +233,7 @@ def device_green_function(
         device_to_lead_right=device_to_lead_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
+        surface_gf_method=surface_gf_method,
     )
     sigma_l, sigma_r = _embed_self_energies(
         sigma_l_block=sigma_l_block,
@@ -230,6 +260,7 @@ def transmission(
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
 ) -> float:
     """Return coherent phonon transmission T(omega)."""
 
@@ -249,6 +280,7 @@ def transmission(
         device_to_lead_right=device_to_lead_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
+        surface_gf_method=surface_gf_method,
     )
 
     gamma_l_block = _broadening(sigma_l_block)
@@ -276,6 +308,7 @@ def transmission_kavg(
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
 ) -> float:
     """Return k_parallel-averaged transmission over supplied k-point list."""
 
@@ -293,7 +326,150 @@ def transmission_kavg(
             device_to_lead_right=device_to_lead_right,
             contact_left_indices=contact_left_indices,
             contact_right_indices=contact_right_indices,
+            surface_gf_method=surface_gf_method,
         )
         for kpar in kpoints
     ]
     return float(np.mean(vals))
+
+
+def transmission_kavg_adaptive(
+    omega: float,
+    device: DeviceLike,
+    lead_left: LeadLike,
+    lead_right: LeadLike,
+    kpoints: list[tuple[float, ...]],
+    eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
+    min_success_fraction: float = 0.0,
+    device_to_lead_left: Array | None = None,
+    device_to_lead_right: Array | None = None,
+    contact_left_indices: ContactIndices = None,
+    contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
+    nonnegative_tolerance: float = 0.0,
+    max_channel_factor: float | None = None,
+    collect_rejected: bool = False,
+) -> tuple[float, dict[str, object]]:
+    """Return adaptive k-averaged transmission and convergence statistics.
+
+    For each k-point, tries ``eta_values`` in order until transmission converges.
+    """
+
+    if len(kpoints) == 0:
+        raise ValueError("kpoints must contain at least one k-point.")
+    if len(eta_values) == 0:
+        raise ValueError("eta_values must contain at least one eta value.")
+    if not (0.0 <= min_success_fraction <= 1.0):
+        raise ValueError("min_success_fraction must be in [0, 1].")
+    if nonnegative_tolerance < 0.0:
+        raise ValueError("nonnegative_tolerance must be non-negative.")
+    if max_channel_factor is not None and max_channel_factor <= 0.0:
+        raise ValueError("max_channel_factor must be positive when provided.")
+
+    vals: list[float] = []
+    used_etas: list[float] = []
+    failed_kpoints = 0
+    rejected: list[dict[str, object]] = []
+
+    for kpar in kpoints:
+        max_t_allowed: float | None = None
+        if max_channel_factor is not None:
+            lead_blk = _resolve_lead_blocks(lead=lead_left, kpar=kpar)
+            max_t_allowed = float(max_channel_factor) * float(lead_blk.d00.shape[0])
+        converged = False
+        for eta in eta_values:
+            try:
+                tval = transmission(
+                    omega=omega,
+                    device=device,
+                    lead_left=lead_left,
+                    lead_right=lead_right,
+                    eta=eta,
+                    kpar=kpar,
+                    device_to_lead_left=device_to_lead_left,
+                    device_to_lead_right=device_to_lead_right,
+                    contact_left_indices=contact_left_indices,
+                    contact_right_indices=contact_right_indices,
+                    surface_gf_method=surface_gf_method,
+                )
+            except Exception:
+                if collect_rejected:
+                    rejected.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": None,
+                            "reason": "exception",
+                        }
+                    )
+                continue
+            if np.isfinite(tval):
+                if tval < -float(nonnegative_tolerance):
+                    if collect_rejected:
+                        rejected.append(
+                            {
+                                "omega": float(omega),
+                                "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                                "eta": float(eta),
+                                "t": float(tval),
+                                "reason": "negative",
+                            }
+                        )
+                    continue
+                if max_t_allowed is not None and tval > max_t_allowed:
+                    if collect_rejected:
+                        rejected.append(
+                            {
+                                "omega": float(omega),
+                                "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                                "eta": float(eta),
+                                "t": float(tval),
+                                "reason": "over_channel_limit",
+                            }
+                        )
+                    continue
+                vals.append(float(max(tval, 0.0)))
+                used_etas.append(float(eta))
+                converged = True
+                break
+            else:
+                if collect_rejected:
+                    rejected.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": float(tval),
+                            "reason": "non_finite",
+                        }
+                    )
+        if not converged:
+            failed_kpoints += 1
+
+    n_total = len(kpoints)
+    n_success = len(vals)
+    success_fraction = float(n_success / n_total)
+    if n_success == 0:
+        raise RuntimeError("No k-point converged for adaptive k-averaged transmission.")
+    if success_fraction < min_success_fraction:
+        raise RuntimeError(
+            "Adaptive k-averaged transmission failed success-fraction threshold "
+            f"(got {success_fraction:.3f}, required >= {min_success_fraction:.3f})."
+        )
+
+    eta_histogram: dict[float, int] = {}
+    for eta in eta_values:
+        eta_histogram[float(eta)] = int(sum(1 for e in used_etas if e == float(eta)))
+
+    info: dict[str, object] = {
+        "n_total": int(n_total),
+        "n_success": int(n_success),
+        "n_failed": int(failed_kpoints),
+        "success_fraction": success_fraction,
+        "eta_histogram": eta_histogram,
+    }
+    if collect_rejected:
+        info["n_rejected"] = int(len(rejected))
+        info["rejected"] = rejected
+    return float(np.mean(vals)), info

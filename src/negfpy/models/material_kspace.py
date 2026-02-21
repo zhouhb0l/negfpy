@@ -24,12 +24,16 @@ class MaterialKspaceParams:
       The k-space block is sum[ Phi00(dy,dz) * exp(i*(ky*dy + kz*dz)) ].
     - ``fc01_terms``: dict of +x-layer force-constant blocks keyed by (dy, dz).
       The k-space block is sum[ Phi01(dy,dz) * exp(i*(ky*dy + kz*dz)) ].
+    - ``fc10_terms``: optional dict of -x-layer force-constant blocks keyed by
+      (dy, dz). When omitted, ``fc10_terms`` is assumed Hermitian-conjugate of
+      ``fc01_terms``.
     - ``onsite_pinning``: optional small positive onsite term added to Phi00(k).
     """
 
     masses: Array
     fc00_terms: dict[Shift2D, Array]
     fc01_terms: dict[Shift2D, Array]
+    fc10_terms: dict[Shift2D, Array] | None = None
     dof_per_atom: int = 3
     onsite_pinning: float = 0.0
 
@@ -57,6 +61,14 @@ class MaterialKspaceParams:
                 raise ValueError("fc01_terms keys must be (dy, dz).")
             if block.shape != (ndof, ndof):
                 raise ValueError("fc01_terms blocks must have shape (n_atoms*dof, n_atoms*dof).")
+        if self.fc10_terms is not None:
+            if len(self.fc10_terms) == 0:
+                raise ValueError("fc10_terms must be non-empty when provided.")
+            for key, block in self.fc10_terms.items():
+                if len(key) != 2:
+                    raise ValueError("fc10_terms keys must be (dy, dz).")
+                if block.shape != (ndof, ndof):
+                    raise ValueError("fc10_terms blocks must have shape (n_atoms*dof, n_atoms*dof).")
 
     @property
     def n_atoms(self) -> int:
@@ -96,23 +108,28 @@ def _build_dynamical_blocks(
     kz: float,
     masses_left: Array,
     masses_right: Array,
-) -> tuple[Array, Array]:
+) -> tuple[Array, Array, Array]:
     phi00_k = _sum_k_terms(params.fc00_terms, ky=ky, kz=kz)
     if params.onsite_pinning != 0.0:
         phi00_k = phi00_k + params.onsite_pinning * np.eye(params.ndof, dtype=np.complex128)
     phi01_k = _sum_k_terms(params.fc01_terms, ky=ky, kz=kz)
+    if params.fc10_terms is None:
+        phi10_k = phi01_k.conj().T
+    else:
+        phi10_k = _sum_k_terms(params.fc10_terms, ky=ky, kz=kz)
 
     ml = _inv_sqrt_mass_diag(masses_left, params.dof_per_atom)
     mr = _inv_sqrt_mass_diag(masses_right, params.dof_per_atom)
     d00 = ml @ phi00_k @ ml
     d01 = ml @ phi01_k @ mr
-    return d00, d01
+    d10 = mr @ phi10_k @ ml
+    return d00, d01, d10
 
 
 def material_kspace_lead(params: MaterialKspaceParams) -> LeadKSpace:
     """Return a k_parallel-dependent lead from general force-constant terms."""
 
-    def _builder(kpar: KPar) -> tuple[Array, Array]:
+    def _builder(kpar: KPar) -> tuple[Array, Array, Array]:
         ky, kz = _parse_ky_kz(kpar)
         return _build_dynamical_blocks(
             params=params,
@@ -152,7 +169,7 @@ def material_kspace_device(
         ky, kz = _parse_ky_kz(kpar)
         onsite_blocks: list[Array] = []
         for i in range(n_layers):
-            d00_i, _ = _build_dynamical_blocks(
+            d00_i, _, _ = _build_dynamical_blocks(
                 params=params,
                 ky=ky,
                 kz=kz,
@@ -163,7 +180,7 @@ def material_kspace_device(
 
         coupling_blocks: list[Array] = []
         for i in range(n_layers - 1):
-            _, d01_i = _build_dynamical_blocks(
+            _, d01_i, _ = _build_dynamical_blocks(
                 params=params,
                 ky=ky,
                 kz=kz,

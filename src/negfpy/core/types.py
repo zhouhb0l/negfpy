@@ -18,6 +18,7 @@ class LeadBlocks:
 
     d00: Array
     d01: Array
+    d10: Array | None = None
 
     def __post_init__(self) -> None:
         if self.d00.ndim != 2 or self.d00.shape[0] != self.d00.shape[1]:
@@ -26,15 +27,20 @@ class LeadBlocks:
             raise ValueError("d01 must be a 2D array.")
         if self.d01.shape != self.d00.shape:
             raise ValueError("d01 must have the same shape as d00.")
+        if self.d10 is not None:
+            if self.d10.ndim != 2:
+                raise ValueError("d10 must be a 2D array when provided.")
+            if self.d10.shape != self.d00.shape:
+                raise ValueError("d10 must have the same shape as d00.")
 
 
 @dataclass(frozen=True)
 class LeadKSpace:
     """k_parallel-dependent lead block provider."""
 
-    blocks_builder: Callable[[KPar], tuple[Array, Array]]
+    blocks_builder: Callable[[KPar], tuple[Array, Array] | tuple[Array, Array, Array]]
 
-    def blocks(self, kpar: KPar = None) -> tuple[Array, Array]:
+    def blocks(self, kpar: KPar = None) -> tuple[Array, Array] | tuple[Array, Array, Array]:
         return self.blocks_builder(kpar)
 
 

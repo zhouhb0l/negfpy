@@ -115,3 +115,75 @@ def test_material_kspace_multidof_runs() -> None:
     tval = transmission(omega=0.7, device=device, lead_left=lead, lead_right=lead, kpar=(0.2, -0.3), eta=1e-8)
     assert np.isfinite(tval)
     assert tval > -1e-8
+
+
+def test_material_kspace_generalized_eigen_matches_sancho_scalar() -> None:
+    m = 1.0
+    kx = 1.0
+    ky = 0.8
+    omega = 1.1
+    kpar = (np.pi / 3.0,)
+
+    fc00_terms, fc01_terms = _as_1x1_terms(
+        onsite_const=2.0 * kx + 2.0 * ky,
+        onsite_y=-ky,
+        couple_x=-kx,
+    )
+    mat_params = MaterialKspaceParams(
+        masses=np.array([m]),
+        fc00_terms=fc00_terms,
+        fc01_terms=fc01_terms,
+        dof_per_atom=1,
+    )
+    mat_lead = material_kspace_lead(mat_params)
+    mat_device = material_kspace_device(n_layers=30, params=mat_params)
+
+    t_sr = transmission(
+        omega,
+        mat_device,
+        mat_lead,
+        mat_lead,
+        kpar=kpar,
+        eta=1e-8,
+        surface_gf_method="sancho_rubio",
+    )
+    t_ge = transmission(
+        omega,
+        mat_device,
+        mat_lead,
+        mat_lead,
+        kpar=kpar,
+        eta=1e-8,
+        surface_gf_method="generalized_eigen",
+    )
+    assert abs(t_sr - t_ge) < 1e-10
+
+
+def test_material_kspace_multidof_generalized_eigen_runs() -> None:
+    n_atoms = 2
+    dof = 3
+    ndof = n_atoms * dof
+    masses = np.array([1.0, 1.4])
+
+    fc00_terms = {(0, 0): 2.0 * np.eye(ndof), (1, 0): -0.2 * np.eye(ndof), (-1, 0): -0.2 * np.eye(ndof)}
+    fc01_terms = {(0, 0): -0.7 * np.eye(ndof)}
+    params = MaterialKspaceParams(
+        masses=masses,
+        fc00_terms=fc00_terms,
+        fc01_terms=fc01_terms,
+        dof_per_atom=dof,
+        onsite_pinning=1e-6,
+    )
+    lead = material_kspace_lead(params)
+    device = material_kspace_device(n_layers=20, params=params)
+    tval = transmission(
+        omega=0.7,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        kpar=(0.2, -0.3),
+        eta=1e-8,
+        surface_gf_method="generalized_eigen",
+    )
+    assert np.isfinite(tval)
+    assert tval > -1e-8
