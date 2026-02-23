@@ -14,10 +14,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from negfpy.core import transmission_kavg, transmission_kavg_adaptive
-from negfpy.io import read_ifc, read_phonopy_ifc, read_qe_q2r_ifc
-from negfpy.modeling import BuildConfig, qe_ev_to_omega, qe_omega_to_cm1
+from negfpy.io import read_ifc
+from negfpy.modeling import BuildConfig, enforce_translational_asr_on_self_term, qe_ev_to_omega, qe_omega_to_cm1
 from negfpy.modeling.builders import build_material_kspace_params
-from negfpy.modeling.schema import IFCData, IFCTerm
 from negfpy.models import material_kspace_device, material_kspace_lead
 
 
@@ -26,57 +25,6 @@ METHOD_LABELS = {
     "generalized_eigen": "Generalized Eigen",
     "generalized_eigen_svd": "Generalized Eigen (SVD)",
 }
-
-
-def _read_ifc(path: Path, reader: str):
-    if reader == "qe":
-        return read_qe_q2r_ifc(path)
-    if reader == "phonopy":
-        return read_phonopy_ifc(path)
-    return read_ifc(path, reader=reader)
-
-
-def _enforce_asr_on_self_terms(ifc: IFCData) -> tuple[IFCData, float]:
-    ndof = len(ifc.masses) * ifc.dof_per_atom
-    terms = list(ifc.terms)
-    phi_sum = np.zeros((ndof, ndof), dtype=np.complex128)
-    r0_idx = None
-    for idx, term in enumerate(terms):
-        block = np.asarray(term.block, dtype=np.complex128)
-        phi_sum += block
-        if term.dx == 0 and term.dy == 0 and term.dz == 0:
-            r0_idx = idx
-    if r0_idx is None:
-        raise ValueError("Cannot enforce ASR: missing IFC term at (0,0,0).")
-
-    residual = np.zeros((ndof, ifc.dof_per_atom), dtype=np.complex128)
-    for beta in range(ifc.dof_per_atom):
-        cols = np.arange(beta, ndof, ifc.dof_per_atom)
-        residual[:, beta] = np.sum(phi_sum[:, cols], axis=1)
-    residual_max = float(np.max(np.abs(residual)))
-
-    corrected = np.asarray(terms[r0_idx].block, dtype=np.complex128).copy()
-    for row in range(ndof):
-        atom_i = row // ifc.dof_per_atom
-        for beta in range(ifc.dof_per_atom):
-            col = atom_i * ifc.dof_per_atom + beta
-            corrected[row, col] -= residual[row, beta]
-    corrected = 0.5 * (corrected + corrected.conj().T)
-    terms[r0_idx] = IFCTerm(dx=0, dy=0, dz=0, block=corrected)
-
-    ifc_corr = IFCData(
-        masses=np.asarray(ifc.masses, dtype=float),
-        dof_per_atom=ifc.dof_per_atom,
-        terms=tuple(terms),
-        units=ifc.units,
-        metadata=dict(ifc.metadata),
-        lattice_vectors=ifc.lattice_vectors,
-        atom_positions=ifc.atom_positions,
-        atom_symbols=ifc.atom_symbols,
-        index_convention=ifc.index_convention,
-    )
-    return ifc_corr, residual_max
-
 
 def _load_old_tw(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
     if not path.exists():
@@ -138,9 +86,9 @@ def main() -> None:
         omega_scale = float(np.asarray(qe_ev_to_omega(1.0), dtype=float))
         print(f"Omega scaling enabled: mode=ev, omega_scale={omega_scale:.6e} (internal omega per 1 eV)")
 
-    ifc = _read_ifc(args.ifc, reader=args.reader)
+    ifc = read_ifc(args.ifc, reader=args.reader)
     if args.enforce_asr:
-        ifc, residual = _enforce_asr_on_self_terms(ifc)
+        ifc, residual = enforce_translational_asr_on_self_term(ifc)
         print(f"ASR enforced: yes (max pre-correction residual={residual:.6e})")
     else:
         print("ASR enforced: no")

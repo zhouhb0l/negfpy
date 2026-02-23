@@ -73,3 +73,8 @@ Thumbs.db
 data/
 results/
 cache/
+outputs/
+
+# Legacy build artifacts
+oldfortrancode/*.mod
+oldfortrancode/*.exe

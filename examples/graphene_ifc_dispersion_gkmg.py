@@ -8,63 +8,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from negfpy.io import read_ifc, read_phonopy_ifc, read_qe_q2r_ifc
-from negfpy.modeling import qe_omega_to_cm1, qe_omega_to_thz
-from negfpy.modeling.schema import IFCData, IFCTerm
-
-
-def _read_ifc(path: Path, reader: str):
-    if reader == "qe":
-        return read_qe_q2r_ifc(path)
-    if reader == "phonopy":
-        return read_phonopy_ifc(path)
-    return read_ifc(path, reader=reader)
-
-
-def _enforce_asr_on_self_terms(ifc: IFCData) -> tuple[IFCData, float]:
-    """Enforce translational ASR by correcting only the R=(0,0,0) term."""
-
-    ndof = len(ifc.masses) * ifc.dof_per_atom
-    terms = list(ifc.terms)
-    phi_sum = np.zeros((ndof, ndof), dtype=np.complex128)
-    r0_idx = None
-    for idx, term in enumerate(terms):
-        block = np.asarray(term.block, dtype=np.complex128)
-        phi_sum += block
-        if term.dx == 0 and term.dy == 0 and term.dz == 0:
-            r0_idx = idx
-    if r0_idx is None:
-        raise ValueError("Missing IFC term at translation (0,0,0); cannot enforce ASR.")
-
-    residual = np.zeros((ndof, ifc.dof_per_atom), dtype=np.complex128)
-    for beta in range(ifc.dof_per_atom):
-        cols = np.arange(beta, ndof, ifc.dof_per_atom)
-        residual[:, beta] = np.sum(phi_sum[:, cols], axis=1)
-    residual_max = float(np.max(np.abs(residual)))
-
-    corrected = np.asarray(terms[r0_idx].block, dtype=np.complex128).copy()
-    for row in range(ndof):
-        atom_i = row // ifc.dof_per_atom
-        for beta in range(ifc.dof_per_atom):
-            col = atom_i * ifc.dof_per_atom + beta
-            corrected[row, col] -= residual[row, beta]
-    corrected = 0.5 * (corrected + corrected.conj().T)
-    terms[r0_idx] = IFCTerm(dx=0, dy=0, dz=0, block=corrected)
-
-    md = dict(ifc.metadata)
-    md["asr_enforced"] = True
-    ifc_corr = IFCData(
-        masses=np.asarray(ifc.masses, dtype=float),
-        dof_per_atom=ifc.dof_per_atom,
-        terms=tuple(terms),
-        units=ifc.units,
-        metadata=md,
-        lattice_vectors=ifc.lattice_vectors,
-        atom_positions=ifc.atom_positions,
-        atom_symbols=ifc.atom_symbols,
-        index_convention=ifc.index_convention,
-    )
-    return ifc_corr, residual_max
+from negfpy.io import read_ifc
+from negfpy.modeling import enforce_translational_asr_on_self_term, qe_omega_to_cm1, qe_omega_to_thz
 
 
 def _direct_dynamical(ifc, kx: float, ky: float, kz: float) -> np.ndarray:
@@ -107,10 +52,10 @@ def main() -> None:
     parser.add_argument("--save", type=Path, default=Path("outputs/graphene_dispersion_gkmg_thz.png"))
     args = parser.parse_args()
 
-    ifc = _read_ifc(args.ifc, reader=args.reader)
+    ifc = read_ifc(args.ifc, reader=args.reader)
     asr_residual_max = None
     if args.enforce_asr:
-        ifc, asr_residual_max = _enforce_asr_on_self_terms(ifc)
+        ifc, asr_residual_max = enforce_translational_asr_on_self_term(ifc)
 
     # Reduced coordinates in reciprocal-basis units.
     gamma = (0.0, 0.0, 0.0)

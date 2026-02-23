@@ -522,6 +522,3 @@ def transmission_kavg_adaptive(
         info["n_rejected"] = int(len(rejected))
         info["rejected"] = rejected
     return float(np.mean(vals)), info
-    eta_dev = float(eta if eta_device is None else eta_device)
-    if eta_dev < 0.0:
-        raise ValueError("eta_device must be non-negative.")
