@@ -1,0 +1,39 @@
+@Size
+The dimension of the system
+2
+The spring matrix size and the number of layer in center(ML,MR,ML0,MR0,N_C)
+24 24 24 24 1
+The number of DOF in each layer of the center (N_C numbers)
+24
+The cut-off unit cell index in the transverse direction (kx and ky direction)
+3 0
+
+
+@Material
+The lattice constant in the transverse direction (a_x,a_y). For 2D structure, only the first number is used. (in units of nm)
+1 0
+The reference mass (in units of u, atomic unit)
+118.71
+the thickness 
+1
+
+
+@Runing
+The k1 samples, kmin,kmax and dk. Be careful of the bullion zone. (-0.5~0.5 or 0~1)
+-0.5 0.5 0.01
+the k2 samples, for 3D calcualtion. Ingored in 2D calculation.
+-0.5 0.5 0.01
+The omega sample (or energy sample for electron) wmin,wmax,dw
+0.001 0.8 0.02
+The small number used in Gr
+0.000000001
+
+
+
+
+
+
+
+
+
+

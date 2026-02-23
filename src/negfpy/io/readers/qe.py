@@ -76,22 +76,24 @@ def read_qe_q2r_ifc(source: Any) -> IFCData:
     lattice_vectors = None
     born_charges = None
     if line in {"T", "F"}:
+        has_long_range = (line == "T")
         i += 1
-        eps = []
-        for _ in range(3):
-            i, row = _next_nonempty(lines, i)
-            eps.append([float(x) for x in row.split()[:3]])
-            i += 1
-        born = np.zeros((nat, 3, 3), dtype=float)
-        for ia in range(nat):
-            i, _ = _next_nonempty(lines, i)  # atom index line
-            i += 1
-            for a in range(3):
+        if has_long_range:
+            eps = []
+            for _ in range(3):
                 i, row = _next_nonempty(lines, i)
-                born[ia, a, :] = [float(x) for x in row.split()[:3]]
+                eps.append([float(x) for x in row.split()[:3]])
                 i += 1
-        lattice_vectors = np.asarray(eps, dtype=float)
-        born_charges = born
+            born = np.zeros((nat, 3, 3), dtype=float)
+            for ia in range(nat):
+                i, _ = _next_nonempty(lines, i)  # atom index line
+                i += 1
+                for a in range(3):
+                    i, row = _next_nonempty(lines, i)
+                    born[ia, a, :] = [float(x) for x in row.split()[:3]]
+                    i += 1
+            lattice_vectors = np.asarray(eps, dtype=float)
+            born_charges = born
 
     i, line = _next_nonempty(lines, i)
     nr_toks = line.split()

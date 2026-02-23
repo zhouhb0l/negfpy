@@ -4,5 +4,6 @@
     "python.terminal.activateEnvironment": true,
     "python.analysis.extraPaths": ["./src"],
     "python-envs.pythonProjects": [],
-    "python.analysis.typeCheckingMode": "basic"
+    "python.analysis.typeCheckingMode": "basic",
+    "chatgpt.commentCodeLensEnabled": true
 }

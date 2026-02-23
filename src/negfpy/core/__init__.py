@@ -9,7 +9,13 @@ from .dos import (
 )
 from .dispersion import lead_dynamical_matrix, lead_phonon_dispersion_3d, leads_phonon_dispersion_3d
 from .negf import device_green_function, transmission, transmission_kavg, transmission_kavg_adaptive
-from .surface_gf import surface_gf, surface_gf_generalized_eigen, surface_gf_sancho_rubio
+from .surface_gf import (
+    surface_gf,
+    surface_gf_generalized_eigen,
+    surface_gf_generalized_eigen_svd,
+    surface_gf_legacy_eigen_svd,
+    surface_gf_sancho_rubio,
+)
 from .thermal_current import (
     heat_current_1d,
     heat_current_density_3d,
@@ -38,6 +44,8 @@ __all__ = [
     "device_green_function",
     "surface_gf",
     "surface_gf_generalized_eigen",
+    "surface_gf_generalized_eigen_svd",
+    "surface_gf_legacy_eigen_svd",
     "surface_gf_sancho_rubio",
     "transmission",
     "transmission_kavg",

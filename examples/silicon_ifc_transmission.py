@@ -72,7 +72,7 @@ def main() -> None:
         "--surface-gf-method",
         type=str,
         default="sancho_rubio",
-        choices=["sancho_rubio", "generalized_eigen"],
+        choices=["sancho_rubio", "generalized_eigen", "generalized_eigen_svd", "legacy_eigen_svd"],
         help="Surface Green's function solver",
     )
     parser.add_argument(

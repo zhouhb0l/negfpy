@@ -129,12 +129,14 @@ def _build_system_matrix_and_contact_sigmas(
     lead_left: LeadLike,
     lead_right: LeadLike,
     eta: float,
+    eta_device: float | None = None,
     kpar: KPar = None,
     device_to_lead_left: Array | None = None,
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
 ) -> tuple[csc_matrix, Array, Array, Array, Array]:
     dev = _resolve_device(device=device, kpar=kpar)
     left = _resolve_lead_blocks(lead=lead_left, kpar=kpar)
@@ -143,6 +145,34 @@ def _build_system_matrix_and_contact_sigmas(
     npl = dev.dof_per_layer
     n_layers = dev.n_layers
     dim = n_layers * npl
+    eta_dev = float(eta if eta_device is None else eta_device)
+    if eta_dev < 0.0:
+        raise ValueError("eta_device must be non-negative.")
+    eta_lead = float(eta)
+    omega_eff = float(omega)
+
+    if omega_scale is not None:
+        scale = float(omega_scale)
+        if scale <= 0.0:
+            raise ValueError("omega_scale must be positive when provided.")
+        scale2 = scale * scale
+        omega_eff = omega_eff / scale
+        eta_lead = eta_lead / scale
+        eta_dev = eta_dev / scale
+        dev = Device1D(
+            onsite_blocks=[np.asarray(b, dtype=np.complex128) / scale2 for b in dev.onsite_blocks],
+            coupling_blocks=[np.asarray(b, dtype=np.complex128) / scale2 for b in dev.coupling_blocks],
+        )
+        left = LeadBlocks(
+            d00=np.asarray(left.d00, dtype=np.complex128) / scale2,
+            d01=np.asarray(left.d01, dtype=np.complex128) / scale2,
+            d10=None if left.d10 is None else np.asarray(left.d10, dtype=np.complex128) / scale2,
+        )
+        right = LeadBlocks(
+            d00=np.asarray(right.d00, dtype=np.complex128) / scale2,
+            d01=np.asarray(right.d01, dtype=np.complex128) / scale2,
+            d10=None if right.d10 is None else np.asarray(right.d10, dtype=np.complex128) / scale2,
+        )
 
     if device_to_lead_left is None:
         # Backward-compatible default for periodic matched contacts.
@@ -154,6 +184,9 @@ def _build_system_matrix_and_contact_sigmas(
         vdl_right = right.d01
     else:
         vdl_right = np.asarray(device_to_lead_right, dtype=np.complex128)
+    if omega_scale is not None:
+        vdl_left = vdl_left / (float(omega_scale) * float(omega_scale))
+        vdl_right = vdl_right / (float(omega_scale) * float(omega_scale))
 
     ncl = vdl_left.shape[0]
     ncr = vdl_right.shape[0]
@@ -180,21 +213,21 @@ def _build_system_matrix_and_contact_sigmas(
 
     dmat = _assemble_device_matrix_sparse(dev)
     sigma_l_block = _self_energy_contact(
-        omega=omega,
+        omega=omega_eff,
         lead=left,
         device_to_lead=vdl_left,
-        eta=eta,
+        eta=eta_lead,
         surface_gf_method=surface_gf_method,
     )
     sigma_r_block = _self_energy_contact(
-        omega=omega,
+        omega=omega_eff,
         lead=right,
         device_to_lead=vdl_right,
-        eta=eta,
+        eta=eta_lead,
         surface_gf_method=surface_gf_method,
     )
 
-    z = (omega + 1j * eta) ** 2
+    z = (omega_eff + 1j * eta_dev) ** 2
     a = (z * eye(dim, dtype=np.complex128, format="csc") - dmat).tolil()
     a[np.ix_(idx_l, idx_l)] = a[np.ix_(idx_l, idx_l)] - sigma_l_block
     a[np.ix_(idx_r, idx_r)] = a[np.ix_(idx_r, idx_r)] - sigma_r_block
@@ -208,12 +241,14 @@ def device_green_function(
     lead_left: LeadLike,
     lead_right: LeadLike,
     eta: float = 1e-8,
+    eta_device: float | None = None,
     kpar: KPar = None,
     device_to_lead_left: Array | None = None,
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
 ) -> tuple[Array, Array, Array]:
     """Return (G, Sigma_L, Sigma_R) for the finite device."""
 
@@ -228,12 +263,14 @@ def device_green_function(
         lead_left=lead_left,
         lead_right=lead_right,
         eta=eta,
+        eta_device=eta_device,
         kpar=kpar,
         device_to_lead_left=device_to_lead_left,
         device_to_lead_right=device_to_lead_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
         surface_gf_method=surface_gf_method,
+        omega_scale=omega_scale,
     )
     sigma_l, sigma_r = _embed_self_energies(
         sigma_l_block=sigma_l_block,
@@ -255,12 +292,14 @@ def transmission(
     lead_left: LeadLike,
     lead_right: LeadLike,
     eta: float = 1e-8,
+    eta_device: float | None = None,
     kpar: KPar = None,
     device_to_lead_left: Array | None = None,
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
 ) -> float:
     """Return coherent phonon transmission T(omega)."""
 
@@ -275,12 +314,14 @@ def transmission(
         lead_left=lead_left,
         lead_right=lead_right,
         eta=eta,
+        eta_device=eta_device,
         kpar=kpar,
         device_to_lead_left=device_to_lead_left,
         device_to_lead_right=device_to_lead_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
         surface_gf_method=surface_gf_method,
+        omega_scale=omega_scale,
     )
 
     gamma_l_block = _broadening(sigma_l_block)
@@ -304,11 +345,13 @@ def transmission_kavg(
     lead_right: LeadLike,
     kpoints: list[tuple[float, ...]],
     eta: float = 1e-8,
+    eta_device: float | None = None,
     device_to_lead_left: Array | None = None,
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
 ) -> float:
     """Return k_parallel-averaged transmission over supplied k-point list."""
 
@@ -321,12 +364,14 @@ def transmission_kavg(
             lead_left=lead_left,
             lead_right=lead_right,
             eta=eta,
+            eta_device=eta_device,
             kpar=kpar,
             device_to_lead_left=device_to_lead_left,
             device_to_lead_right=device_to_lead_right,
             contact_left_indices=contact_left_indices,
             contact_right_indices=contact_right_indices,
             surface_gf_method=surface_gf_method,
+            omega_scale=omega_scale,
         )
         for kpar in kpoints
     ]
@@ -340,12 +385,14 @@ def transmission_kavg_adaptive(
     lead_right: LeadLike,
     kpoints: list[tuple[float, ...]],
     eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
+    eta_device: float | None = None,
     min_success_fraction: float = 0.0,
     device_to_lead_left: Array | None = None,
     device_to_lead_right: Array | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
     nonnegative_tolerance: float = 0.0,
     max_channel_factor: float | None = None,
     collect_rejected: bool = False,
@@ -385,12 +432,14 @@ def transmission_kavg_adaptive(
                     lead_left=lead_left,
                     lead_right=lead_right,
                     eta=eta,
+                    eta_device=eta_device,
                     kpar=kpar,
                     device_to_lead_left=device_to_lead_left,
                     device_to_lead_right=device_to_lead_right,
                     contact_left_indices=contact_left_indices,
                     contact_right_indices=contact_right_indices,
                     surface_gf_method=surface_gf_method,
+                    omega_scale=omega_scale,
                 )
             except Exception:
                 if collect_rejected:
@@ -473,3 +522,6 @@ def transmission_kavg_adaptive(
         info["n_rejected"] = int(len(rejected))
         info["rejected"] = rejected
     return float(np.mean(vals)), info
+    eta_dev = float(eta if eta_device is None else eta_device)
+    if eta_dev < 0.0:
+        raise ValueError("eta_device must be non-negative.")

@@ -115,6 +115,124 @@ def surface_gf_generalized_eigen(
     return np.linalg.inv(z * eye - d00.astype(np.complex128, copy=False) - sigma)
 
 
+def surface_gf_generalized_eigen_svd(
+    omega: float,
+    d00: Array,
+    d01: Array,
+    d10: Array | None = None,
+    eta: float = 1e-8,
+    unit_circle_tol: float = 1e-10,
+    svd_rcond: float = 1e-12,
+) -> Array:
+    """Return retarded surface GF via generalized-eigen + SVD pseudo-inverse.
+
+    This follows the same QEP linearization as ``surface_gf_generalized_eigen``
+    but uses an SVD pseudo-inverse for the mode matrix to improve robustness
+    near degenerate/ill-conditioned mode subspaces.
+    """
+
+    n = int(d00.shape[0])
+    if d00.shape != (n, n) or d01.shape != (n, n):
+        raise ValueError("d00 and d01 must be square matrices of the same shape.")
+    if svd_rcond <= 0.0:
+        raise ValueError("svd_rcond must be positive.")
+
+    z = (omega + 1j * eta) ** 2
+    eye = np.eye(n, dtype=np.complex128)
+    a = d00.astype(np.complex128, copy=False) - z * eye
+    b = _resolve_d10(d01=d01, d10=d10)
+    c = d01.astype(np.complex128, copy=False)
+
+    mat_a = np.block([[-a, -b], [eye, np.zeros((n, n), dtype=np.complex128)]])
+    mat_b = np.block([[c, np.zeros((n, n), dtype=np.complex128)], [np.zeros((n, n), dtype=np.complex128), eye]])
+    evals, evecs = eig(mat_a, mat_b, right=True)
+    finite = np.isfinite(evals)
+    evals = evals[finite]
+    evecs = evecs[:, finite]
+    if evals.size < n:
+        raise RuntimeError("Generalized-eigen-SVD surface GF failed: insufficient finite eigenmodes.")
+
+    absvals = np.abs(evals)
+    inside = np.where(absvals < (1.0 - float(unit_circle_tol)))[0]
+    if inside.size >= n:
+        pick = inside[np.argsort(absvals[inside])[:n]]
+    else:
+        pick = np.argsort(absvals)[:n]
+
+    lam = evals[pick]
+    phi = evecs[n:, pick]
+    phi_pinv = np.linalg.pinv(phi, rcond=float(svd_rcond))
+    transfer = phi @ np.diag(lam) @ phi_pinv
+    sigma = c @ transfer
+    return np.linalg.inv(z * eye - d00.astype(np.complex128, copy=False) - sigma)
+
+
+def _pinv_legacy_svd(mat: Array) -> Array:
+    """Pseudo-inverse with legacy SVD cutoff max(tiny, smax*eps)."""
+
+    u, s, vh = np.linalg.svd(mat, full_matrices=True)
+    if s.size == 0:
+        return np.zeros((mat.shape[1], mat.shape[0]), dtype=np.complex128)
+    cutoff = max(np.finfo(float).tiny, float(s[0]) * np.finfo(float).eps)
+    sinv = np.zeros_like(s, dtype=np.float64)
+    keep = s >= cutoff
+    sinv[keep] = 1.0 / s[keep]
+    return (vh.conj().T[:, : s.size] * sinv) @ u[:, : s.size].conj().T
+
+
+def surface_gf_legacy_eigen_svd(
+    omega: float,
+    d00: Array,
+    d01: Array,
+    d10: Array | None = None,
+    eta: float = 1e-8,
+    unit_circle_tol: float = 0.0,
+) -> Array:
+    """Return retarded surface GF using a legacy generalized-eigen SVD path.
+
+    This mirrors old Fortran ``sfg_solve`` style:
+    1) Keep all finite eigenmodes with |lambda| < 1 - unit_circle_tol.
+    2) Build rectangular mode matrix and SVD pseudo-inverse with machine cutoff.
+    3) Compute g11 then update to g00 via Dyson-like correction.
+    """
+
+    n = int(d00.shape[0])
+    if d00.shape != (n, n) or d01.shape != (n, n):
+        raise ValueError("d00 and d01 must be square matrices of the same shape.")
+
+    z = (omega + 1j * eta) ** 2
+    eye = np.eye(n, dtype=np.complex128)
+    h01 = d01.astype(np.complex128, copy=False)
+    h10 = _resolve_d10(d01=d01, d10=d10)
+    th00 = z * eye - d00.astype(np.complex128, copy=False)
+    th11 = th00.copy()
+
+    mat_a = np.block([[th11, -eye], [h10, np.zeros((n, n), dtype=np.complex128)]])
+    mat_b = np.block([[h01, np.zeros((n, n), dtype=np.complex128)], [np.zeros((n, n), dtype=np.complex128), eye]])
+    evals, evecs = eig(mat_a, mat_b, right=True)
+
+    finite = np.isfinite(evals)
+    evals = evals[finite]
+    evecs = evecs[:, finite]
+    if evals.size == 0:
+        raise RuntimeError("Legacy-eigen-SVD surface GF failed: no finite eigenmodes.")
+
+    decaying = np.where(np.abs(evals) < (1.0 - float(unit_circle_tol)))[0]
+    if decaying.size == 0:
+        raise RuntimeError("Legacy-eigen-SVD surface GF failed: no decaying eigenmodes.")
+
+    lam = evals[decaying]
+    # For this linearization, upper block matches old transE selection.
+    trans_e = evecs[:n, decaying]
+    trans_e_inv = _pinv_legacy_svd(trans_e)
+    gam = np.diag(lam)
+
+    g11_inv = th11 - h01 @ trans_e @ gam @ trans_e_inv
+    g11 = np.linalg.inv(g11_inv)
+    g00_inv = th00 - h01 @ g11 @ h10
+    return np.linalg.inv(g00_inv)
+
+
 def surface_gf(
     omega: float,
     d00: Array,
@@ -126,6 +244,7 @@ def surface_gf(
     tol: float = 1e-12,
     maxiter: int = 200,
     unit_circle_tol: float = 1e-10,
+    svd_rcond: float = 1e-12,
 ) -> Array:
     """Return retarded surface GF using the selected solver."""
 
@@ -149,7 +268,26 @@ def surface_gf(
             eta=eta,
             unit_circle_tol=unit_circle_tol,
         )
+    if m in {"generalized_eigen_svd", "generalized-eigen-svd", "ge_svd", "gep_svd"}:
+        return surface_gf_generalized_eigen_svd(
+            omega=omega,
+            d00=d00,
+            d01=d01,
+            d10=d10,
+            eta=eta,
+            unit_circle_tol=unit_circle_tol,
+            svd_rcond=svd_rcond,
+        )
+    if m in {"legacy_eigen_svd", "legacy-eigen-svd", "legacy", "old_svd"}:
+        return surface_gf_legacy_eigen_svd(
+            omega=omega,
+            d00=d00,
+            d01=d01,
+            d10=d10,
+            eta=eta,
+            unit_circle_tol=unit_circle_tol,
+        )
     raise ValueError(
         "Unknown surface GF method. Use one of: "
-        "'sancho_rubio', 'generalized_eigen'."
+        "'sancho_rubio', 'generalized_eigen', 'generalized_eigen_svd', 'legacy_eigen_svd'."
     )

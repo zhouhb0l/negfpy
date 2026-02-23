@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from negfpy.core import transmission
 from negfpy.models import (
@@ -156,7 +157,17 @@ def test_material_kspace_generalized_eigen_matches_sancho_scalar() -> None:
         eta=1e-8,
         surface_gf_method="generalized_eigen",
     )
+    t_svd = transmission(
+        omega,
+        mat_device,
+        mat_lead,
+        mat_lead,
+        kpar=kpar,
+        eta=1e-8,
+        surface_gf_method="generalized_eigen_svd",
+    )
     assert abs(t_sr - t_ge) < 1e-10
+    assert abs(t_sr - t_svd) < 1e-10
 
 
 def test_material_kspace_multidof_generalized_eigen_runs() -> None:
@@ -187,3 +198,30 @@ def test_material_kspace_multidof_generalized_eigen_runs() -> None:
     )
     assert np.isfinite(tval)
     assert tval > -1e-8
+
+
+def test_material_kspace_rejects_kpar_with_more_than_two_components() -> None:
+    fc00_terms = {(0, 0): np.array([[2.0]], dtype=float)}
+    fc01_terms = {(0, 0): np.array([[-1.0]], dtype=float)}
+    params = MaterialKspaceParams(
+        masses=np.array([1.0]),
+        fc00_terms=fc00_terms,
+        fc01_terms=fc01_terms,
+        dof_per_atom=1,
+    )
+    lead = material_kspace_lead(params)
+
+    with pytest.raises(ValueError, match="at most two transverse components"):
+        lead.blocks((0.1, 0.2, 0.3))
+
+
+def test_toy_lattice_models_reject_invalid_kpar_dimensions() -> None:
+    sq = SquareLatticeParams(mass=1.0, spring_x=1.0, spring_y=0.8)
+    square_lead = square_lattice_lead(sq)
+    with pytest.raises(ValueError, match="at most one transverse component"):
+        square_lead.blocks((0.1, 0.2))
+
+    cb = CubicLatticeParams(mass=1.0, spring_x=1.0, spring_y=0.8, spring_z=0.6)
+    cubic_lead = cubic_lattice_lead(cb)
+    with pytest.raises(ValueError, match="at most two transverse components"):
+        cubic_lead.blocks((0.1, 0.2, 0.3))

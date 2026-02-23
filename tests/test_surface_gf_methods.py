@@ -11,10 +11,20 @@ def test_surface_gf_generalized_eigen_matches_sancho_rubio_chain() -> None:
 
     g_sr = surface_gf(omega=w, d00=lead.d00, d01=lead.d01, d10=lead.d10, eta=1e-8, method="sancho_rubio")
     g_ge = surface_gf(omega=w, d00=lead.d00, d01=lead.d01, d10=lead.d10, eta=1e-8, method="generalized_eigen")
+    g_svd = surface_gf(
+        omega=w,
+        d00=lead.d00,
+        d01=lead.d01,
+        d10=lead.d10,
+        eta=1e-8,
+        method="generalized_eigen_svd",
+    )
 
     assert np.all(np.isfinite(g_sr))
     assert np.all(np.isfinite(g_ge))
+    assert np.all(np.isfinite(g_svd))
     assert np.linalg.norm(g_sr - g_ge) < 1e-8
+    assert np.linalg.norm(g_sr - g_svd) < 1e-8
 
 
 def test_transmission_generalized_eigen_matches_sancho_rubio_chain() -> None:
@@ -39,7 +49,17 @@ def test_transmission_generalized_eigen_matches_sancho_rubio_chain() -> None:
         eta=1e-8,
         surface_gf_method="generalized_eigen",
     )
+    t_svd = transmission(
+        omega=w,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        eta=1e-8,
+        surface_gf_method="generalized_eigen_svd",
+    )
 
     assert np.isfinite(t_sr)
     assert np.isfinite(t_ge)
+    assert np.isfinite(t_svd)
     assert abs(t_sr - t_ge) < 1e-7
+    assert abs(t_sr - t_svd) < 1e-7

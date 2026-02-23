@@ -1,0 +1,27 @@
+I try to use one dimension chain to debug this version. 
+29 Jan, Perfect 1D chain with nearest neighbour works well
+
+1) sgf.f90, subroutine self_energy, nL=size(VLC,dim=1) should be nL=size(VLC,dim=2) similar to nR
+2) force.f90, read_force_constants, kC_off should be assgined from 1 to N_C-1, not N_C
+3) Evaluate N_band is wrong when N_C=1. N_band=MC(1)-1
+
+This version works for various cases of perfect one dimension chain
+
+This version works for square lattice, one only one layer in the center (source 4 has two layers, that is the only difference)
+
+An importnat change on 1 Feb:
+The index flip during the calculation of left lead self_enery. The degrees of freedom inside each layer should should be flippled, such as the x,y,x direction index
+
+An important correction: The calculation of Gamma, should be i(\Sigma^r-\Sigma^a), but -2Im\Sigma^r is wrong.
+
+need to check whether we need the flip of index
+
+Finally this version works for BP!!!
+
+I will do some clean up from previous versions
+
+
+
+
+
+

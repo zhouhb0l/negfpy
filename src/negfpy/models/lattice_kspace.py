@@ -28,12 +28,16 @@ class CubicLatticeParams:
 def _get_ky(kpar: tuple[float, ...] | None) -> float:
     if kpar is None or len(kpar) == 0:
         return 0.0
+    if len(kpar) > 1:
+        raise ValueError("Square-lattice kpar must contain at most one transverse component: (ky,).")
     return float(kpar[0])
 
 
 def _get_ky_kz(kpar: tuple[float, ...] | None) -> tuple[float, float]:
     if kpar is None:
         return 0.0, 0.0
+    if len(kpar) > 2:
+        raise ValueError("Cubic-lattice kpar must contain at most two transverse components: (ky,) or (ky, kz).")
     if len(kpar) == 1:
         return float(kpar[0]), 0.0
     return float(kpar[0]), float(kpar[1])

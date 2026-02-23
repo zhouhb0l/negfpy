@@ -84,6 +84,8 @@ def _parse_ky_kz(kpar: KPar) -> tuple[float, float]:
         return 0.0, 0.0
     if len(kpar) == 0:
         return 0.0, 0.0
+    if len(kpar) > 2:
+        raise ValueError("kpar must contain at most two transverse components: (ky,) or (ky, kz).")
     if len(kpar) == 1:
         return float(kpar[0]), 0.0
     return float(kpar[0]), float(kpar[1])
