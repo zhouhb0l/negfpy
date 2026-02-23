@@ -39,16 +39,34 @@ def surface_gf_sancho_rubio(
     eps_s = eps.copy()
 
     for _ in range(maxiter):
-        g = np.linalg.inv(z * eye - eps)
-        a_g_b = alpha @ g @ beta
-        b_g_a = beta @ g @ alpha
+        try:
+            with np.errstate(over="raise", invalid="raise", divide="raise"):
+                g = np.linalg.inv(z * eye - eps)
+                a_g_b = alpha @ g @ beta
+                b_g_a = beta @ g @ alpha
 
-        eps_s_new = eps_s + a_g_b
-        eps_new = eps + a_g_b + b_g_a
-        alpha_new = alpha @ g @ alpha
-        beta_new = beta @ g @ beta
+                eps_s_new = eps_s + a_g_b
+                eps_new = eps + a_g_b + b_g_a
+                alpha_new = alpha @ g @ alpha
+                beta_new = beta @ g @ beta
+        except FloatingPointError as exc:
+            raise RuntimeError(
+                "Sancho-Rubio decimation became numerically unstable. "
+                "Try a larger eta or a different surface_gf method."
+            ) from exc
 
-        err = max(np.linalg.norm(alpha_new), np.linalg.norm(beta_new))
+        if not (
+            np.all(np.isfinite(eps_s_new))
+            and np.all(np.isfinite(eps_new))
+            and np.all(np.isfinite(alpha_new))
+            and np.all(np.isfinite(beta_new))
+        ):
+            raise RuntimeError(
+                "Sancho-Rubio decimation produced non-finite values. "
+                "Try a larger eta or a different surface_gf method."
+            )
+
+        err = max(float(np.max(np.abs(alpha_new))), float(np.max(np.abs(beta_new))))
 
         eps_s = eps_s_new
         eps = eps_new

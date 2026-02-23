@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 
 from negfpy.core import transmission, transmission_kavg_adaptive
 from negfpy.io import read_ifc
@@ -120,6 +122,12 @@ def main() -> None:
         choices=["sancho_rubio", "generalized_eigen", "generalized_eigen_svd", "legacy_eigen_svd"],
     )
     parser.add_argument("--save", type=Path, default=Path("outputs/graphene_transmission_kavg.png"))
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="Print progress every N omega points (set <=0 to disable).",
+    )
     args = parser.parse_args()
     omega_scale = None
     if args.omega_scale_mode == "ev":
@@ -157,9 +165,27 @@ def main() -> None:
         raise ValueError("Resolved omega-max must be greater than omega-min.")
 
     omegas = np.linspace(args.omega_min, omega_max, args.nw)
+    start_time = time.perf_counter()
+    total_omega = int(len(omegas))
+    progress_every = int(args.progress_every)
+
+    def _report_progress(done: int) -> None:
+        if progress_every <= 0:
+            return
+        if done == total_omega or done == 1 or (done % progress_every == 0):
+            elapsed = time.perf_counter() - start_time
+            frac = done / total_omega
+            eta_s = (elapsed / frac) - elapsed if frac > 0.0 else float("nan")
+            print(
+                f"[progress] {done}/{total_omega} ({100.0 * frac:5.1f}%) "
+                f"elapsed={elapsed:7.1f}s eta={eta_s:7.1f}s"
+            )
+
+    tvals: npt.NDArray[np.float64]
     if args.nk <= 1:
-        tvals = np.array(
-            [
+        tvals_list: list[float] = []
+        for i, w in enumerate(omegas, start=1):
+            tvals_list.append(
                 transmission(
                     w,
                     device=device,
@@ -171,17 +197,17 @@ def main() -> None:
                     surface_gf_method=args.surface_gf_method,
                     omega_scale=omega_scale,
                 )
-                for w in omegas
-            ],
-            dtype=float,
-        )
+            )
+            _report_progress(i)
+        tvals = np.asarray(tvals_list, dtype=float)
     else:
         kys = _kmesh_1d(args.nk, mode=args.kmesh)
         kpts = [(ky,) for ky in kys]
-        tvals: list[float] = []
-        for w in omegas:
+        tvals_list: list[float] = []
+        for i, w in enumerate(omegas, start=1):
             if w <= 0.0:
-                tvals.append(0.0)
+                tvals_list.append(0.0)
+                _report_progress(i)
                 continue
             tavg, _ = transmission_kavg_adaptive(
                 omega=float(w),
@@ -198,8 +224,9 @@ def main() -> None:
                 max_channel_factor=1.5,
                 collect_rejected=False,
             )
-            tvals.append(float(tavg))
-        tvals = np.asarray(tvals, dtype=float)
+            tvals_list.append(float(tavg))
+            _report_progress(i)
+        tvals = np.asarray(tvals_list, dtype=float)
 
     tvals = np.where(tvals < 0.0, np.maximum(tvals, -1e-12), tvals)
     tvals = np.clip(tvals, 0.0, None)

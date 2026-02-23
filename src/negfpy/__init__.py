@@ -28,6 +28,7 @@ from .core import (
     transmission,
     transmission_kavg,
     transmission_kavg_adaptive,
+    transmission_kavg_adaptive_global_eta,
 )
 from .models import (
     ChainParams,
@@ -94,6 +95,7 @@ __all__ = [
     "transmission",
     "transmission_kavg",
     "transmission_kavg_adaptive",
+    "transmission_kavg_adaptive_global_eta",
     "heat_current_from_spectrum",
     "heat_current_1d",
     "heat_current_per_length_2d",

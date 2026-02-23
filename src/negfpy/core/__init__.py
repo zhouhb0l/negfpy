@@ -8,7 +8,13 @@ from .dos import (
     leads_surface_dos_spectrum,
 )
 from .dispersion import lead_dynamical_matrix, lead_phonon_dispersion_3d, leads_phonon_dispersion_3d
-from .negf import device_green_function, transmission, transmission_kavg, transmission_kavg_adaptive
+from .negf import (
+    device_green_function,
+    transmission,
+    transmission_kavg,
+    transmission_kavg_adaptive,
+    transmission_kavg_adaptive_global_eta,
+)
 from .surface_gf import (
     surface_gf,
     surface_gf_generalized_eigen,
@@ -50,6 +56,7 @@ __all__ = [
     "transmission",
     "transmission_kavg",
     "transmission_kavg_adaptive",
+    "transmission_kavg_adaptive_global_eta",
     "heat_current_from_spectrum",
     "heat_current_1d",
     "heat_current_per_length_2d",

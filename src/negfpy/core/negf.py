@@ -522,3 +522,148 @@ def transmission_kavg_adaptive(
         info["n_rejected"] = int(len(rejected))
         info["rejected"] = rejected
     return float(np.mean(vals)), info
+
+
+def transmission_kavg_adaptive_global_eta(
+    omega: float,
+    device: DeviceLike,
+    lead_left: LeadLike,
+    lead_right: LeadLike,
+    kpoints: list[tuple[float, ...]],
+    eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
+    eta_device: float | None = None,
+    min_success_fraction: float = 0.0,
+    device_to_lead_left: Array | None = None,
+    device_to_lead_right: Array | None = None,
+    contact_left_indices: ContactIndices = None,
+    contact_right_indices: ContactIndices = None,
+    surface_gf_method: str = "sancho_rubio",
+    omega_scale: float | None = None,
+    nonnegative_tolerance: float = 0.0,
+    max_channel_factor: float | None = None,
+    collect_rejected: bool = False,
+) -> tuple[float, dict[str, object]]:
+    """Return adaptive k-averaged transmission using one eta per omega.
+
+    Tries eta values in order; for each eta, computes transmissions on all
+    k-points and checks quality filters. The first eta meeting the required
+    success fraction is accepted, so all accepted k-points for this omega
+    share the same broadening.
+    """
+
+    if len(kpoints) == 0:
+        raise ValueError("kpoints must contain at least one k-point.")
+    if len(eta_values) == 0:
+        raise ValueError("eta_values must contain at least one eta value.")
+    if not (0.0 <= min_success_fraction <= 1.0):
+        raise ValueError("min_success_fraction must be in [0, 1].")
+    if nonnegative_tolerance < 0.0:
+        raise ValueError("nonnegative_tolerance must be non-negative.")
+    if max_channel_factor is not None and max_channel_factor <= 0.0:
+        raise ValueError("max_channel_factor must be positive when provided.")
+
+    n_total = len(kpoints)
+    rejected_all: list[dict[str, object]] = []
+
+    for eta in eta_values:
+        vals: list[float] = []
+        rejected_eta: list[dict[str, object]] = []
+
+        for kpar in kpoints:
+            max_t_allowed: float | None = None
+            if max_channel_factor is not None:
+                lead_blk = _resolve_lead_blocks(lead=lead_left, kpar=kpar)
+                max_t_allowed = float(max_channel_factor) * float(lead_blk.d00.shape[0])
+            try:
+                tval = transmission(
+                    omega=omega,
+                    device=device,
+                    lead_left=lead_left,
+                    lead_right=lead_right,
+                    eta=eta,
+                    eta_device=eta_device,
+                    kpar=kpar,
+                    device_to_lead_left=device_to_lead_left,
+                    device_to_lead_right=device_to_lead_right,
+                    contact_left_indices=contact_left_indices,
+                    contact_right_indices=contact_right_indices,
+                    surface_gf_method=surface_gf_method,
+                    omega_scale=omega_scale,
+                )
+            except Exception:
+                if collect_rejected:
+                    rejected_eta.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": None,
+                            "reason": "exception",
+                        }
+                    )
+                continue
+
+            if not np.isfinite(tval):
+                if collect_rejected:
+                    rejected_eta.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": float(tval),
+                            "reason": "non_finite",
+                        }
+                    )
+                continue
+
+            if tval < -float(nonnegative_tolerance):
+                if collect_rejected:
+                    rejected_eta.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": float(tval),
+                            "reason": "negative",
+                        }
+                    )
+                continue
+
+            if max_t_allowed is not None and tval > max_t_allowed:
+                if collect_rejected:
+                    rejected_eta.append(
+                        {
+                            "omega": float(omega),
+                            "kpar": tuple(float(x) for x in kpar) if kpar is not None else (),
+                            "eta": float(eta),
+                            "t": float(tval),
+                            "reason": "over_channel_limit",
+                        }
+                    )
+                continue
+
+            vals.append(float(max(tval, 0.0)))
+
+        n_success = len(vals)
+        success_fraction = float(n_success / n_total)
+        if collect_rejected:
+            rejected_all.extend(rejected_eta)
+
+        if n_success > 0 and success_fraction >= min_success_fraction:
+            info: dict[str, object] = {
+                "n_total": int(n_total),
+                "n_success": int(n_success),
+                "n_failed": int(n_total - n_success),
+                "success_fraction": success_fraction,
+                "eta_selected": float(eta),
+                "eta_histogram": {float(e): (int(n_success) if float(e) == float(eta) else 0) for e in eta_values},
+            }
+            if collect_rejected:
+                info["n_rejected"] = int(len(rejected_all))
+                info["rejected"] = rejected_all
+            return float(np.mean(vals)), info
+
+    raise RuntimeError(
+        "No eta value satisfied global adaptive k-averaging quality threshold "
+        f"(required success_fraction >= {min_success_fraction:.3f})."
+    )
