@@ -70,6 +70,7 @@ from .modeling import (
     validate_material_kspace_params,
     validate_transport_connectivity,
 )
+from .workflows import run_ifc_bulk, write_input_template
 
 __all__ = [
     "Device1D",
@@ -143,4 +144,6 @@ __all__ = [
     "qe_omega_to_cm1",
     "qe_omega_to_ev",
     "qe_ev_to_omega",
+    "run_ifc_bulk",
+    "write_input_template",
 ]

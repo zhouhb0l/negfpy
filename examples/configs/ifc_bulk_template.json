@@ -1,0 +1,89 @@
+{
+  "run": {
+    "name": "bulk_transport_run",
+    "calculation": "transmission",
+    "output_dir": "outputs/bulk_ifc_runs",
+    "output_mode": "flat",
+    "studies_root": "studies",
+    "study": "bulk_study",
+    "material": "material",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "ifc": {
+    "path": "si444.fc",
+    "left_path": "si444.fc",
+    "center_path": "si444.fc",
+    "right_path": "si444.fc",
+    "reader": "qe",
+    "enforce_asr": false,
+    "dy_cutoff": null,
+    "dz_cutoff": null
+  },
+  "model": {
+    "n_layers": 30,
+    "principal_layer_size": 2,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "onsite_pinning": 0.0
+  },
+  "kmesh": {
+    "dimension": 2,
+    "mode": "auto",
+    "nk": 18,
+    "nk_low": 24,
+    "low_cm1": 120.0
+  },
+  "omega": {
+    "min": 0.0,
+    "max": null,
+    "n_points": 160,
+    "auto_max": true,
+    "auto_sample_nk": 12,
+    "safety_factor": 1.02,
+    "fmax_thz": null,
+    "fmax_cm1": null
+  },
+  "solver": {
+    "surface_gf_method": "generalized_eigen_svd",
+    "eta_scheme": "adaptive",
+    "eta_fixed": 0.0001,
+    "eta_device": null,
+    "eta_values": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "min_success_fraction": 0.7,
+    "max_channel_factor": 1.5,
+    "nonnegative_tolerance": 1e-08,
+    "collect_rejected": false,
+    "max_eta_over_omega": null,
+    "eta_ratio_cm1_min": null,
+    "omega_scale_mode": "none"
+  },
+  "dos": {
+    "normalize_per_mode": false,
+    "negative_tolerance": 1e-12
+  },
+  "dispersion": {
+    "kpar": [
+      0.0,
+      0.0
+    ],
+    "kx_min": 0.0,
+    "kx_max": 3.141592653589793,
+    "n_kx": 240,
+    "negative_tolerance": 1e-8,
+    "allow_unstable": false
+  }
+}
