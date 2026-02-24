@@ -456,6 +456,28 @@ def _drop_nyquist_transverse_terms(params, ifc_metadata: dict[str, Any]):
     return replace(params, fc00_terms=fc00, fc01_terms=fc01, fc10_terms=fc10), dropped
 
 
+def _apply_mass_mode(params, mass_mode_raw: str):
+    """Apply model.mass_mode to MaterialKspaceParams."""
+    mass_mode = str(mass_mode_raw).lower().replace("-", "_")
+    if mass_mode == "ifc":
+        return params, mass_mode
+    if mass_mode in {"unit", "ones", "legacy_unit"}:
+        return replace(params, masses=np.ones_like(params.masses, dtype=float)), "unit"
+    raise ValueError("model.mass_mode must be one of: ifc, unit.")
+
+
+def _apply_transverse_stability_controls(params, *, ifc_metadata: dict[str, Any], drop_nyquist: bool):
+    """Apply optional Nyquist drop and required Nyquist pair-symmetry stabilization."""
+    nyquist_info = {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+    out = params
+    if drop_nyquist:
+        out, nyquist_info = _drop_nyquist_transverse_terms(out, ifc_metadata=ifc_metadata)
+    # Always enforce Nyquist +/- pair symmetry for longest-range transverse
+    # terms to keep numerical behavior stable across interfaces.
+    out, pm_sym_info = _enforce_transverse_pm_symmetry(out, ifc_metadata=ifc_metadata)
+    return out, nyquist_info, pm_sym_info
+
+
 def _enforce_transverse_pm_symmetry(params, ifc_metadata: dict[str, Any] | None = None):
     """Complete missing +/- transverse terms for Nyquist shifts only.
 
@@ -1128,21 +1150,13 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         dtype=str(mcfg.get("dtype", "complex128")),
     )
     params = build_material_kspace_params(ifc=ifc_filtered, config=build_cfg)
-    mass_mode = str(mcfg.get("mass_mode", "ifc")).lower().replace("-", "_")
-    if mass_mode == "ifc":
-        pass
-    elif mass_mode in {"unit", "ones", "legacy_unit"}:
-        params = replace(params, masses=np.ones_like(params.masses, dtype=float))
-    else:
-        raise ValueError("model.mass_mode must be one of: ifc, unit.")
-
-    nyquist_info = {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+    params, mass_mode = _apply_mass_mode(params, mcfg.get("mass_mode", "ifc"))
     drop_nyquist = bool(mcfg.get("drop_nyquist_transverse", False))
-    if drop_nyquist:
-        params, nyquist_info = _drop_nyquist_transverse_terms(params, ifc_metadata=dict(ifc_filtered.metadata))
-    # Always enforce Nyquist +/- pair symmetry for longest-range transverse
-    # terms to keep numerical behavior stable across interfaces.
-    params, pm_sym_info = _enforce_transverse_pm_symmetry(params, ifc_metadata=dict(ifc_filtered.metadata))
+    params, nyquist_info, pm_sym_info = _apply_transverse_stability_controls(
+        params,
+        ifc_metadata=dict(ifc_filtered.metadata),
+        drop_nyquist=drop_nyquist,
+    )
 
     lead_left, lead_right, device_to_lead_left, device_to_lead_right = _build_interface_contacts(params)
     device = material_kspace_device(n_layers=n_layers, params=params)

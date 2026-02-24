@@ -72,6 +72,21 @@ Model stability defaults:
 - `model.drop_nyquist_transverse`: `false` by default (optional benchmark toggle)
 - Nyquist longest-range `+/-` symmetry is enforced internally for numerical stability.
 
+Recommended `model` block:
+
+```json
+"model": {
+  "n_layers": 30,
+  "principal_layer_size": null,
+  "auto_principal_layer_enlargement": true,
+  "infer_fc01_from_negative_dx": true,
+  "enforce_hermitian_fc00": true,
+  "mass_mode": "ifc",
+  "drop_nyquist_transverse": false,
+  "onsite_pinning": 0.0
+}
+```
+
 ## Config Sections
 
 - `run`: job name, calculation type, output path, plot/data/report switches

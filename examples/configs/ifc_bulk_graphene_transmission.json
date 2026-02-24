@@ -9,10 +9,10 @@
     "x_unit": "cm-1"
   },
   "ifc": {
-    "path": "graphene.fc",
-    "left_path": "graphene.fc",
-    "center_path": "graphene.fc",
-    "right_path": "graphene.fc",
+    "path": "../../studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc",
+    "left_path": "../../studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc",
+    "center_path": "../../studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc",
+    "right_path": "../../studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc",
     "reader": "qe",
     "enforce_asr": true,
     "dy_cutoff": null,
@@ -24,6 +24,8 @@
     "auto_principal_layer_enlargement": true,
     "infer_fc01_from_negative_dx": true,
     "enforce_hermitian_fc00": true,
+    "mass_mode": "ifc",
+    "drop_nyquist_transverse": false,
     "onsite_pinning": 0.0
   },
   "kmesh": {
