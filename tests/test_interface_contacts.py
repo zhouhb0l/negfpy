@@ -58,3 +58,36 @@ def test_rectangular_contact_coupling_with_dof_mismatch() -> None:
 
     assert np.isfinite(tval)
     assert 0.95 < tval < 1.05
+
+
+def test_kdependent_device_to_lead_callable_matches_explicit_array() -> None:
+    params = ChainParams(mass=1.0, spring=1.0)
+    lead = lead_blocks(params)
+    device = device_perfect_chain(n_layers=10, params=params)
+
+    vdl = np.array([[-1.0]], dtype=np.complex128)
+    t_explicit = transmission(
+        omega=1.0,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        eta=1e-8,
+        kpar=(0.1,),
+        device_to_lead_left=vdl,
+        device_to_lead_right=vdl,
+        contact_left_indices=[0],
+        contact_right_indices=[9],
+    )
+    t_callable = transmission(
+        omega=1.0,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        eta=1e-8,
+        kpar=(0.1,),
+        device_to_lead_left=lambda _k: vdl,
+        device_to_lead_right=lambda _k: vdl,
+        contact_left_indices=[0],
+        contact_right_indices=[9],
+    )
+    assert abs(t_explicit - t_callable) < 1e-12

@@ -27,7 +27,7 @@ Study mode also writes:
 
 ## Minimal Workflow
 
-1. Put your `.fc` file in the project root (or use a relative/absolute path).
+1. Put your `.fc` file under the study folder (recommended: `studies/<study>/inputs/ifc/`), or use an absolute path.
 2. Generate a template:
 
 ```bash
@@ -66,6 +66,11 @@ Typical mesh choices:
 Frequency range:
 - set `omega.fmax_cm1` if known from your material
 - otherwise use `omega.auto_max = true`
+
+Model stability defaults:
+- `model.mass_mode`: `ifc` (recommended physical default)
+- `model.drop_nyquist_transverse`: `false` by default (optional benchmark toggle)
+- Nyquist longest-range `+/-` symmetry is enforced internally for numerical stability.
 
 ## Config Sections
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from scipy.sparse import csc_matrix, eye, lil_matrix
 from scipy.sparse.linalg import splu
@@ -14,6 +16,7 @@ Array = np.ndarray
 LeadLike = LeadBlocks | LeadKSpace
 DeviceLike = Device1D | DeviceKSpace
 ContactIndices = slice | list[int] | tuple[int, ...] | Array | None
+DeviceToLeadLike = Array | Callable[[KPar], Array]
 
 
 def _resolve_lead_blocks(lead: LeadLike, kpar: KPar) -> LeadBlocks:
@@ -33,6 +36,18 @@ def _resolve_device(device: DeviceLike, kpar: KPar) -> Device1D:
     if isinstance(device, Device1D):
         return device
     return device.device(kpar=kpar)
+
+
+def _resolve_device_to_lead_coupling(
+    coupling: DeviceToLeadLike | None,
+    *,
+    kpar: KPar,
+) -> Array | None:
+    if coupling is None:
+        return None
+    if callable(coupling):
+        return np.asarray(coupling(kpar), dtype=np.complex128)
+    return np.asarray(coupling, dtype=np.complex128)
 
 
 def _assemble_device_matrix_sparse(device: Device1D) -> csc_matrix:
@@ -243,8 +258,8 @@ def device_green_function(
     eta: float = 1e-8,
     eta_device: float | None = None,
     kpar: KPar = None,
-    device_to_lead_left: Array | None = None,
-    device_to_lead_right: Array | None = None,
+    device_to_lead_left: DeviceToLeadLike | None = None,
+    device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
@@ -253,6 +268,8 @@ def device_green_function(
     """Return (G, Sigma_L, Sigma_R) for the finite device."""
 
     dev = _resolve_device(device=device, kpar=kpar)
+    vdl_left = _resolve_device_to_lead_coupling(device_to_lead_left, kpar=kpar)
+    vdl_right = _resolve_device_to_lead_coupling(device_to_lead_right, kpar=kpar)
     npl = dev.dof_per_layer
     n_layers = dev.n_layers
     dim = n_layers * npl
@@ -265,8 +282,8 @@ def device_green_function(
         eta=eta,
         eta_device=eta_device,
         kpar=kpar,
-        device_to_lead_left=device_to_lead_left,
-        device_to_lead_right=device_to_lead_right,
+        device_to_lead_left=vdl_left,
+        device_to_lead_right=vdl_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
         surface_gf_method=surface_gf_method,
@@ -294,8 +311,8 @@ def transmission(
     eta: float = 1e-8,
     eta_device: float | None = None,
     kpar: KPar = None,
-    device_to_lead_left: Array | None = None,
-    device_to_lead_right: Array | None = None,
+    device_to_lead_left: DeviceToLeadLike | None = None,
+    device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
@@ -304,6 +321,8 @@ def transmission(
     """Return coherent phonon transmission T(omega)."""
 
     dev = _resolve_device(device=device, kpar=kpar)
+    vdl_left = _resolve_device_to_lead_coupling(device_to_lead_left, kpar=kpar)
+    vdl_right = _resolve_device_to_lead_coupling(device_to_lead_right, kpar=kpar)
     npl = dev.dof_per_layer
     n_layers = dev.n_layers
     dim = n_layers * npl
@@ -316,8 +335,8 @@ def transmission(
         eta=eta,
         eta_device=eta_device,
         kpar=kpar,
-        device_to_lead_left=device_to_lead_left,
-        device_to_lead_right=device_to_lead_right,
+        device_to_lead_left=vdl_left,
+        device_to_lead_right=vdl_right,
         contact_left_indices=contact_left_indices,
         contact_right_indices=contact_right_indices,
         surface_gf_method=surface_gf_method,
@@ -346,8 +365,8 @@ def transmission_kavg(
     kpoints: list[tuple[float, ...]],
     eta: float = 1e-8,
     eta_device: float | None = None,
-    device_to_lead_left: Array | None = None,
-    device_to_lead_right: Array | None = None,
+    device_to_lead_left: DeviceToLeadLike | None = None,
+    device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
@@ -387,8 +406,8 @@ def transmission_kavg_adaptive(
     eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
     eta_device: float | None = None,
     min_success_fraction: float = 0.0,
-    device_to_lead_left: Array | None = None,
-    device_to_lead_right: Array | None = None,
+    device_to_lead_left: DeviceToLeadLike | None = None,
+    device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",
@@ -533,8 +552,8 @@ def transmission_kavg_adaptive_global_eta(
     eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
     eta_device: float | None = None,
     min_success_fraction: float = 0.0,
-    device_to_lead_left: Array | None = None,
-    device_to_lead_right: Array | None = None,
+    device_to_lead_left: DeviceToLeadLike | None = None,
+    device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
     contact_right_indices: ContactIndices = None,
     surface_gf_method: str = "sancho_rubio",

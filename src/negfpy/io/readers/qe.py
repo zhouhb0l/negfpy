@@ -34,6 +34,16 @@ def _next_nonempty(lines: list[str], start: int) -> tuple[int, str]:
     raise ValueError("Unexpected end of file while parsing QE IFC file.")
 
 
+def _parse_three_floats(line: str) -> tuple[float, float, float] | None:
+    toks = line.split()
+    if len(toks) < 3:
+        return None
+    try:
+        return float(toks[0]), float(toks[1]), float(toks[2])
+    except ValueError:
+        return None
+
+
 def read_qe_q2r_ifc(source: Any) -> IFCData:
     """Parse QE q2r.x text IFC file (``*.fc``) into ``IFCData``."""
 
@@ -48,6 +58,26 @@ def read_qe_q2r_ifc(source: Any) -> IFCData:
     nat = int(first[1])
     ibrav = int(first[2])
     i += 1
+
+    # QE q2r variant: for ibrav=0 files, explicit lattice vectors can appear
+    # right after the first header line and before species definitions.
+    lattice_from_header = None
+    if ibrav == 0:
+        j, candidate = _next_nonempty(lines, i)
+        if _SPECIES_RE.match(candidate) is None:
+            row0 = _parse_three_floats(candidate)
+            if row0 is not None:
+                lv = [list(row0)]
+                j += 1
+                for _ in range(2):
+                    j, row = _next_nonempty(lines, j)
+                    rowf = _parse_three_floats(row)
+                    if rowf is None:
+                        raise ValueError("Invalid explicit lattice-vector block in QE IFC file.")
+                    lv.append(list(rowf))
+                    j += 1
+                lattice_from_header = np.asarray(lv, dtype=float)
+                i = j
 
     species_masses: dict[int, float] = {}
     species_labels: dict[int, str] = {}
@@ -73,7 +103,7 @@ def read_qe_q2r_ifc(source: Any) -> IFCData:
         i += 1
 
     i, line = _next_nonempty(lines, i)
-    lattice_vectors = None
+    lattice_vectors = lattice_from_header
     born_charges = None
     if line in {"T", "F"}:
         has_long_range = (line == "T")

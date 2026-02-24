@@ -16,10 +16,10 @@
     "x_unit": "cm-1"
   },
   "ifc": {
-    "path": "si444.fc",
-    "left_path": "si444.fc",
-    "center_path": "si444.fc",
-    "right_path": "si444.fc",
+    "path": "inputs/ifc/material.fc",
+    "left_path": "inputs/ifc/material.fc",
+    "center_path": "inputs/ifc/material.fc",
+    "right_path": "inputs/ifc/material.fc",
     "reader": "qe",
     "enforce_asr": false,
     "dy_cutoff": null,
@@ -31,6 +31,8 @@
     "auto_principal_layer_enlargement": true,
     "infer_fc01_from_negative_dx": true,
     "enforce_hermitian_fc00": true,
+    "mass_mode": "ifc",
+    "drop_nyquist_transverse": false,
     "onsite_pinning": 0.0
   },
   "kmesh": {

@@ -10,6 +10,7 @@ import re
 import socket
 import subprocess
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from negfpy.core import (
     transmission_kavg_adaptive,
     transmission_kavg_adaptive_global_eta,
 )
+from negfpy.core.types import LeadKSpace
 from negfpy.io import read_ifc
 from negfpy.modeling import (
     BuildConfig,
@@ -346,6 +348,219 @@ def _resolve_eta_values_for_omega(
     return filtered if len(filtered) > 0 else (min(eta_values),)
 
 
+def _parse_ky_kz(kpar: tuple[float, ...] | None) -> tuple[float, float]:
+    if kpar is None or len(kpar) == 0:
+        return 0.0, 0.0
+    if len(kpar) == 1:
+        return float(kpar[0]), 0.0
+    if len(kpar) == 2:
+        return float(kpar[0]), float(kpar[1])
+    raise ValueError("kpar must contain at most two transverse components: (ky,) or (ky, kz).")
+
+
+def _sum_k_terms(terms: dict[tuple[int, int], np.ndarray], ky: float, kz: float, ndof: int) -> np.ndarray:
+    out = np.zeros((ndof, ndof), dtype=np.complex128)
+    for (dy, dz), block in terms.items():
+        out += np.asarray(block, dtype=np.complex128) * np.exp(1j * (ky * dy + kz * dz))
+    return out
+
+
+def _build_interface_contacts(params):
+    """Build left/right lead and interface couplings for IFC bulk transport."""
+
+    fc00_terms = {k: np.asarray(v, dtype=np.complex128) for k, v in params.fc00_terms.items()}
+    if params.fc10_terms is None:
+        fc10_terms = {(-dy, -dz): np.asarray(v, dtype=np.complex128).conj().T for (dy, dz), v in params.fc01_terms.items()}
+    else:
+        fc10_terms = {k: np.asarray(v, dtype=np.complex128) for k, v in params.fc10_terms.items()}
+
+    # Mapping from IFC block convention to transport interface convention:
+    # right interface coupling term in transport basis:
+    # KR01(dy,dz) == FC10(-dy,-dz)^T
+    fc_r01_terms = {(-dy, -dz): np.asarray(v, dtype=np.complex128).T for (dy, dz), v in fc10_terms.items()}
+    # left lead-side nearest-neighbor coupling:
+    # KL01(dy,dz) == KR01(-dy,-dz)^T == FC10(dy,dz)
+    fc_l01_terms = {k: np.asarray(v, dtype=np.complex128) for k, v in fc10_terms.items()}
+
+    masses = np.repeat(np.asarray(params.masses, dtype=float), int(params.dof_per_atom))
+    mhalf = np.diag(1.0 / np.sqrt(masses))
+    ndof = int(params.ndof)
+
+    def _d00(ky: float, kz: float) -> np.ndarray:
+        phi00 = _sum_k_terms(fc00_terms, ky=ky, kz=kz, ndof=ndof)
+        if float(params.onsite_pinning) != 0.0:
+            phi00 = phi00 + float(params.onsite_pinning) * np.eye(ndof, dtype=np.complex128)
+        return mhalf @ phi00 @ mhalf
+
+    def _d01_right(ky: float, kz: float) -> np.ndarray:
+        return mhalf @ _sum_k_terms(fc_r01_terms, ky=ky, kz=kz, ndof=ndof) @ mhalf
+
+    def _d01_left(ky: float, kz: float) -> np.ndarray:
+        return mhalf @ _sum_k_terms(fc_l01_terms, ky=ky, kz=kz, ndof=ndof) @ mhalf
+
+    def _right_builder(kpar):
+        ky, kz = _parse_ky_kz(kpar)
+        d00 = _d00(ky, kz)
+        d01 = _d01_right(ky, kz)
+        return d00, d01, d01.conj().T
+
+    def _left_builder(kpar):
+        ky, kz = _parse_ky_kz(kpar)
+        d00 = _d00(ky, kz)
+        d01 = _d01_left(ky, kz)
+        return d00, d01, d01.conj().T
+
+    def _vdl_right(kpar):
+        ky, kz = _parse_ky_kz(kpar)
+        return _d01_right(ky, kz)
+
+    def _vdl_left(kpar):
+        return _vdl_right(kpar).conj().T
+
+    return LeadKSpace(blocks_builder=_left_builder), LeadKSpace(blocks_builder=_right_builder), _vdl_left, _vdl_right
+
+
+def _drop_nyquist_transverse_terms(params, ifc_metadata: dict[str, Any]):
+    nr = ifc_metadata.get("nr") if isinstance(ifc_metadata, dict) else None
+    if nr is None or len(nr) != 3:
+        return params, {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+    try:
+        nr2 = int(nr[1])
+        nr3 = int(nr[2])
+    except Exception:
+        return params, {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+
+    drop_dy = (-nr2 // 2) if (nr2 > 1 and nr2 % 2 == 0) else None
+    drop_dz = (-nr3 // 2) if (nr3 > 1 and nr3 % 2 == 0) else None
+    if drop_dy is None and drop_dz is None:
+        return params, {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+
+    def _keep(key: tuple[int, int]) -> bool:
+        dy, dz = int(key[0]), int(key[1])
+        if drop_dy is not None and dy == drop_dy:
+            return False
+        if drop_dz is not None and dz == drop_dz:
+            return False
+        return True
+
+    fc00 = {k: v for k, v in params.fc00_terms.items() if _keep(k)}
+    fc01 = {k: v for k, v in params.fc01_terms.items() if _keep(k)}
+    fc10 = None if params.fc10_terms is None else {k: v for k, v in params.fc10_terms.items() if _keep(k)}
+    dropped = {
+        "dropped_dy": drop_dy,
+        "dropped_dz": drop_dz,
+        "n_dropped_fc00": int(len(params.fc00_terms) - len(fc00)),
+        "n_dropped_fc01": int(len(params.fc01_terms) - len(fc01)),
+        "n_dropped_fc10": int(0 if params.fc10_terms is None else (len(params.fc10_terms) - len(fc10))),
+    }
+    return replace(params, fc00_terms=fc00, fc01_terms=fc01, fc10_terms=fc10), dropped
+
+
+def _enforce_transverse_pm_symmetry(params, ifc_metadata: dict[str, Any] | None = None):
+    """Complete missing +/- transverse terms for Nyquist shifts only.
+
+    - Onsite terms:   fc00(dy,dz) = fc00(-dy,-dz)^†
+    - Interface terms: fc10(dy,dz) = fc01(-dy,-dz)^†
+
+    Only terms touching Nyquist transverse indices are modified. Non-Nyquist
+    force-constant terms are left unchanged.
+    """
+
+    nr = ifc_metadata.get("nr") if isinstance(ifc_metadata, dict) else None
+    if nr is None or len(nr) != 3:
+        return params, {"enabled": False, "reason": "missing_nr_metadata"}
+    try:
+        nr2 = int(nr[1])
+        nr3 = int(nr[2])
+    except Exception:
+        return params, {"enabled": False, "reason": "invalid_nr_metadata"}
+    nyq_abs_dy = (nr2 // 2) if (nr2 > 1 and nr2 % 2 == 0) else None
+    nyq_abs_dz = (nr3 // 2) if (nr3 > 1 and nr3 % 2 == 0) else None
+    if nyq_abs_dy is None and nyq_abs_dz is None:
+        return params, {"enabled": False, "reason": "no_even_transverse_grid"}
+
+    def _is_nyquist_key(key: tuple[int, int]) -> bool:
+        dy, dz = int(key[0]), int(key[1])
+        if nyq_abs_dy is not None and abs(dy) == nyq_abs_dy:
+            return True
+        if nyq_abs_dz is not None and abs(dz) == nyq_abs_dz:
+            return True
+        return False
+
+    def _complete_self_conjugate_pairs(terms: dict[tuple[int, int], np.ndarray] | None):
+        if terms is None:
+            return None, {"n_terms_in": 0, "n_terms_out": 0, "n_pairs_added": 0, "n_self_hermitianized": 0}
+        out = {k: np.asarray(v, dtype=np.complex128).copy() for k, v in terms.items()}
+        n_added = 0
+        n_self = 0
+        for k in list(out.keys()):
+            if not _is_nyquist_key(k):
+                continue
+            kp = (-int(k[0]), -int(k[1]))
+            if k == kp:
+                out[k] = 0.5 * (out[k] + out[k].conj().T)
+                n_self += 1
+                continue
+            if kp not in out:
+                out[kp] = out[k].conj().T
+                n_added += 1
+        return out, {
+            "n_terms_in": int(len(terms)),
+            "n_terms_out": int(len(out)),
+            "n_pairs_added": int(n_added),
+            "n_self_hermitianized": int(n_self),
+        }
+
+    def _complete_cross_conjugate_pairs(
+        terms_01: dict[tuple[int, int], np.ndarray],
+        terms_10: dict[tuple[int, int], np.ndarray] | None,
+    ):
+        out01 = {k: np.asarray(v, dtype=np.complex128).copy() for k, v in terms_01.items()}
+        out10 = None if terms_10 is None else {k: np.asarray(v, dtype=np.complex128).copy() for k, v in terms_10.items()}
+        if out10 is None:
+            return out01, None, {"n_fc01_in": int(len(terms_01)), "n_fc01_out": int(len(out01)), "n_fc10_in": 0, "n_fc10_out": 0, "n_pairs_added_to_fc01": 0, "n_pairs_added_to_fc10": 0}
+
+        add01 = 0
+        add10 = 0
+
+        for k, b01 in list(out01.items()):
+            if not _is_nyquist_key(k):
+                continue
+            kp = (-int(k[0]), -int(k[1]))
+            if kp not in out10:
+                out10[kp] = b01.conj().T
+                add10 += 1
+
+        for k, b10 in list(out10.items()):
+            if not _is_nyquist_key(k):
+                continue
+            kp = (-int(k[0]), -int(k[1]))
+            if kp not in out01:
+                out01[kp] = b10.conj().T
+                add01 += 1
+
+        info = {
+            "n_fc01_in": int(len(terms_01)),
+            "n_fc01_out": int(len(out01)),
+            "n_fc10_in": int(len(terms_10)),
+            "n_fc10_out": int(len(out10)),
+            "n_pairs_added_to_fc01": int(add01),
+            "n_pairs_added_to_fc10": int(add10),
+        }
+        return out01, out10, info
+
+    fc00, info00 = _complete_self_conjugate_pairs(params.fc00_terms)
+    fc01, fc10, info01_10 = _complete_cross_conjugate_pairs(params.fc01_terms, params.fc10_terms)
+    info = {
+        "enabled": True,
+        "nyquist_abs_dy": nyq_abs_dy,
+        "nyquist_abs_dz": nyq_abs_dz,
+        "fc00": info00,
+        "fc01_fc10": info01_10,
+    }
+    return replace(params, fc00_terms=fc00, fc01_terms=fc01, fc10_terms=fc10), info
+
+
 def _lead_surface_dos_kavg_adaptive_global_eta(
     omega: float,
     lead,
@@ -393,7 +608,10 @@ def _run_transmission(
     cfg: dict[str, Any],
     *,
     device,
-    lead,
+    lead_left,
+    lead_right,
+    device_to_lead_left=None,
+    device_to_lead_right=None,
     omegas: np.ndarray,
     kmesh: dict[str, Any],
 ) -> dict[str, Any]:
@@ -444,11 +662,13 @@ def _run_transmission(
         common = dict(
             omega=float(w),
             device=device,
-            lead_left=lead,
-            lead_right=lead,
+            lead_left=lead_left,
+            lead_right=lead_right,
             kpoints=kpts,
             eta_device=eta_device,
             min_success_fraction=min_success_fraction,
+            device_to_lead_left=device_to_lead_left,
+            device_to_lead_right=device_to_lead_right,
             surface_gf_method=sgf_method,
             omega_scale=omega_scale,
             nonnegative_tolerance=nonnegative_tolerance,
@@ -759,6 +979,8 @@ def _default_template() -> dict[str, Any]:
             "auto_principal_layer_enlargement": True,
             "infer_fc01_from_negative_dx": True,
             "enforce_hermitian_fc00": True,
+            "mass_mode": "ifc",
+            "drop_nyquist_transverse": False,
             "onsite_pinning": 0.0,
         },
         "kmesh": {
@@ -906,7 +1128,23 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         dtype=str(mcfg.get("dtype", "complex128")),
     )
     params = build_material_kspace_params(ifc=ifc_filtered, config=build_cfg)
-    lead = material_kspace_lead(params)
+    mass_mode = str(mcfg.get("mass_mode", "ifc")).lower().replace("-", "_")
+    if mass_mode == "ifc":
+        pass
+    elif mass_mode in {"unit", "ones", "legacy_unit"}:
+        params = replace(params, masses=np.ones_like(params.masses, dtype=float))
+    else:
+        raise ValueError("model.mass_mode must be one of: ifc, unit.")
+
+    nyquist_info = {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
+    drop_nyquist = bool(mcfg.get("drop_nyquist_transverse", False))
+    if drop_nyquist:
+        params, nyquist_info = _drop_nyquist_transverse_terms(params, ifc_metadata=dict(ifc_filtered.metadata))
+    # Always enforce Nyquist +/- pair symmetry for longest-range transverse
+    # terms to keep numerical behavior stable across interfaces.
+    params, pm_sym_info = _enforce_transverse_pm_symmetry(params, ifc_metadata=dict(ifc_filtered.metadata))
+
+    lead_left, lead_right, device_to_lead_left, device_to_lead_right = _build_interface_contacts(params)
     device = material_kspace_device(n_layers=n_layers, params=params)
 
     kmesh_info = _prepare_kmesh(cfg)
@@ -917,11 +1155,20 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     if calc_type in {"transmission", "dos"}:
         omegas, omega_info = _build_omega_grid(cfg, ifc_filtered)
         if calc_type == "transmission":
-            results = _run_transmission(cfg, device=device, lead=lead, omegas=omegas, kmesh=kmesh_info)
+            results = _run_transmission(
+                cfg,
+                device=device,
+                lead_left=lead_left,
+                lead_right=lead_right,
+                device_to_lead_left=device_to_lead_left,
+                device_to_lead_right=device_to_lead_right,
+                omegas=omegas,
+                kmesh=kmesh_info,
+            )
         else:
-            results = _run_dos(cfg, lead=lead, omegas=omegas, kmesh=kmesh_info)
+            results = _run_dos(cfg, lead=lead_right, omegas=omegas, kmesh=kmesh_info)
     else:
-        results = _run_dispersion(cfg, lead=lead)
+        results = _run_dispersion(cfg, lead=lead_right)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if write_input_snapshot:
@@ -1016,6 +1263,11 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "auto_principal_layer_enlargement": bool(build_cfg.auto_principal_layer_enlargement),
             "infer_fc01_from_negative_dx": bool(build_cfg.infer_fc01_from_negative_dx),
             "enforce_hermitian_fc00": bool(build_cfg.enforce_hermitian_fc00),
+            "mass_mode": mass_mode,
+            "drop_nyquist_transverse": bool(drop_nyquist),
+            "nyquist_filter": nyquist_info,
+            "enforce_transverse_pm_symmetry": True,
+            "pm_symmetry": pm_sym_info,
             "onsite_pinning": float(build_cfg.onsite_pinning),
             "ndof": int(params.ndof),
             "n_atoms_per_principal_layer": int(params.n_atoms),
