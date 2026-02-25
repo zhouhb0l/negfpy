@@ -88,7 +88,7 @@ def _cm1_to_qe_omega(freq_cm1: float) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("graphene.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--n-layers", type=int, default=40)
     parser.add_argument("--principal-layer-size", type=int, default=4)

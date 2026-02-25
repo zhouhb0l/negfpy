@@ -153,7 +153,7 @@ def _bands_vs_kx(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--left-ifc", type=Path, default=Path("si444.fc"))
+    parser.add_argument("--left-ifc", type=Path, default=Path("studies/silicon_bulk_2026q1/inputs/ifc/si444.fc"))
     parser.add_argument("--right-ifc", type=Path, default=None)
     parser.add_argument("--reader", type=str, default="qe", help="IFC reader key (default: qe)")
     parser.add_argument("--principal-layer-size", type=int, default=None)

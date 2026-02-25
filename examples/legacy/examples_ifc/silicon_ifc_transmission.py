@@ -98,7 +98,7 @@ def _compute_kavg(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("si444.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/silicon_bulk_2026q1/inputs/ifc/si444.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--n-layers", type=int, default=30)
     parser.add_argument("--principal-layer-size", type=int, default=2)

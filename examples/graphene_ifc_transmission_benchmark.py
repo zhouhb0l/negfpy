@@ -37,7 +37,7 @@ def _load_old_tw(path: Path) -> tuple[np.ndarray, np.ndarray] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("graphene.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--principal-layer-size", type=int, default=4)
     parser.add_argument("--n-layers", type=int, default=1, help="Benchmark with N_C=1 by default.")

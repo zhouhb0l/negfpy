@@ -42,7 +42,7 @@ def _convert_omega(omega: np.ndarray, unit: str) -> tuple[np.ndarray, str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("graphene.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--nseg", type=int, default=120, help="Points per high-symmetry segment")
     parser.add_argument("--unit", type=str, default="thz", choices=["thz", "cm-1", "internal"])

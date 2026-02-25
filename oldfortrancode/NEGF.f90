@@ -23,7 +23,7 @@ integer:: tag
 double precision,allocatable :: Tw(:),omega(:)
 tag=1
 
-open(101,file="Tkw.txt",recl=1000)
+if (save_tkw) open(101,file="Tkw.txt",recl=1000)
 call input_size()
 nL=MC(1);nR=MC(N_C)
 allocate(sgL(ML0,ML0),sgR(MR0,MR0))
@@ -54,10 +54,10 @@ call self_energy(layer,sgL,sgR,tVLC,tVCR,selL,selR,gaL,gaR)
 call transmission(ww,eta,N_kC,N_band,mass,selL,selR,gaL,gaR,Trans)
 
 sum1=sum1+real(Trans)*dk(1)
-write(101,*)kx,ww,Real(Trans) !Transmission per unit cell
+if (save_tkw) write(101,*)kx,ww,Real(Trans) !Transmission per unit cell
 enddo !kx
 enddo !ky
-write(101,*)
+if (save_tkw) write(101,*)
 Tw(tag)=sum1
 tag=tag+1
 write(*,'(A9,F6.1,A1)')"Progress:", ww/(wmax-wmin)*100,"%"
@@ -67,6 +67,7 @@ open(103,file='Tw.txt',recl=1000)
 do i=1,tag-1
 write(103,*)i,omega(i),Tw(i)
 enddo
+if (save_tkw) close(101)
 
 contains
 
@@ -88,7 +89,6 @@ call transmission(ww,eta,N_kC,N_band,mass,selL,selR,gaL,gaR,Trans)
 end subroutine
 
 end program
-
 
 
 

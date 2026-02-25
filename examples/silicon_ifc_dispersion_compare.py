@@ -113,7 +113,7 @@ def _supercell_dispersion_gamma_x(ifc, kx: np.ndarray, principal_layer_size: int
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("si444.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/silicon_bulk_2026q1/inputs/ifc/si444.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--pl-size", type=int, default=2, help="Supercell principal layer size")
     parser.add_argument("--nkx", type=int, default=240)

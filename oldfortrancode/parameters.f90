@@ -74,6 +74,7 @@ module running_para
 double precision:: kmin(2),kmax(2),dk(2)
 double precision :: wmin,wmax,dw
 double precision :: eta
+logical :: save_tkw = .false.
 contains
 subroutine read_running_parameters()
 use material_para
@@ -81,6 +82,8 @@ use sizes, only:dimen
 implicit none
 double precision, parameter:: pi=3.14159265358d0
 character(4):: tmpc
+integer :: ios
+integer :: save_tkw_flag
 open(201,file='para.in')
 do while(tmpc.ne.'@Run')
 read(201,*)tmpc
@@ -93,6 +96,12 @@ read(201,*)tmpc
 read(201,*)wmin,wmax,dw
 read(201,*)tmpc
 read(201,*)eta
+save_tkw = .false.
+save_tkw_flag = 0
+read(201,*,iostat=ios) save_tkw_flag
+if (ios.eq.0) then
+  save_tkw = (save_tkw_flag.ne.0)
+endif
 close(201)
 if(dimen.eq.2) then
 kmin(2)=0d0;kmax(2)=0d0;dk(2)=1d0 !go inside the loop for once
@@ -157,7 +166,6 @@ end subroutine
 end interface
 
 end module
-
 
 
 

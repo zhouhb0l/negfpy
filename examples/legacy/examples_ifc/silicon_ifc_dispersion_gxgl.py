@@ -40,7 +40,7 @@ def _segment(a: tuple[float, float, float], b: tuple[float, float, float], n: in
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("si444.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/silicon_bulk_2026q1/inputs/ifc/si444.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--save", type=Path, default=Path("outputs/silicon_dispersion_gxgl.png"))
     args = parser.parse_args()

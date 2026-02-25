@@ -76,7 +76,7 @@ def _thz_to_qe_omega(freq_thz: float) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ifc", type=Path, default=Path("si444.fc"))
+    parser.add_argument("--ifc", type=Path, default=Path("studies/silicon_bulk_2026q1/inputs/ifc/si444.fc"))
     parser.add_argument("--reader", type=str, default="qe")
     parser.add_argument("--principal-layer-size", type=int, default=2)
     parser.add_argument("--nkx", type=int, default=20)
