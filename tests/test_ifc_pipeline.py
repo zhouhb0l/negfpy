@@ -9,7 +9,11 @@ from negfpy.modeling import (
     build_material_kspace_params,
     infer_principal_layer_size,
 )
-from negfpy.workflows.ifc_bulk import _drop_nyquist_transverse_terms, _enforce_transverse_pm_symmetry
+from negfpy.workflows.ifc_bulk import (
+    _drop_nyquist_transverse_terms,
+    _enforce_transverse_pm_symmetry,
+    _reorient_ifc_for_transport_direction,
+)
 
 
 def _toy_ifc_payload() -> dict:
@@ -168,3 +172,39 @@ def test_enforce_transverse_pm_symmetry_completes_fc00_and_fc01_fc10_pairs_for_n
     assert np.allclose(sym.fc10_terms[(-2, 0)], sym.fc01_terms[(2, 0)].conj().T)
     # Non-Nyquist term should remain untouched by Nyquist-only enforcement.
     assert (-1, 0) not in sym.fc00_terms
+
+
+def test_reorient_ifc_for_transport_direction_keeps_identity_for_direction_1() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0]),
+        dof_per_atom=1,
+        terms=(IFCTerm(dx=1, dy=2, dz=3, block=np.array([[1.0]])),),
+        metadata={"nr": (4, 6, 8)},
+    )
+    out = _reorient_ifc_for_transport_direction(ifc, direction=1)
+    assert out.terms[0].dx == 1 and out.terms[0].dy == 2 and out.terms[0].dz == 3
+    assert tuple(out.metadata["nr"]) == (4, 6, 8)
+
+
+def test_reorient_ifc_for_transport_direction_swaps_indices_for_direction_2() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0]),
+        dof_per_atom=1,
+        terms=(IFCTerm(dx=1, dy=2, dz=3, block=np.array([[1.0]])),),
+        metadata={"nr": (4, 6, 8)},
+    )
+    out = _reorient_ifc_for_transport_direction(ifc, direction=2)
+    assert out.terms[0].dx == 2 and out.terms[0].dy == 1 and out.terms[0].dz == 3
+    assert tuple(out.metadata["nr"]) == (6, 4, 8)
+
+
+def test_reorient_ifc_for_transport_direction_cycles_indices_for_direction_3() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0]),
+        dof_per_atom=1,
+        terms=(IFCTerm(dx=1, dy=2, dz=3, block=np.array([[1.0]])),),
+        metadata={"nr": (4, 6, 8)},
+    )
+    out = _reorient_ifc_for_transport_direction(ifc, direction=3)
+    assert out.terms[0].dx == 3 and out.terms[0].dy == 1 and out.terms[0].dz == 2
+    assert tuple(out.metadata["nr"]) == (8, 4, 6)

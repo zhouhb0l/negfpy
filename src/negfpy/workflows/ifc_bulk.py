@@ -284,6 +284,56 @@ def _apply_transverse_cutoff(
     return out, removed
 
 
+def _axis_permutation_for_transport_direction(direction: int) -> tuple[int, int, int]:
+    if direction == 1:
+        return (0, 1, 2)
+    if direction == 2:
+        return (1, 0, 2)
+    if direction == 3:
+        return (2, 0, 1)
+    raise ValueError("model.transport_direction must be one of: 1, 2, 3.")
+
+
+def _reorient_ifc_for_transport_direction(ifc: IFCData, *, direction: int) -> IFCData:
+    """Reindex IFC lattice directions so selected transport direction maps to +x.
+
+    Direction convention:
+    - 1: transport along lattice vector a1 (legacy/default behavior)
+    - 2: transport along lattice vector a2
+    - 3: transport along lattice vector a3
+    """
+
+    perm = _axis_permutation_for_transport_direction(int(direction))
+    if perm == (0, 1, 2):
+        return ifc
+
+    terms: list[Any] = []
+    for t in ifc.terms:
+        vec = (int(t.dx), int(t.dy), int(t.dz))
+        nvec = (vec[perm[0]], vec[perm[1]], vec[perm[2]])
+        terms.append(replace(t, dx=int(nvec[0]), dy=int(nvec[1]), dz=int(nvec[2])))
+
+    meta = dict(ifc.metadata)
+    nr = meta.get("nr", None)
+    if isinstance(nr, (list, tuple)) and len(nr) == 3:
+        nr_t = (int(nr[perm[0]]), int(nr[perm[1]]), int(nr[perm[2]]))
+        meta["nr"] = nr_t
+    meta["transport_direction"] = int(direction)
+    meta["transport_permutation"] = perm
+
+    return IFCData(
+        masses=np.asarray(ifc.masses, dtype=float),
+        dof_per_atom=int(ifc.dof_per_atom),
+        terms=tuple(terms),
+        units=ifc.units,
+        metadata=meta,
+        lattice_vectors=ifc.lattice_vectors,
+        atom_positions=ifc.atom_positions,
+        atom_symbols=ifc.atom_symbols,
+        index_convention=ifc.index_convention,
+    )
+
+
 def _build_omega_grid(cfg: dict[str, Any], ifc: IFCData) -> tuple[np.ndarray, dict[str, Any]]:
     ocfg = dict(cfg.get("omega", {}))
     omega_min = float(ocfg.get("min", 0.0))
@@ -996,6 +1046,7 @@ def _default_template() -> dict[str, Any]:
             "dz_cutoff": None,
         },
         "model": {
+            "transport_direction": 1,
             "n_layers": 30,
             "principal_layer_size": 2,
             "auto_principal_layer_enlargement": True,
@@ -1137,9 +1188,12 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         ifc_work, asr_residual_max = enforce_translational_asr_on_self_term(ifc_raw)
     else:
         ifc_work = ifc_raw
-    ifc_filtered, n_terms_removed = _apply_transverse_cutoff(ifc_work, dy_cutoff=dy_cutoff, dz_cutoff=dz_cutoff)
-
     mcfg = dict(cfg.get("model", {}))
+    transport_direction = int(mcfg.get("transport_direction", 1))
+
+    ifc_oriented = _reorient_ifc_for_transport_direction(ifc_work, direction=transport_direction)
+    ifc_filtered, n_terms_removed = _apply_transverse_cutoff(ifc_oriented, dy_cutoff=dy_cutoff, dz_cutoff=dz_cutoff)
+
     n_layers = int(mcfg.get("n_layers", 30))
     build_cfg = BuildConfig(
         onsite_pinning=float(mcfg.get("onsite_pinning", 0.0)),
@@ -1272,6 +1326,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "metadata": dict(ifc_filtered.metadata),
         },
         "model": {
+            "transport_direction": int(transport_direction),
             "n_layers": int(n_layers),
             "principal_layer_size": build_cfg.principal_layer_size,
             "auto_principal_layer_enlargement": bool(build_cfg.auto_principal_layer_enlargement),

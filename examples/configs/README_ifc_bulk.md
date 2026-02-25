@@ -76,6 +76,7 @@ Recommended `model` block:
 
 ```json
 "model": {
+  "transport_direction": 1,
   "n_layers": 30,
   "principal_layer_size": null,
   "auto_principal_layer_enlargement": true,
@@ -86,6 +87,13 @@ Recommended `model` block:
   "onsite_pinning": 0.0
 }
 ```
+
+`transport_direction` selects the transport axis:
+- `1`: along lattice vector `a1` (legacy/default)
+- `2`: along lattice vector `a2`
+- `3`: along lattice vector `a3`
+
+Directions not chosen for transport are treated as transverse periodic directions.
 
 ## Config Sections
 
