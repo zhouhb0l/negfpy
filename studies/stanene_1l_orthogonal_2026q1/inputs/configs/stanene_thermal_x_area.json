@@ -1,0 +1,24 @@
+{
+  "run": {
+    "name": "stanene_1l_orthogonal_thermal_x_area",
+    "calculation": "thermal_conductance",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "stanene_1l_orthogonal_2026q1",
+    "material": "stanene_1l_orthogonal",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "thermal": {
+    "transmission_path": null,
+    "transmission_report_path": "../../stanene_1l_orthogonal/runs/20260226_031338Z_stanene_1l_orthogonal_transmission_x_area/transmission_report.json",
+    "temperature_min_k": 0.0,
+    "temperature_max_k": 400.0,
+    "n_temperature_points": 201
+  }
+}

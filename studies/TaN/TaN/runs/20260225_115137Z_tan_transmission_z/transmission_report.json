@@ -1,0 +1,183 @@
+{
+  "ifc": {
+    "asr_residual_max": null,
+    "atom_symbols": [
+      "N",
+      "Ta"
+    ],
+    "dof_per_atom": 3,
+    "dy_cutoff": null,
+    "dz_cutoff": null,
+    "enforce_asr": false,
+    "lattice_vectors": [
+      [
+        1.4699710891,
+        -2.5460646119,
+        0.0
+      ],
+      [
+        1.4699710891,
+        2.5460646119,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        2.89017508
+      ]
+    ],
+    "metadata": {
+      "force_constant_scale_to_qe": 0.02058171663932565,
+      "force_constant_unit_converted": "Ry/bohr^2",
+      "force_constant_unit_source": "eV/Angstrom^2 (phonopy default)",
+      "force_constants_path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\FORCE_CONSTANTS",
+      "mass_scale_to_qe": 911.4442431086565,
+      "mass_unit_converted": "2*electron_mass (QE Ry mass unit)",
+      "mass_unit_source": "amu",
+      "nat_primitive_inferred": 2,
+      "nat_supercell": 128,
+      "nr": [
+        4,
+        4,
+        4
+      ],
+      "omega_internal_unit": "sqrt(Ry/(2*me*bohr^2))",
+      "poscar_path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\POSCAR",
+      "source_format": "phonopy_force_constants",
+      "supercell_repeats": [
+        4,
+        4,
+        4
+      ],
+      "transport_direction": 3,
+      "transport_permutation": [
+        2,
+        0,
+        1
+      ]
+    },
+    "n_atoms": 2,
+    "n_terms_after_filter": 64,
+    "n_terms_raw": 64,
+    "n_terms_removed_by_cutoff": 0,
+    "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\FORCE_CONSTANTS",
+    "reader": "phonopy",
+    "sha256": "1e2d4aa9a1c01e6fd167b2047055ff26ded55e57074e0cdb65ba2137ead5aa38"
+  },
+  "kmesh": {
+    "dimension": 2,
+    "high": {
+      "dimension": 2,
+      "mode_y": "shifted",
+      "mode_z": "shifted",
+      "nky": 12,
+      "nkz": 12
+    },
+    "low": {
+      "dimension": 2,
+      "mode_y": "shifted",
+      "mode_z": "shifted",
+      "nky": 16,
+      "nkz": 16
+    },
+    "low_cm1": 100.0,
+    "mode": "shifted"
+  },
+  "model": {
+    "auto_principal_layer_enlargement": true,
+    "drop_nyquist_transverse": false,
+    "enforce_hermitian_fc00": true,
+    "enforce_transverse_pm_symmetry": true,
+    "infer_fc01_from_negative_dx": true,
+    "lattice_vectors_angstrom": null,
+    "mass_mode": "ifc",
+    "n_atoms_per_principal_layer": 8,
+    "n_layers": 30,
+    "ndof": 24,
+    "nyquist_filter": {
+      "dropped_dy": null,
+      "dropped_dz": null,
+      "n_dropped_fc00": 0,
+      "n_dropped_fc01": 0,
+      "n_dropped_fc10": 0
+    },
+    "nyquist_split_half": true,
+    "onsite_pinning": 0.0,
+    "pm_symmetry": {
+      "enabled": true,
+      "fc00": {
+        "n_pairs_added": 7,
+        "n_self_hermitianized": 0,
+        "n_terms_in": 16,
+        "n_terms_out": 23
+      },
+      "fc01_fc10": {
+        "n_fc01_in": 16,
+        "n_fc01_out": 23,
+        "n_fc10_in": 16,
+        "n_fc10_out": 23,
+        "n_pairs_added_to_fc01": 7,
+        "n_pairs_added_to_fc10": 7
+      },
+      "nyquist_abs_dy": 2,
+      "nyquist_abs_dz": 2
+    },
+    "principal_layer_size": 4,
+    "thickness_angstrom": null,
+    "thickness_direction": null,
+    "transport_direction": 3
+  },
+  "omega": {
+    "n_points": 150,
+    "omega_max_cm1": 633.0007133146308,
+    "omega_max_qe": 0.005768326930377167,
+    "omega_max_source": "auto_ifc_estimate",
+    "omega_max_thz": 18.97688397603465,
+    "omega_min_qe": 0.0
+  },
+  "outputs": {
+    "data": "studies\\TaN\\TaN\\runs\\20260225_115137Z_tan_transmission_z\\transmission.tsv",
+    "eta_diagnostics": "studies\\TaN\\TaN\\runs\\20260225_115137Z_tan_transmission_z\\transmission_eta_diag.json",
+    "plot": "studies\\TaN\\TaN\\runs\\20260225_115137Z_tan_transmission_z\\transmission.png"
+  },
+  "provenance": {
+    "config_sha256": "8e28bd99495a83c715fb8124b8d78bf4a99ff44cf183a1b51dd3c5efdd69e8f1",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "transmission",
+    "finished_utc": "2026-02-25T12:01:06.718095+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\inputs\\configs\\transmission_z.json",
+    "name": "tan_transmission_z",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\TaN\\runs\\20260225_115137Z_tan_transmission_z",
+    "runtime_seconds": 569.0605424999958,
+    "started_utc": "2026-02-25T11:51:37.659462+00:00"
+  },
+  "solver_summary": {
+    "eta_device": null,
+    "eta_fixed": 0.0001,
+    "eta_scheme": "adaptive",
+    "eta_values_base": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "max_eta_over_omega": 0.0002583071344575428,
+    "n_omega_failures": 0,
+    "surface_gf_method": "generalized_eigen_svd"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\TaN\\manifest.jsonl",
+    "material": "TaN",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\TaN\\TaN",
+    "run_dir_name": "20260225_115137Z_tan_transmission_z",
+    "study": "TaN"
+  }
+}

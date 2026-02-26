@@ -1,0 +1,69 @@
+{
+  "outputs": {
+    "data": "studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\runs\\20260225_085015Z_borophene_b_2x1_pbe_thermal_y\\thermal_conductance.tsv",
+    "plot": "studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\runs\\20260225_085015Z_borophene_b_2x1_pbe_thermal_y\\thermal_conductance.png",
+    "plot_per_area": "studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\runs\\20260225_085015Z_borophene_b_2x1_pbe_thermal_y\\thermal_conductance_per_area.png"
+  },
+  "provenance": {
+    "config_sha256": "b841ad9d4611817682b8faaa6e3282f5ae6fd7e7c96ffc18b87f7f3856fddd73",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "thermal_conductance",
+    "finished_utc": "2026-02-25T08:50:16.754163+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\borophene_b_2x1_pbe_2026q1\\inputs\\configs\\borophene_b_2x1_pbe_thermal_y.json",
+    "name": "borophene_b_2x1_pbe_thermal_y",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\runs\\20260225_085015Z_borophene_b_2x1_pbe_thermal_y",
+    "runtime_seconds": 1.052138900035061,
+    "started_utc": "2026-02-25T08:50:15.701688+00:00"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\manifest.jsonl",
+    "material": "borophene_b_2x1_pbe",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe",
+    "run_dir_name": "20260225_085015Z_borophene_b_2x1_pbe_thermal_y",
+    "study": "borophene_b_2x1_pbe_2026q1"
+  },
+  "thermal": {
+    "has_transmission_per_m2": true,
+    "n_temperature_points": 201,
+    "temperature_max_k": 400.0,
+    "temperature_min_k": 0.0,
+    "transmission_metadata": {
+      "atom_symbols": [
+        "B",
+        "B",
+        "B",
+        "B"
+      ],
+      "lattice_vectors_override_angstrom": [
+        [
+          3.229533274938763,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          2.8679473015500867,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          15.000004574258512
+        ]
+      ],
+      "lattice_vectors_raw": null,
+      "source_format": "qe_q2r_fc",
+      "thickness_angstrom": 2.7,
+      "thickness_direction": 3,
+      "transport_direction": 2,
+      "transverse_area_m2": 8.719739842334662e-20
+    },
+    "transmission_path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\borophene_b_2x1_pbe_2026q1\\borophene_b_2x1_pbe\\runs\\20260225_083830Z_borophene_b_2x1_pbe_transmission_y\\transmission.tsv"
+  }
+}

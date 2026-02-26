@@ -1,0 +1,67 @@
+{
+  "outputs": {
+    "data": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_034402Z_silicon_thermal_x_area\\thermal_conductance.tsv",
+    "plot": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_034402Z_silicon_thermal_x_area\\thermal_conductance.png",
+    "plot_per_area": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_034402Z_silicon_thermal_x_area\\thermal_conductance_per_area.png"
+  },
+  "provenance": {
+    "config_sha256": "f8f038b2e026c4534d1fabb05597a379870ea25f0c6d0cdc4b69c1d6b05cc7f0",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "thermal_conductance",
+    "finished_utc": "2026-02-26T03:44:03.256957+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\inputs\\configs\\silicon_thermal_x_area.json",
+    "name": "silicon_thermal_x_area",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_034402Z_silicon_thermal_x_area",
+    "runtime_seconds": 1.1614183000056073,
+    "started_utc": "2026-02-26T03:44:02.094078+00:00"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon\\manifest.jsonl",
+    "material": "silicon",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon",
+    "run_dir_name": "20260226_034402Z_silicon_thermal_x_area",
+    "study": "silicon_bulk_2026q1"
+  },
+  "thermal": {
+    "has_transmission_per_m2": true,
+    "n_temperature_points": 201,
+    "temperature_max_k": 400.0,
+    "temperature_min_k": 0.0,
+    "transmission_metadata": {
+      "atom_symbols": [
+        "Si",
+        "Si"
+      ],
+      "lattice_vectors_override_angstrom": null,
+      "lattice_vectors_raw": [
+        [
+          13.734417186872,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          13.734417186872,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          13.734417186872
+        ]
+      ],
+      "source_format": "qe_q2r_fc",
+      "thickness_angstrom": null,
+      "thickness_direction": null,
+      "transport_direction": 1,
+      "transverse_area_m2": 5.282296027916617e-19
+    },
+    "transmission_path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x\\transmission.tsv"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "run": {
+    "name": "tan_thermal_y",
+    "calculation": "thermal_conductance",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "TaN",
+    "material": "TaN",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "thermal": {
+    "transmission_path": null,
+    "transmission_report_path": "../../TaN/runs/20260225_114126Z_tan_transmission_y/transmission_report.json",
+    "temperature_min_k": 0.0,
+    "temperature_max_k": 400.0,
+    "n_temperature_points": 201
+  }
+}

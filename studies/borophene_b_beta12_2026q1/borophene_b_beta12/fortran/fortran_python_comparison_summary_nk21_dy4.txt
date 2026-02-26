@@ -1,0 +1,6 @@
+fortran_points=550
+python_points=120
+overlap_max_cm1=1183.269270
+MAE=2.42252801e-01
+RMSE=2.97001336e-01
+MAX_ABS_ERR=7.47167047e-01

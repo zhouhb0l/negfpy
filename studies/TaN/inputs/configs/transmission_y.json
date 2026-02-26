@@ -1,0 +1,74 @@
+{
+  "run": {
+    "name": "tan_transmission_y",
+    "calculation": "transmission",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "TaN",
+    "material": "TaN",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "ifc": {
+    "path": "../../FORCE_CONSTANTS",
+    "reader": "phonopy",
+    "enforce_asr": false,
+    "dy_cutoff": null,
+    "dz_cutoff": null
+  },
+  "model": {
+    "transport_direction": 2,
+    "n_layers": 30,
+    "principal_layer_size": 4,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "nyquist_split_half": true,
+    "mass_mode": "ifc",
+    "drop_nyquist_transverse": false,
+    "onsite_pinning": 0.0
+  },
+  "kmesh": {
+    "dimension": 2,
+    "mode": "shifted",
+    "nk": 12,
+    "nk_low": 16,
+    "low_cm1": 100.0
+  },
+  "omega": {
+    "min": 0.0,
+    "max": null,
+    "n_points": 150,
+    "auto_max": true,
+    "auto_sample_nk": 8,
+    "safety_factor": 1.02,
+    "fmax_thz": null,
+    "fmax_cm1": null
+  },
+  "solver": {
+    "surface_gf_method": "generalized_eigen_svd",
+    "eta_scheme": "adaptive",
+    "eta_fixed": 0.0001,
+    "eta_device": null,
+    "eta_values": [
+      1e-8,
+      1e-7,
+      1e-6,
+      1e-5,
+      1e-4,
+      1e-3
+    ],
+    "min_success_fraction": 0.7,
+    "max_channel_factor": 1.5,
+    "nonnegative_tolerance": 1e-8,
+    "collect_rejected": false,
+    "max_eta_over_omega": null,
+    "eta_ratio_cm1_min": null,
+    "omega_scale_mode": "none"
+  }
+}

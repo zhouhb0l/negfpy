@@ -14,4 +14,5 @@ class BuildConfig:
     auto_principal_layer_enlargement: bool = True
     infer_fc01_from_negative_dx: bool = True
     enforce_hermitian_fc00: bool = True
+    nyquist_split_half: bool = False
     dtype: str = "complex128"

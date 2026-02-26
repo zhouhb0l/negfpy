@@ -1,0 +1,67 @@
+{
+    "run":  {
+                "name":  "silicon_transmission_z",
+                "calculation":  "transmission",
+                "output_mode":  "study",
+                "studies_root":  "studies",
+                "study":  "silicon_bulk_2026q1",
+                "material":  "silicon",
+                "timestamped_run_dir":  true,
+                "write_input_snapshot":  true,
+                "manifest_jsonl":  "manifest.jsonl",
+                "write_plot":  true,
+                "write_data":  true,
+                "write_report":  true,
+                "x_unit":  "cm-1"
+            },
+    "ifc":  {
+                "path":  "../ifc/si444.fc",
+                "reader":  "qe",
+                "enforce_asr":  false,
+                "dy_cutoff":  null,
+                "dz_cutoff":  null
+            },
+    "model":  {
+                  "n_layers":  30,
+                  "principal_layer_size":  2,
+                  "auto_principal_layer_enlargement":  true,
+                  "infer_fc01_from_negative_dx":  true,
+                  "enforce_hermitian_fc00":  true,
+                  "onsite_pinning":  0.0,
+                  "transport_direction":  3
+              },
+    "kmesh":  {
+                  "dimension":  2,
+                  "mode":  "shifted",
+                  "nk":  18,
+                  "nk_low":  20,
+                  "low_cm1":  120.0
+              },
+    "omega":  {
+                  "min":  0.0,
+                  "max":  0.006,
+                  "n_points":  40,
+                  "auto_max":  false
+              },
+    "solver":  {
+                   "surface_gf_method":  "generalized_eigen_svd",
+                   "eta_scheme":  "adaptive",
+                   "eta_fixed":  0.0001,
+                   "eta_device":  null,
+                   "eta_values":  [
+                                      1E-08,
+                                      1E-07,
+                                      1E-06,
+                                      1E-05,
+                                      0.0001,
+                                      0.001
+                                  ],
+                   "min_success_fraction":  0.7,
+                   "max_channel_factor":  1.5,
+                   "nonnegative_tolerance":  1E-08,
+                   "collect_rejected":  false,
+                   "max_eta_over_omega":  null,
+                   "eta_ratio_cm1_min":  null,
+                   "omega_scale_mode":  "none"
+               }
+}

@@ -1,0 +1,205 @@
+{
+  "ifc": {
+    "asr_residual_max": null,
+    "atom_symbols": [
+      "Si",
+      "Si"
+    ],
+    "dof_per_atom": 3,
+    "dy_cutoff": null,
+    "dz_cutoff": null,
+    "enforce_asr": false,
+    "lattice_vectors": [
+      [
+        13.734417186872,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        13.734417186872,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        13.734417186872
+      ]
+    ],
+    "metadata": {
+      "born_charges": [
+        [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "force_constant_unit": "Ry/bohr^2",
+      "ibrav": 2,
+      "mass_unit": "2*electron_mass (QE Ry mass unit)",
+      "nat": 2,
+      "nr": [
+        4,
+        4,
+        4
+      ],
+      "ntyp": 1,
+      "omega_internal_unit": "sqrt(Ry/(2*me*bohr^2))",
+      "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\inputs\\ifc\\si444.fc",
+      "source_format": "qe_q2r_fc"
+    },
+    "n_atoms": 2,
+    "n_terms_after_filter": 64,
+    "n_terms_raw": 64,
+    "n_terms_removed_by_cutoff": 0,
+    "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\inputs\\ifc\\si444.fc",
+    "reader": "qe",
+    "sha256": "47991603430c91be6b194eb300e065712686a1564665f908753b403739fbadf3"
+  },
+  "kmesh": {
+    "dimension": 2,
+    "high": {
+      "dimension": 2,
+      "mode_y": "shifted",
+      "mode_z": "shifted",
+      "nky": 18,
+      "nkz": 18
+    },
+    "low": {
+      "dimension": 2,
+      "mode_y": "shifted",
+      "mode_z": "shifted",
+      "nky": 20,
+      "nkz": 20
+    },
+    "low_cm1": 120.0,
+    "mode": "shifted"
+  },
+  "model": {
+    "auto_principal_layer_enlargement": true,
+    "drop_nyquist_transverse": false,
+    "enforce_hermitian_fc00": true,
+    "enforce_transverse_pm_symmetry": true,
+    "infer_fc01_from_negative_dx": true,
+    "lattice_vectors_angstrom": null,
+    "mass_mode": "ifc",
+    "n_atoms_per_principal_layer": 4,
+    "n_layers": 30,
+    "ndof": 12,
+    "nyquist_filter": {
+      "dropped_dy": null,
+      "dropped_dz": null,
+      "n_dropped_fc00": 0,
+      "n_dropped_fc01": 0,
+      "n_dropped_fc10": 0
+    },
+    "nyquist_split_half": false,
+    "onsite_pinning": 0.0,
+    "pm_symmetry": {
+      "enabled": true,
+      "fc00": {
+        "n_pairs_added": 7,
+        "n_self_hermitianized": 0,
+        "n_terms_in": 16,
+        "n_terms_out": 23
+      },
+      "fc01_fc10": {
+        "n_fc01_in": 16,
+        "n_fc01_out": 23,
+        "n_fc10_in": 16,
+        "n_fc10_out": 23,
+        "n_pairs_added_to_fc01": 7,
+        "n_pairs_added_to_fc10": 7
+      },
+      "nyquist_abs_dy": 2,
+      "nyquist_abs_dz": 2
+    },
+    "principal_layer_size": 2,
+    "thickness_angstrom": null,
+    "thickness_direction": null,
+    "transport_direction": 1
+  },
+  "omega": {
+    "n_points": 40,
+    "omega_max_cm1": 658.4238940908035,
+    "omega_max_qe": 0.006,
+    "omega_max_source": "omega.max",
+    "omega_max_thz": 19.739051761541365,
+    "omega_min_qe": 0.0
+  },
+  "outputs": {
+    "data": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x\\transmission.tsv",
+    "eta_diagnostics": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x\\transmission_eta_diag.json",
+    "plot": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x\\transmission.png",
+    "plot_per_area": "studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x\\transmission_per_area.png"
+  },
+  "provenance": {
+    "config_sha256": "6ffd89151c6aeb51f25c3ba357cb0c1e6f67a3f0f1d978a246521a3f39681ff5",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "transmission",
+    "finished_utc": "2026-02-26T03:42:04.213513+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\inputs\\configs\\transmission_x.json",
+    "name": "silicon_transmission_x",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon\\runs\\20260226_033848Z_silicon_transmission_x",
+    "runtime_seconds": 195.265924599953,
+    "started_utc": "2026-02-26T03:38:48.957344+00:00"
+  },
+  "solver_summary": {
+    "eta_device": null,
+    "eta_fixed": 0.0001,
+    "eta_scheme": "adaptive",
+    "eta_values_base": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "max_eta_over_omega": 6.5e-05,
+    "n_omega_failures": 0,
+    "surface_gf_method": "generalized_eigen_svd"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon\\manifest.jsonl",
+    "material": "silicon",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\silicon_bulk_2026q1\\silicon",
+    "run_dir_name": "20260226_033848Z_silicon_transmission_x",
+    "study": "silicon_bulk_2026q1"
+  }
+}

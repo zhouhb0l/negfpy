@@ -1,0 +1,87 @@
+{
+  "ifc": {
+    "dy_cutoff": null,
+    "dz_cutoff": null,
+    "enforce_asr": false,
+    "path": "../ifc/B_2x1_PBE.fc",
+    "reader": "qe"
+  },
+  "kmesh": {
+    "dimension": 1,
+    "low_cm1": 120.0,
+    "mode": "shifted",
+    "nk": 18,
+    "nk_low": 20
+  },
+  "model": {
+    "auto_principal_layer_enlargement": true,
+    "enforce_hermitian_fc00": true,
+    "infer_fc01_from_negative_dx": true,
+    "lattice_vectors_angstrom": [
+      [
+        3.229533274938763,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        2.8679473015500867,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        15.000004574258512
+      ]
+    ],
+    "n_layers": 2,
+    "onsite_pinning": 0.0,
+    "principal_layer_size": null,
+    "thickness_angstrom": 2.7,
+    "thickness_direction": 3,
+    "transport_direction": 1
+  },
+  "omega": {
+    "auto_max": true,
+    "auto_sample_nk": 12,
+    "min": 0.0,
+    "n_points": 120,
+    "safety_factor": 1.02
+  },
+  "run": {
+    "calculation": "transmission",
+    "manifest_jsonl": "manifest.jsonl",
+    "material": "borophene_b_2x1_pbe",
+    "name": "borophene_b_2x1_pbe_transmission_x",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "borophene_b_2x1_pbe_2026q1",
+    "timestamped_run_dir": true,
+    "write_data": true,
+    "write_input_snapshot": true,
+    "write_plot": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "solver": {
+    "collect_rejected": false,
+    "eta_device": null,
+    "eta_fixed": 0.0001,
+    "eta_ratio_cm1_min": null,
+    "eta_scheme": "adaptive",
+    "eta_values": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "max_channel_factor": 1.5,
+    "max_eta_over_omega": null,
+    "min_success_fraction": 0.7,
+    "nonnegative_tolerance": 1e-08,
+    "omega_scale_mode": "none",
+    "surface_gf_method": "generalized_eigen_svd"
+  }
+}

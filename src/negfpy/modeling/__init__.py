@@ -5,6 +5,7 @@ from .builders import (
     build_transport_components,
     infer_principal_layer_size,
 )
+from .atomic_masses import ATOMIC_MASS_AMU, get_atomic_mass_amu
 from .ifc_tools import enforce_translational_asr_on_self_term
 from .schema import BuildConfig, IFCData, IFCTerm, InterfaceData
 from .units import qe_ev_to_omega, qe_omega_to_cm1, qe_omega_to_ev, qe_omega_to_rad_s, qe_omega_to_thz
@@ -20,6 +21,8 @@ __all__ = [
     "build_material_kspace_params",
     "build_transport_components",
     "build_interface_contacts",
+    "ATOMIC_MASS_AMU",
+    "get_atomic_mass_amu",
     "enforce_translational_asr_on_self_term",
     "validate_ifc_data",
     "validate_transport_connectivity",

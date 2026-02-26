@@ -1,0 +1,669 @@
+{
+  "eta_records": [
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 6.5e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 16.882663951046244,
+      "omega_qe": 0.00015384615384615385,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.25e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 33.76532790209249,
+      "omega_qe": 0.0003076923076923077,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.1666666666666664e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 50.647991853138734,
+      "omega_qe": 0.0004615384615384616,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.625e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 67.53065580418497,
+      "omega_qe": 0.0006153846153846154,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.3000000000000001e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 84.41331975523121,
+      "omega_qe": 0.0007692307692307692,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.0833333333333332e-05,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 101.29598370627747,
+      "omega_qe": 0.0009230769230769232,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 400
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 9.285714285714286e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 118.17864765732368,
+      "omega_qe": 0.0010769230769230769,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 8.125e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 135.06131160836995,
+      "omega_qe": 0.0012307692307692308,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 7.222222222222222e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 151.9439755594162,
+      "omega_qe": 0.0013846153846153847,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 6.5000000000000004e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 168.82663951046243,
+      "omega_qe": 0.0015384615384615385,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 5.9090909090909085e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 185.70930346150868,
+      "omega_qe": 0.0016923076923076924,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 5.416666666666666e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 202.59196741255494,
+      "omega_qe": 0.0018461538461538463,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 5e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 219.47463136360113,
+      "omega_qe": 0.002,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 4.642857142857143e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 236.35729531464736,
+      "omega_qe": 0.0021538461538461538,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 4.333333333333333e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 253.23995926569367,
+      "omega_qe": 0.002307692307692308,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 4.0625e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 270.1226232167399,
+      "omega_qe": 0.0024615384615384616,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.823529411764706e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 287.00528716778615,
+      "omega_qe": 0.0026153846153846153,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.611111111111111e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 303.8879511188324,
+      "omega_qe": 0.0027692307692307695,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.4210526315789474e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 320.77061506987866,
+      "omega_qe": 0.002923076923076923,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.2500000000000002e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 337.65327902092486,
+      "omega_qe": 0.003076923076923077,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 3.095238095238095e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 354.5359429719711,
+      "omega_qe": 0.003230769230769231,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.9545454545454542e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 371.41860692301736,
+      "omega_qe": 0.003384615384615385,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.8260869565217393e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 388.30127087406356,
+      "omega_qe": 0.0035384615384615385,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.708333333333333e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 405.1839348251099,
+      "omega_qe": 0.0036923076923076927,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.6e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 422.06659877615607,
+      "omega_qe": 0.0038461538461538464,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.5e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 438.94926272720227,
+      "omega_qe": 0.004,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.4074074074074075e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 455.8319266782485,
+      "omega_qe": 0.004153846153846154,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.3214285714285715e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 472.7145906292947,
+      "omega_qe": 0.0043076923076923075,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.2413793103448275e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 489.5972545803411,
+      "omega_qe": 0.004461538461538462,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.1666666666666665e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 506.47991853138734,
+      "omega_qe": 0.004615384615384616,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.096774193548387e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 523.3625824824335,
+      "omega_qe": 0.0047692307692307695,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 2.03125e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 540.2452464334798,
+      "omega_qe": 0.004923076923076923,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.96969696969697e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 557.127910384526,
+      "omega_qe": 0.005076923076923077,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.911764705882353e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 574.0105743355723,
+      "omega_qe": 0.005230769230769231,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.8571428571428573e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 590.8932382866185,
+      "omega_qe": 0.005384615384615384,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.8055555555555555e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 607.7759022376648,
+      "omega_qe": 0.005538461538461539,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.7567567567567567e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 624.658566188711,
+      "omega_qe": 0.005692307692307693,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.7105263157894737e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 641.5412301397573,
+      "omega_qe": 0.005846153846153846,
+      "success_fraction": 1.0
+    },
+    {
+      "eta_histogram": {
+        "0.0001": 0,
+        "0.001": 0,
+        "1e-05": 0,
+        "1e-06": 0,
+        "1e-07": 0,
+        "1e-08": 324
+      },
+      "eta_selected": null,
+      "max_eta_over_omega": 1.6666666666666667e-06,
+      "max_eta_used": 1e-08,
+      "n_failed_kpoints": 0,
+      "omega_cm1": 658.4238940908035,
+      "omega_qe": 0.006,
+      "success_fraction": 1.0
+    }
+  ],
+  "n_rejected_total": 0,
+  "omega_failures": []
+}

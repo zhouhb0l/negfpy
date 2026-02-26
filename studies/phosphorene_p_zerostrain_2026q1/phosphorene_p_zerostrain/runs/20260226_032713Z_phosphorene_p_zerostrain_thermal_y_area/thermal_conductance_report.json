@@ -1,0 +1,69 @@
+{
+  "outputs": {
+    "data": "studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\runs\\20260226_032713Z_phosphorene_p_zerostrain_thermal_y_area\\thermal_conductance.tsv",
+    "plot": "studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\runs\\20260226_032713Z_phosphorene_p_zerostrain_thermal_y_area\\thermal_conductance.png",
+    "plot_per_area": "studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\runs\\20260226_032713Z_phosphorene_p_zerostrain_thermal_y_area\\thermal_conductance_per_area.png"
+  },
+  "provenance": {
+    "config_sha256": "87ee315ee85599cc8f1fa33ba86d40890fc2621afbf303475d24ee39c43796f5",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "thermal_conductance",
+    "finished_utc": "2026-02-26T03:27:14.577055+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\phosphorene_p_zerostrain_2026q1\\inputs\\configs\\phosphorene_thermal_y_area.json",
+    "name": "phosphorene_p_zerostrain_thermal_y_area",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\runs\\20260226_032713Z_phosphorene_p_zerostrain_thermal_y_area",
+    "runtime_seconds": 1.0565984999993816,
+    "started_utc": "2026-02-26T03:27:13.520924+00:00"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\manifest.jsonl",
+    "material": "phosphorene_p_zerostrain",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain",
+    "run_dir_name": "20260226_032713Z_phosphorene_p_zerostrain_thermal_y_area",
+    "study": "phosphorene_p_zerostrain_2026q1"
+  },
+  "thermal": {
+    "has_transmission_per_m2": true,
+    "n_temperature_points": 201,
+    "temperature_max_k": 400.0,
+    "temperature_min_k": 0.0,
+    "transmission_metadata": {
+      "atom_symbols": [
+        "P",
+        "P",
+        "P",
+        "P"
+      ],
+      "lattice_vectors_override_angstrom": [
+        [
+          3.2625138212665235,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          4.3413791830061905,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          20.28000809018394
+        ]
+      ],
+      "lattice_vectors_raw": null,
+      "source_format": "qe_q2r_fc",
+      "thickness_angstrom": 5.3,
+      "thickness_direction": 3,
+      "transport_direction": 2,
+      "transverse_area_m2": 1.7291323252712573e-19
+    },
+    "transmission_path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\phosphorene_p_zerostrain_2026q1\\phosphorene_p_zerostrain\\runs\\20260226_032511Z_phosphorene_p_zerostrain_transmission_y_area\\transmission.tsv"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "run": {
+    "calculation": "thermal_conductance",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "borophene_b_2x1_pbe_2026q1",
+    "material": "borophene_b_2x1_pbe",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1",
+    "name": "borophene_b_2x1_pbe_thermal_x"
+  },
+  "thermal": {
+    "transmission_path": null,
+    "transmission_report_path": "../../borophene_b_2x1_pbe/runs/20260225_083704Z_borophene_b_2x1_pbe_transmission_x/transmission_report.json",
+    "temperature_min_k": 0.0,
+    "temperature_max_k": 400.0,
+    "n_temperature_points": 201
+  }
+}

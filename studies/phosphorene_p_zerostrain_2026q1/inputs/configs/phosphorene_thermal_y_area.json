@@ -1,0 +1,24 @@
+{
+  "run": {
+    "name": "phosphorene_p_zerostrain_thermal_y_area",
+    "calculation": "thermal_conductance",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "phosphorene_p_zerostrain_2026q1",
+    "material": "phosphorene_p_zerostrain",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "thermal": {
+    "transmission_path": null,
+    "transmission_report_path": "../../phosphorene_p_zerostrain/runs/20260226_032907Z_phosphorene_p_zerostrain_transmission_y_area/transmission_report.json",
+    "temperature_min_k": 0.0,
+    "temperature_max_k": 400.0,
+    "n_temperature_points": 201
+  }
+}

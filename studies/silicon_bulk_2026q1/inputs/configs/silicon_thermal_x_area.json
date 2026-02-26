@@ -1,0 +1,24 @@
+{
+  "run": {
+    "name": "silicon_thermal_x_area",
+    "calculation": "thermal_conductance",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "silicon_bulk_2026q1",
+    "material": "silicon",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "thermal": {
+    "transmission_path": null,
+    "transmission_report_path": "../../silicon/runs/20260226_033848Z_silicon_transmission_x/transmission_report.json",
+    "temperature_min_k": 0.0,
+    "temperature_max_k": 400.0,
+    "n_temperature_points": 201
+  }
+}

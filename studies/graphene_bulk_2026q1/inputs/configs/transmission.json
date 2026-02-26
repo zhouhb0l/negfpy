@@ -15,7 +15,7 @@
     "x_unit": "cm-1"
   },
   "ifc": {
-    "path": "../../../../graphene.fc",
+    "path": "../ifc/graphene.fc",
     "reader": "qe",
     "enforce_asr": false,
     "dy_cutoff": null,

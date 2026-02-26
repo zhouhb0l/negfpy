@@ -1,0 +1,24 @@
+{
+  "run": {
+    "calculation": "thermal_conductance",
+    "manifest_jsonl": "manifest.jsonl",
+    "material": "graphene",
+    "name": "graphene_thermal_x_area",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "graphene_bulk_2026q1",
+    "timestamped_run_dir": true,
+    "write_data": true,
+    "write_input_snapshot": true,
+    "write_plot": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "thermal": {
+    "n_temperature_points": 201,
+    "temperature_max_k": 400.0,
+    "temperature_min_k": 0.0,
+    "transmission_path": null,
+    "transmission_report_path": "../../graphene/runs/20260226_034305Z_graphene_transmission_area/transmission_report.json"
+  }
+}

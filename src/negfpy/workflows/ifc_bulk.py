@@ -22,6 +22,8 @@ from negfpy.core import (
     lead_surface_dos,
     lead_surface_dos_kavg,
     lead_surface_dos_kavg_adaptive,
+    transverse_area_from_vectors,
+    transverse_length_from_vector,
     transmission_kavg_adaptive,
     transmission_kavg_adaptive_global_eta,
 )
@@ -33,6 +35,7 @@ from negfpy.modeling import (
     enforce_translational_asr_on_self_term,
     qe_ev_to_omega,
     qe_omega_to_cm1,
+    qe_omega_to_rad_s,
     qe_omega_to_thz,
 )
 from negfpy.modeling.builders import build_material_kspace_params
@@ -40,6 +43,10 @@ from negfpy.models import material_kspace_device, material_kspace_lead
 
 
 DEFAULT_ETA_VALUES: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3)
+HBAR_J_S = 1.054_571_817e-34
+KB_J_K = 1.380_649e-23
+ANGSTROM_M = 1.0e-10
+BOHR_M = 5.291_772_109_03e-11
 
 
 def _utc_now_iso() -> str:
@@ -283,6 +290,187 @@ def _apply_transverse_cutoff(
     )
     return out, removed
 
+
+def _log_omega_progress(
+    *,
+    cfg: dict[str, Any],
+    calc_label: str,
+    i: int,
+    total: int,
+    omega_qe: float,
+    success_count: int,
+    fail_count: int,
+) -> None:
+    run_cfg = dict(cfg.get("run", {}))
+    if not bool(run_cfg.get("progress_omega", True)):
+        return
+    every = int(run_cfg.get("progress_every", 1))
+    if every <= 0:
+        every = 1
+    idx = i + 1
+    if (idx % every) != 0 and idx != total:
+        return
+    omega_cm1 = float(np.asarray(qe_omega_to_cm1(omega_qe), dtype=float))
+    pct = 100.0 * float(idx) / float(max(total, 1))
+    print(
+        f"[{calc_label}] omega {idx}/{total} ({pct:5.1f}%) "
+        f"w_qe={omega_qe:.6e} w_cm-1={omega_cm1:.3f} "
+        f"ok={success_count} fail={fail_count}",
+        flush=True,
+    )
+
+
+def _lattice_vectors_to_meters(lattice_vectors: np.ndarray, ifc_metadata: dict[str, Any]) -> np.ndarray:
+    src = str(ifc_metadata.get("source_format", "")).lower()
+    if src == "phonopy_force_constants":
+        scale = ANGSTROM_M
+    elif src == "qe_q2r_fc":
+        scale = BOHR_M
+    else:
+        raise ValueError(
+            "Unknown lattice-vector unit for area normalization. "
+            "Supported source_format: phonopy_force_constants, qe_q2r_fc."
+        )
+    return np.asarray(lattice_vectors, dtype=float) * float(scale)
+
+
+def _compute_transverse_area_m2(lattice_vectors: np.ndarray, transport_direction: int) -> float:
+    lv = np.asarray(lattice_vectors, dtype=float)
+    if lv.shape != (3, 3):
+        raise ValueError("lattice_vectors must be shape (3,3) to compute transverse area.")
+    tidx = int(transport_direction) - 1
+    if tidx not in {0, 1, 2}:
+        raise ValueError("transport_direction must be one of 1, 2, 3.")
+    trans = [0, 1, 2]
+    trans.remove(tidx)
+    e = lv[tidx, :]
+    t1 = lv[trans[0], :]
+    t2 = lv[trans[1], :]
+    return float(transverse_area_from_vectors(t1, t2, e))
+
+
+def _compute_effective_area_m2(
+    lattice_vectors_m: np.ndarray,
+    *,
+    transport_direction: int,
+    thickness_m: float | None,
+    thickness_direction: int | None,
+) -> float:
+    lv = np.asarray(lattice_vectors_m, dtype=float)
+    tidx = int(transport_direction) - 1
+    if tidx not in {0, 1, 2}:
+        raise ValueError("transport_direction must be one of 1, 2, 3.")
+    if thickness_m is None:
+        return _compute_transverse_area_m2(lv, transport_direction=int(transport_direction))
+    if thickness_m <= 0.0:
+        raise ValueError("model.thickness_angstrom must be positive when provided.")
+
+    trans_axes = [0, 1, 2]
+    trans_axes.remove(tidx)
+    if thickness_direction is None:
+        # Heuristic: treat the longest transverse vector as vacuum/out-of-plane.
+        norms = [float(np.linalg.norm(lv[a, :])) for a in trans_axes]
+        thick_axis = trans_axes[int(np.argmax(norms))]
+    else:
+        thick_axis = int(thickness_direction) - 1
+        if thick_axis not in trans_axes:
+            raise ValueError("model.thickness_direction must be one of the transverse lattice directions.")
+    inplane_axis = trans_axes[0] if trans_axes[1] == thick_axis else trans_axes[1]
+
+    transport_vec = lv[tidx, :]
+    inplane_vec = lv[inplane_axis, :]
+    inplane_len = float(transverse_length_from_vector(inplane_vec, transport_vec))
+    return float(inplane_len * float(thickness_m))
+
+
+def _resolve_lattice_vectors_for_area(
+    *,
+    ifc_lattice_vectors: np.ndarray | None,
+    ifc_metadata: dict[str, Any],
+    lattice_vectors_override_angstrom: np.ndarray | None,
+) -> np.ndarray | None:
+    if lattice_vectors_override_angstrom is not None:
+        return np.asarray(lattice_vectors_override_angstrom, dtype=float) * ANGSTROM_M
+    if ifc_lattice_vectors is None:
+        return None
+    return _lattice_vectors_to_meters(np.asarray(ifc_lattice_vectors, dtype=float), dict(ifc_metadata))
+
+
+def _thermal_conductance_from_spectrum(
+    omega_qe: np.ndarray,
+    transmission_vals: np.ndarray,
+    temperatures_k: np.ndarray,
+) -> np.ndarray:
+    omega_qe = np.asarray(omega_qe, dtype=float)
+    tvals = np.asarray(transmission_vals, dtype=float)
+    temps = np.asarray(temperatures_k, dtype=float)
+    if omega_qe.ndim != 1 or tvals.ndim != 1 or omega_qe.size != tvals.size:
+        raise ValueError("omega_qe and transmission_vals must be 1D arrays of equal length.")
+    if np.any(np.diff(omega_qe) <= 0.0):
+        raise ValueError("omega_qe must be strictly increasing.")
+    omega_rad_s = np.asarray(qe_omega_to_rad_s(omega_qe), dtype=float)
+    gvals = np.zeros_like(temps, dtype=float)
+    for i, t in enumerate(temps):
+        if t <= 0.0:
+            gvals[i] = 0.0
+            continue
+        x = (HBAR_J_S * omega_rad_s) / (KB_J_K * float(t))
+        kernel = np.zeros_like(x)
+        small = x < 1e-6
+        mid = (x >= 1e-6) & (x < 700.0)
+        kernel[small] = 1.0 - (x[small] ** 2) / 12.0
+        # Stable form of x^2 * exp(x) / (exp(x)-1)^2
+        # = x^2 * exp(-x) / (1 - exp(-x))^2
+        y = np.exp(-x[mid])
+        denom = (1.0 - y) ** 2
+        kernel[mid] = (x[mid] ** 2) * y / denom
+        integrand = KB_J_K * tvals * kernel
+        gvals[i] = float((1.0 / (2.0 * np.pi)) * np.trapz(integrand, omega_rad_s))
+    return gvals
+
+
+def _load_transmission_spectrum(path: Path) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
+    header_cols: list[str] | None = None
+    rows: list[list[float]] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                txt = line[1:].strip()
+                if txt.startswith("meta_json:"):
+                    js = txt.split("meta_json:", 1)[1].strip()
+                    try:
+                        meta = json.loads(js)
+                    except Exception:
+                        meta = {}
+                elif txt and ("\t" in txt or "omega_qe" in txt):
+                    header_cols = [c.strip() for c in txt.split("\t")]
+                continue
+            toks = line.split()
+            rows.append([float(v) for v in toks])
+    if len(rows) == 0:
+        raise ValueError(f"No numeric rows found in transmission file '{path}'.")
+    arr = np.asarray(rows, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 4:
+        raise ValueError("Transmission file must contain at least 4 numeric columns.")
+    omega_qe = arr[:, 0]
+    transmission = arr[:, 3]
+    transmission_per_area = None
+    if arr.shape[1] >= 5:
+        transmission_per_area = arr[:, 4]
+    elif header_cols is not None and "transmission_per_m2" in header_cols:
+        idx = header_cols.index("transmission_per_m2")
+        if idx < arr.shape[1]:
+            transmission_per_area = arr[:, idx]
+    return {
+        "omega_qe": np.asarray(omega_qe, dtype=float),
+        "transmission": np.asarray(transmission, dtype=float),
+        "transmission_per_m2": None if transmission_per_area is None else np.asarray(transmission_per_area, dtype=float),
+        "metadata": meta,
+    }
 
 def _axis_permutation_for_transport_direction(direction: int) -> tuple[int, int, int]:
     if direction == 1:
@@ -716,10 +904,22 @@ def _run_transmission(
     omega_failures: list[dict[str, Any]] = []
     eta_records: list[dict[str, Any]] = []
     rejected_total = 0
+    success_count = 0
+    fail_count = 0
 
     for i, w in enumerate(omegas):
         if w <= 0.0:
             vals[i] = 0.0
+            success_count += 1
+            _log_omega_progress(
+                cfg=cfg,
+                calc_label="transmission",
+                i=i,
+                total=int(len(omegas)),
+                omega_qe=float(w),
+                success_count=success_count,
+                fail_count=fail_count,
+            )
             continue
         w_cm1 = float(np.asarray(qe_omega_to_cm1(w), dtype=float))
         kpts = kmesh["low"]["kpoints"] if w_cm1 <= float(kmesh["low_cm1"]) else kmesh["high"]["kpoints"]
@@ -758,6 +958,16 @@ def _run_transmission(
         except Exception as exc:
             vals[i] = np.nan
             omega_failures.append({"omega_qe": float(w), "omega_cm1": w_cm1, "error": str(exc)})
+            fail_count += 1
+            _log_omega_progress(
+                cfg=cfg,
+                calc_label="transmission",
+                i=i,
+                total=int(len(omegas)),
+                omega_qe=float(w),
+                success_count=success_count,
+                fail_count=fail_count,
+            )
             continue
 
         hist = dict(info.get("eta_histogram", {}))
@@ -777,6 +987,16 @@ def _run_transmission(
         )
         if collect_rejected:
             rejected_total += int(info.get("n_rejected", 0))
+        success_count += 1
+        _log_omega_progress(
+            cfg=cfg,
+            calc_label="transmission",
+            i=i,
+            total=int(len(omegas)),
+            omega_qe=float(w),
+            success_count=success_count,
+            fail_count=fail_count,
+        )
 
     if np.all(~np.isfinite(vals)):
         raise RuntimeError("Transmission calculation failed for all omega points.")
@@ -827,10 +1047,22 @@ def _run_dos(
     vals = np.zeros_like(omegas, dtype=float)
     omega_failures: list[dict[str, Any]] = []
     eta_records: list[dict[str, Any]] = []
+    success_count = 0
+    fail_count = 0
 
     for i, w in enumerate(omegas):
         if w < 0.0:
             vals[i] = np.nan
+            fail_count += 1
+            _log_omega_progress(
+                cfg=cfg,
+                calc_label="dos",
+                i=i,
+                total=int(len(omegas)),
+                omega_qe=float(w),
+                success_count=success_count,
+                fail_count=fail_count,
+            )
             continue
         w_cm1 = float(np.asarray(qe_omega_to_cm1(w), dtype=float))
         kpts = kmesh["low"]["kpoints"] if w_cm1 <= float(kmesh["low_cm1"]) else kmesh["high"]["kpoints"]
@@ -884,6 +1116,16 @@ def _run_dos(
         except Exception as exc:
             vals[i] = np.nan
             omega_failures.append({"omega_qe": float(w), "omega_cm1": w_cm1, "error": str(exc)})
+            fail_count += 1
+            _log_omega_progress(
+                cfg=cfg,
+                calc_label="dos",
+                i=i,
+                total=int(len(omegas)),
+                omega_qe=float(w),
+                success_count=success_count,
+                fail_count=fail_count,
+            )
             continue
 
         hist = dict(info.get("eta_histogram", {}))
@@ -903,6 +1145,16 @@ def _run_dos(
                 else float(max_eta_used / float(w)),
             }
         )
+        success_count += 1
+        _log_omega_progress(
+            cfg=cfg,
+            calc_label="dos",
+            i=i,
+            total=int(len(omegas)),
+            omega_qe=float(w),
+            success_count=success_count,
+            fail_count=fail_count,
+        )
 
     if np.all(~np.isfinite(vals)):
         raise RuntimeError("DOS calculation failed for all omega points.")
@@ -919,6 +1171,70 @@ def _run_dos(
             "normalize_per_mode": normalize_per_mode,
             "max_eta_over_omega": max_ratio,
             "n_omega_failures": len(omega_failures),
+        },
+    }
+
+
+def _run_thermal_conductance(cfg: dict[str, Any], *, cfg_dir: Path) -> dict[str, Any]:
+    tcfg = dict(cfg.get("thermal", {}))
+    src_rel = tcfg.get("transmission_path", None)
+    report_rel = tcfg.get("transmission_report_path", None)
+    if src_rel is None and report_rel is None:
+        raise ValueError(
+            "Provide thermal.transmission_path or thermal.transmission_report_path "
+            "for thermal_conductance calculation."
+        )
+    if src_rel is None:
+        report_path = _resolve_path(cfg_dir, report_rel).resolve()
+        rep = _load_json_config(report_path)
+        outputs = dict(rep.get("outputs", {}))
+        data_ref = outputs.get("data", None)
+        if data_ref is None:
+            raise ValueError("transmission report does not contain outputs.data.")
+        transmission_path = Path(data_ref)
+        if not transmission_path.is_absolute():
+            candidate_cwd = transmission_path.resolve()
+            if candidate_cwd.exists():
+                transmission_path = candidate_cwd
+            else:
+                transmission_path = (report_path.parent / transmission_path).resolve()
+    else:
+        transmission_path = _resolve_path(cfg_dir, src_rel).resolve()
+    spec = _load_transmission_spectrum(transmission_path)
+
+    t_min = float(tcfg.get("temperature_min_k", 0.0))
+    t_max = float(tcfg.get("temperature_max_k", 400.0))
+    n_t = int(tcfg.get("n_temperature_points", 161))
+    if n_t <= 1:
+        raise ValueError("thermal.n_temperature_points must be > 1.")
+    if t_max < t_min:
+        raise ValueError("thermal.temperature_max_k must be >= thermal.temperature_min_k.")
+    temperatures_k = np.linspace(t_min, t_max, n_t, dtype=float)
+
+    g_lattice = _thermal_conductance_from_spectrum(
+        omega_qe=np.asarray(spec["omega_qe"], dtype=float),
+        transmission_vals=np.asarray(spec["transmission"], dtype=float),
+        temperatures_k=temperatures_k,
+    )
+
+    g_area = None
+    if spec.get("transmission_per_m2") is not None:
+        g_area = _thermal_conductance_from_spectrum(
+            omega_qe=np.asarray(spec["omega_qe"], dtype=float),
+            transmission_vals=np.asarray(spec["transmission_per_m2"], dtype=float),
+            temperatures_k=temperatures_k,
+        )
+    return {
+        "temperatures_k": temperatures_k,
+        "conductance_w_per_k": g_lattice,
+        "conductance_per_area_w_m2_k": g_area,
+        "summary": {
+            "transmission_path": str(transmission_path),
+            "temperature_min_k": t_min,
+            "temperature_max_k": t_max,
+            "n_temperature_points": n_t,
+            "has_transmission_per_m2": bool(spec.get("transmission_per_m2") is not None),
+            "transmission_metadata": dict(spec.get("metadata", {})),
         },
     }
 
@@ -966,15 +1282,37 @@ def _run_dispersion(cfg: dict[str, Any], *, lead) -> dict[str, Any]:
     }
 
 
-def _save_spectrum_data(path: Path, omegas: np.ndarray, values: np.ndarray, value_name: str) -> None:
+def _save_spectrum_data(
+    path: Path,
+    omegas: np.ndarray,
+    values: np.ndarray,
+    value_name: str,
+    *,
+    extra_columns: dict[str, np.ndarray] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     x_thz = np.asarray(qe_omega_to_thz(omegas), dtype=float)
     x_cm1 = np.asarray(qe_omega_to_cm1(omegas), dtype=float)
+    extra_columns = {} if extra_columns is None else dict(extra_columns)
+    metadata = {} if metadata is None else dict(metadata)
+    for k, v in extra_columns.items():
+        arr = np.asarray(v, dtype=float)
+        if arr.shape != np.asarray(omegas).shape:
+            raise ValueError(f"extra column '{k}' must have same shape as omegas.")
+        extra_columns[k] = arr
     with path.open("w", encoding="utf-8") as fh:
-        fh.write(f"# omega_qe\tfreq_thz\tfreq_cm^-1\t{value_name}\n")
-        for w, thz, cm1, v in zip(omegas, x_thz, x_cm1, values):
+        if len(metadata) > 0:
+            fh.write(f"# meta_json: {json.dumps(_to_builtin(metadata), sort_keys=True)}\n")
+        header = ["omega_qe", "freq_thz", "freq_cm^-1", value_name] + list(extra_columns.keys())
+        fh.write("# " + "\t".join(header) + "\n")
+        for i, (w, thz, cm1, v) in enumerate(zip(omegas, x_thz, x_cm1, values)):
             v_str = "nan" if not np.isfinite(v) else f"{float(v):.12e}"
-            fh.write(f"{float(w):.10e}\t{float(thz):.8f}\t{float(cm1):.8f}\t{v_str}\n")
+            row = [f"{float(w):.10e}", f"{float(thz):.8f}", f"{float(cm1):.8f}", v_str]
+            for key in extra_columns:
+                vv = float(extra_columns[key][i])
+                row.append("nan" if not np.isfinite(vv) else f"{vv:.12e}")
+            fh.write("\t".join(row) + "\n")
 
 
 def _save_dispersion_data(path: Path, kx: np.ndarray, bands_qe: np.ndarray, bands_cm1: np.ndarray) -> None:
@@ -989,6 +1327,29 @@ def _save_dispersion_data(path: Path, kx: np.ndarray, bands_qe: np.ndarray, band
             fh.write(f"{float(kx[i]):.10e}\t{float(kx[i]/np.pi):.10e}\t{qe_vals}\t{cm_vals}\n")
 
 
+def _save_thermal_conductance_data(
+    path: Path,
+    temperatures_k: np.ndarray,
+    conductance_w_per_k: np.ndarray,
+    *,
+    conductance_per_area_w_m2_k: np.ndarray | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {} if metadata is None else dict(metadata)
+    with path.open("w", encoding="utf-8") as fh:
+        if len(metadata) > 0:
+            fh.write(f"# meta_json: {json.dumps(_to_builtin(metadata), sort_keys=True)}\n")
+        if conductance_per_area_w_m2_k is None:
+            fh.write("# temperature_K\tconductance_W_per_K\n")
+            for t, g in zip(temperatures_k, conductance_w_per_k):
+                fh.write(f"{float(t):.8f}\t{float(g):.12e}\n")
+        else:
+            fh.write("# temperature_K\tconductance_W_per_K\tconductance_per_area_W_per_m2K\n")
+            for t, g, ga in zip(temperatures_k, conductance_w_per_k, conductance_per_area_w_m2_k):
+                fh.write(f"{float(t):.8f}\t{float(g):.12e}\t{float(ga):.12e}\n")
+
+
 def _plot_spectrum(path: Path, x: np.ndarray, y: np.ndarray, *, xlabel: str, ylabel: str, title: str) -> None:
     import matplotlib.pyplot as plt
 
@@ -996,6 +1357,20 @@ def _plot_spectrum(path: Path, x: np.ndarray, y: np.ndarray, *, xlabel: str, yla
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     ax.plot(x, y, color="tab:blue", lw=1.6)
     ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+
+
+def _plot_thermal_conductance(path: Path, temperatures_k: np.ndarray, conductance: np.ndarray, *, ylabel: str, title: str) -> None:
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.plot(temperatures_k, conductance, color="tab:red", lw=1.8)
+    ax.set_xlabel("Temperature (K)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.grid(alpha=0.3)
@@ -1031,9 +1406,12 @@ def _default_template() -> dict[str, Any]:
             "write_input_snapshot": True,
             "manifest_jsonl": "manifest.jsonl",
             "write_plot": True,
+            "write_plot_per_area": True,
             "write_data": True,
             "write_report": True,
             "x_unit": "cm-1",
+            "progress_omega": True,
+            "progress_every": 1,
         },
         "ifc": {
             "path": "si444.fc",
@@ -1052,9 +1430,13 @@ def _default_template() -> dict[str, Any]:
             "auto_principal_layer_enlargement": True,
             "infer_fc01_from_negative_dx": True,
             "enforce_hermitian_fc00": True,
+            "nyquist_split_half": False,
             "mass_mode": "ifc",
             "drop_nyquist_transverse": False,
             "onsite_pinning": 0.0,
+            "thickness_angstrom": None,
+            "thickness_direction": None,
+            "lattice_vectors_angstrom": None,
         },
         "kmesh": {
             "dimension": 2,
@@ -1099,6 +1481,13 @@ def _default_template() -> dict[str, Any]:
             "negative_tolerance": 1e-8,
             "allow_unstable": False,
         },
+        "thermal": {
+            "transmission_path": "transmission.tsv",
+            "transmission_report_path": None,
+            "temperature_min_k": 0.0,
+            "temperature_max_k": 400.0,
+            "n_temperature_points": 161,
+        },
     }
 
 
@@ -1114,8 +1503,8 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     cfg = _load_json_config(cfg_path)
     run_cfg = dict(cfg.get("run", {}))
     calc_type = str(run_cfg.get("calculation", "transmission")).lower()
-    if calc_type not in {"transmission", "dos", "dispersion"}:
-        raise ValueError("run.calculation must be one of: transmission, dos, dispersion.")
+    if calc_type not in {"transmission", "dos", "dispersion", "thermal_conductance"}:
+        raise ValueError("run.calculation must be one of: transmission, dos, dispersion, thermal_conductance.")
 
     run_name = str(run_cfg.get("name", f"{calc_type}_{cfg_path.stem}"))
     run_name_safe = _sanitize_token(run_name)
@@ -1144,11 +1533,121 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     else:
         raise ValueError("run.output_mode must be one of: flat, study.")
     write_plot = bool(run_cfg.get("write_plot", True))
+    write_plot_per_area = bool(run_cfg.get("write_plot_per_area", True))
     write_data = bool(run_cfg.get("write_data", True))
     write_report = bool(run_cfg.get("write_report", True))
     x_unit = str(run_cfg.get("x_unit", "cm-1")).lower()
     if x_unit not in {"cm-1", "thz", "qe"}:
         raise ValueError("run.x_unit must be one of: cm-1, thz, qe.")
+
+    if calc_type == "thermal_conductance":
+        t0 = time.perf_counter()
+        started = _utc_now_iso()
+        cfg_path_abs = cfg_path.resolve()
+        workspace_root = Path.cwd()
+        cfg_sha256 = _sha256_file(cfg_path_abs)
+        git_head = _git_head_sha(workspace_root)
+        git_is_dirty = _git_dirty(workspace_root)
+
+        results = _run_thermal_conductance(cfg, cfg_dir=cfg_dir)
+        temperatures_k = np.asarray(results["temperatures_k"], dtype=float)
+        g_lattice = np.asarray(results["conductance_w_per_k"], dtype=float)
+        g_area = results.get("conductance_per_area_w_m2_k", None)
+        g_area_arr = None if g_area is None else np.asarray(g_area, dtype=float)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if write_input_snapshot:
+            _save_json(output_dir / "input.json", cfg)
+
+        outputs: dict[str, str] = {}
+        data_default = "thermal_conductance.tsv" if output_mode == "study" else f"{run_name}_thermal_conductance.tsv"
+        data_path = output_dir / run_cfg.get("data_filename", data_default)
+        if write_data:
+            _save_thermal_conductance_data(
+                data_path,
+                temperatures_k=temperatures_k,
+                conductance_w_per_k=g_lattice,
+                conductance_per_area_w_m2_k=g_area_arr,
+                metadata={"summary": dict(results.get("summary", {}))},
+            )
+            outputs["data"] = str(data_path)
+
+        if write_plot:
+            plot_default = "thermal_conductance.png" if output_mode == "study" else f"{run_name}_thermal_conductance.png"
+            plot_path = output_dir / run_cfg.get("plot_filename", plot_default)
+            _plot_thermal_conductance(
+                plot_path,
+                temperatures_k=temperatures_k,
+                conductance=g_lattice,
+                ylabel="Thermal Conductance (W/K)",
+                title=f"Thermal Conductance ({run_name})",
+            )
+            outputs["plot"] = str(plot_path)
+            if g_area_arr is not None:
+                plot_area_path = output_dir / run_cfg.get(
+                    "plot_area_filename",
+                    ("thermal_conductance_per_area.png" if output_mode == "study" else f"{run_name}_thermal_conductance_per_area.png"),
+                )
+                _plot_thermal_conductance(
+                    plot_area_path,
+                    temperatures_k=temperatures_k,
+                    conductance=g_area_arr,
+                    ylabel=r"Thermal Conductance per Area (W/m$^2$/K)",
+                    title=f"Thermal Conductance per Area ({run_name})",
+                )
+                outputs["plot_per_area"] = str(plot_area_path)
+
+        runtime = time.perf_counter() - t0
+        finished = _utc_now_iso()
+        report = {
+            "run": {
+                "name": run_name,
+                "calculation": calc_type,
+                "output_mode": output_mode,
+                "input_config": str(cfg_path_abs),
+                "started_utc": started,
+                "finished_utc": finished,
+                "runtime_seconds": float(runtime),
+                "run_dir": str(output_dir.resolve()),
+            },
+            "thermal": dict(results.get("summary", {})),
+            "outputs": outputs,
+            "provenance": {
+                "config_sha256": cfg_sha256,
+                "git_head": git_head,
+                "git_dirty": git_is_dirty,
+                "hostname": socket.gethostname(),
+                "workspace": str(workspace_root),
+            },
+        }
+        if output_mode == "study":
+            report["study"] = {
+                "root": str(study_root.resolve()) if study_root is not None else None,
+                "study": study_name,
+                "material": material_name,
+                "run_dir_name": run_dir_name,
+                "manifest_jsonl": (str(manifest_path.resolve()) if manifest_path is not None else None),
+            }
+        if write_report:
+            report_default = "thermal_conductance_report.json" if output_mode == "study" else f"{run_name}_thermal_conductance_report.json"
+            report_path = output_dir / run_cfg.get("report_filename", report_default)
+            _save_json(report_path, report)
+            outputs["report"] = str(report_path)
+        if output_mode == "study" and manifest_path is not None:
+            _append_manifest_jsonl(
+                manifest_path,
+                {
+                    "created_utc": finished,
+                    "run_name": run_name,
+                    "calculation": calc_type,
+                    "run_dir": str(output_dir.resolve()),
+                    "config_path": str(cfg_path_abs),
+                    "config_sha256": cfg_sha256,
+                    "git_head": git_head,
+                    "git_dirty": git_is_dirty,
+                },
+            )
+        return report
 
     ifc_cfg = dict(cfg.get("ifc", {}))
     ifc_path_raw = ifc_cfg.get("path", "si444.fc")
@@ -1190,6 +1689,16 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         ifc_work = ifc_raw
     mcfg = dict(cfg.get("model", {}))
     transport_direction = int(mcfg.get("transport_direction", 1))
+    thickness_angstrom_raw = mcfg.get("thickness_angstrom", None)
+    thickness_angstrom = None if thickness_angstrom_raw is None else float(thickness_angstrom_raw)
+    thickness_direction_raw = mcfg.get("thickness_direction", None)
+    thickness_direction = None if thickness_direction_raw is None else int(thickness_direction_raw)
+    lv_override_raw = mcfg.get("lattice_vectors_angstrom", None)
+    lattice_vectors_override_angstrom = None
+    if lv_override_raw is not None:
+        lattice_vectors_override_angstrom = np.asarray(lv_override_raw, dtype=float)
+        if lattice_vectors_override_angstrom.shape != (3, 3):
+            raise ValueError("model.lattice_vectors_angstrom must be a 3x3 array when provided.")
 
     ifc_oriented = _reorient_ifc_for_transport_direction(ifc_work, direction=transport_direction)
     ifc_filtered, n_terms_removed = _apply_transverse_cutoff(ifc_oriented, dy_cutoff=dy_cutoff, dz_cutoff=dz_cutoff)
@@ -1201,6 +1710,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         auto_principal_layer_enlargement=bool(mcfg.get("auto_principal_layer_enlargement", True)),
         infer_fc01_from_negative_dx=bool(mcfg.get("infer_fc01_from_negative_dx", True)),
         enforce_hermitian_fc00=bool(mcfg.get("enforce_hermitian_fc00", True)),
+        nyquist_split_half=bool(mcfg.get("nyquist_split_half", False)),
         dtype=str(mcfg.get("dtype", "complex128")),
     )
     params = build_material_kspace_params(ifc=ifc_filtered, config=build_cfg)
@@ -1246,11 +1756,60 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
 
     if calc_type in {"transmission", "dos"} and omegas is not None:
         values = np.asarray(results["values"], dtype=float)
+        transmission_per_m2: np.ndarray | None = None
+        data_meta: dict[str, Any] | None = None
+        if calc_type == "transmission":
+            data_meta = {
+                "transport_direction": int(transport_direction),
+                "thickness_angstrom": thickness_angstrom,
+                "thickness_direction": thickness_direction,
+                "lattice_vectors_override_angstrom": None
+                if lattice_vectors_override_angstrom is None
+                else np.asarray(lattice_vectors_override_angstrom, dtype=float).tolist(),
+                "atom_symbols": None if ifc_filtered.atom_symbols is None else list(ifc_filtered.atom_symbols),
+                "lattice_vectors_raw": None
+                if ifc_filtered.lattice_vectors is None
+                else np.asarray(ifc_filtered.lattice_vectors, dtype=float).tolist(),
+                "source_format": str(ifc_filtered.metadata.get("source_format", "")),
+            }
+            lv_m = _resolve_lattice_vectors_for_area(
+                ifc_lattice_vectors=(
+                    None if ifc_filtered.lattice_vectors is None else np.asarray(ifc_filtered.lattice_vectors, dtype=float)
+                ),
+                ifc_metadata=dict(ifc_filtered.metadata),
+                lattice_vectors_override_angstrom=lattice_vectors_override_angstrom,
+            )
+            if lv_m is not None:
+                try:
+                    thickness_m = None if thickness_angstrom is None else float(thickness_angstrom) * ANGSTROM_M
+                    area_m2 = _compute_effective_area_m2(
+                        lv_m,
+                        transport_direction=int(transport_direction),
+                        thickness_m=thickness_m,
+                        thickness_direction=thickness_direction,
+                    )
+                    data_meta["transverse_area_m2"] = float(area_m2)
+                    if area_m2 > 0.0:
+                        transmission_per_m2 = np.asarray(values, dtype=float) / float(area_m2)
+                except Exception as exc:
+                    data_meta["transverse_area_error"] = str(exc)
         data_default = f"{calc_type}.tsv" if is_study_mode else f"{run_name}_{calc_type}.tsv"
         data_path = output_dir / run_cfg.get("data_filename", data_default)
         if write_data:
             val_name = "transmission" if calc_type == "transmission" else "surface_dos"
-            _save_spectrum_data(data_path, omegas=omegas, values=values, value_name=val_name)
+            extra_cols: dict[str, np.ndarray] | None = (
+                {"transmission_per_m2": transmission_per_m2}
+                if (calc_type == "transmission" and transmission_per_m2 is not None)
+                else None
+            )
+            _save_spectrum_data(
+                data_path,
+                omegas=omegas,
+                values=values,
+                value_name=val_name,
+                extra_columns=extra_cols,
+                metadata=data_meta,
+            )
             outputs["data"] = str(data_path)
         if write_plot:
             plot_default = f"{calc_type}.png" if is_study_mode else f"{run_name}_{calc_type}.png"
@@ -1267,6 +1826,18 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             ylabel = r"$T(\omega)$" if calc_type == "transmission" else "Surface DOS"
             _plot_spectrum(plot_path, x=x, y=values, xlabel=xlabel, ylabel=ylabel, title=f"{calc_type.capitalize()} ({run_name})")
             outputs["plot"] = str(plot_path)
+            if calc_type == "transmission" and write_plot_per_area and transmission_per_m2 is not None:
+                plot_area_default = "transmission_per_area.png" if is_study_mode else f"{run_name}_transmission_per_area.png"
+                plot_area_path = output_dir / run_cfg.get("plot_per_area_filename", plot_area_default)
+                _plot_spectrum(
+                    plot_area_path,
+                    x=x,
+                    y=transmission_per_m2,
+                    xlabel=xlabel,
+                    ylabel=r"$T(\omega)$/Area (m$^{-2}$)",
+                    title=f"Transmission per Area ({run_name})",
+                )
+                outputs["plot_per_area"] = str(plot_area_path)
 
         eta_default = f"{calc_type}_eta_diag.json" if is_study_mode else f"{run_name}_{calc_type}_eta_diag.json"
         eta_diag_path = output_dir / run_cfg.get("eta_diag_filename", eta_default)
@@ -1332,12 +1903,18 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "auto_principal_layer_enlargement": bool(build_cfg.auto_principal_layer_enlargement),
             "infer_fc01_from_negative_dx": bool(build_cfg.infer_fc01_from_negative_dx),
             "enforce_hermitian_fc00": bool(build_cfg.enforce_hermitian_fc00),
+            "nyquist_split_half": bool(build_cfg.nyquist_split_half),
             "mass_mode": mass_mode,
             "drop_nyquist_transverse": bool(drop_nyquist),
             "nyquist_filter": nyquist_info,
             "enforce_transverse_pm_symmetry": True,
             "pm_symmetry": pm_sym_info,
             "onsite_pinning": float(build_cfg.onsite_pinning),
+            "thickness_angstrom": thickness_angstrom,
+            "thickness_direction": thickness_direction,
+            "lattice_vectors_angstrom": None
+            if lattice_vectors_override_angstrom is None
+            else np.asarray(lattice_vectors_override_angstrom, dtype=float).tolist(),
             "ndof": int(params.ndof),
             "n_atoms_per_principal_layer": int(params.n_atoms),
         },

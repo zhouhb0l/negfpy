@@ -1,0 +1,85 @@
+{
+  "ifc": {
+    "dy_cutoff": null,
+    "dz_cutoff": null,
+    "enforce_asr": false,
+    "path": "../ifc/graphene.fc",
+    "reader": "qe"
+  },
+  "kmesh": {
+    "dimension": 1,
+    "low_cm1": 200.0,
+    "mode": "shifted",
+    "nk": 24,
+    "nk_low": 24
+  },
+  "model": {
+    "auto_principal_layer_enlargement": true,
+    "enforce_hermitian_fc00": true,
+    "infer_fc01_from_negative_dx": true,
+    "lattice_vectors_angstrom": [
+      [
+        2.469655696382301,
+        0.0,
+        0.0
+      ],
+      [
+        -1.2348278481911505,
+        2.1380926429787674,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        14.999990090129273
+      ]
+    ],
+    "n_layers": 40,
+    "onsite_pinning": 0.0,
+    "principal_layer_size": 4,
+    "thickness_angstrom": 3.35,
+    "thickness_direction": 3,
+    "transport_direction": 1
+  },
+  "omega": {
+    "auto_max": false,
+    "fmax_cm1": 1700.0,
+    "min": 0.0,
+    "n_points": 80
+  },
+  "run": {
+    "calculation": "transmission",
+    "manifest_jsonl": "manifest.jsonl",
+    "material": "graphene",
+    "name": "graphene_transmission_area",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "graphene_bulk_2026q1",
+    "timestamped_run_dir": true,
+    "write_data": true,
+    "write_input_snapshot": true,
+    "write_plot": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "solver": {
+    "collect_rejected": false,
+    "eta_device": null,
+    "eta_fixed": 0.0001,
+    "eta_ratio_cm1_min": null,
+    "eta_scheme": "adaptive",
+    "eta_values": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001
+    ],
+    "max_channel_factor": 1.5,
+    "max_eta_over_omega": null,
+    "min_success_fraction": 0.7,
+    "nonnegative_tolerance": 1e-08,
+    "omega_scale_mode": "none",
+    "surface_gf_method": "generalized_eigen_svd"
+  }
+}

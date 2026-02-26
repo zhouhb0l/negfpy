@@ -1,0 +1,71 @@
+{
+  "run": {
+    "name": "borophene_b_beta12_transmission_fixed_nk21_dy4",
+    "calculation": "transmission",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "borophene_b_beta12_2026q1",
+    "material": "borophene_b_beta12",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "ifc": {
+    "path": "../ifc/B_beta12.fc",
+    "reader": "qe",
+    "enforce_asr": false,
+    "dy_cutoff": 4,
+    "dz_cutoff": null
+  },
+  "model": {
+    "n_layers": 2,
+    "principal_layer_size": null,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "onsite_pinning": 0.0,
+    "mass_mode": "ifc",
+    "drop_nyquist_transverse": false
+  },
+  "kmesh": {
+    "dimension": 1,
+    "mode": "legacy_endpoint",
+    "nk": 21,
+    "nk_low": 21,
+    "low_cm1": 120.0,
+    "nky": 21,
+    "nky_low": 21
+  },
+  "omega": {
+    "min": 0.0,
+    "n_points": 120,
+    "auto_max": true,
+    "auto_sample_nk": 12,
+    "safety_factor": 1.02
+  },
+  "solver": {
+    "surface_gf_method": "generalized_eigen_svd",
+    "eta_scheme": "adaptive",
+    "eta_fixed": 0.0001,
+    "eta_device": null,
+    "eta_values": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001,
+      0.001
+    ],
+    "min_success_fraction": 0.7,
+    "max_channel_factor": 1.5,
+    "nonnegative_tolerance": 1e-08,
+    "collect_rejected": false,
+    "max_eta_over_omega": 0.01,
+    "eta_ratio_cm1_min": 200.0,
+    "omega_scale_mode": "none"
+  }
+}

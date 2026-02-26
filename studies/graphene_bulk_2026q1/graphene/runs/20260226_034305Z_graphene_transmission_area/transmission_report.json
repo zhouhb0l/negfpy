@@ -1,0 +1,169 @@
+{
+  "ifc": {
+    "asr_residual_max": null,
+    "atom_symbols": [
+      "C",
+      "C"
+    ],
+    "dof_per_atom": 3,
+    "dy_cutoff": null,
+    "dz_cutoff": null,
+    "enforce_asr": false,
+    "lattice_vectors": null,
+    "metadata": {
+      "born_charges": null,
+      "force_constant_unit": "Ry/bohr^2",
+      "ibrav": 4,
+      "mass_unit": "2*electron_mass (QE Ry mass unit)",
+      "nat": 2,
+      "nr": [
+        8,
+        8,
+        1
+      ],
+      "ntyp": 1,
+      "omega_internal_unit": "sqrt(Ry/(2*me*bohr^2))",
+      "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\inputs\\ifc\\graphene.fc",
+      "source_format": "qe_q2r_fc"
+    },
+    "n_atoms": 2,
+    "n_terms_after_filter": 64,
+    "n_terms_raw": 64,
+    "n_terms_removed_by_cutoff": 0,
+    "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\inputs\\ifc\\graphene.fc",
+    "reader": "qe",
+    "sha256": "3bc6027c7d02c9dbf4636b5559c626cc0e4d4b7ea7da8598ece159bc3f3dd471"
+  },
+  "kmesh": {
+    "dimension": 1,
+    "high": {
+      "dimension": 1,
+      "mode_y": "shifted",
+      "mode_z": "none",
+      "nky": 24,
+      "nkz": 1
+    },
+    "low": {
+      "dimension": 1,
+      "mode_y": "shifted",
+      "mode_z": "none",
+      "nky": 24,
+      "nkz": 1
+    },
+    "low_cm1": 200.0,
+    "mode": "shifted"
+  },
+  "model": {
+    "auto_principal_layer_enlargement": true,
+    "drop_nyquist_transverse": false,
+    "enforce_hermitian_fc00": true,
+    "enforce_transverse_pm_symmetry": true,
+    "infer_fc01_from_negative_dx": true,
+    "lattice_vectors_angstrom": [
+      [
+        2.469655696382301,
+        0.0,
+        0.0
+      ],
+      [
+        -1.2348278481911505,
+        2.1380926429787674,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        14.999990090129273
+      ]
+    ],
+    "mass_mode": "ifc",
+    "n_atoms_per_principal_layer": 8,
+    "n_layers": 40,
+    "ndof": 24,
+    "nyquist_filter": {
+      "dropped_dy": null,
+      "dropped_dz": null,
+      "n_dropped_fc00": 0,
+      "n_dropped_fc01": 0,
+      "n_dropped_fc10": 0
+    },
+    "nyquist_split_half": false,
+    "onsite_pinning": 0.0,
+    "pm_symmetry": {
+      "enabled": true,
+      "fc00": {
+        "n_pairs_added": 1,
+        "n_self_hermitianized": 0,
+        "n_terms_in": 8,
+        "n_terms_out": 9
+      },
+      "fc01_fc10": {
+        "n_fc01_in": 8,
+        "n_fc01_out": 9,
+        "n_fc10_in": 8,
+        "n_fc10_out": 9,
+        "n_pairs_added_to_fc01": 1,
+        "n_pairs_added_to_fc10": 1
+      },
+      "nyquist_abs_dy": 4,
+      "nyquist_abs_dz": null
+    },
+    "principal_layer_size": 4,
+    "thickness_angstrom": 3.35,
+    "thickness_direction": 3,
+    "transport_direction": 1
+  },
+  "omega": {
+    "n_points": 80,
+    "omega_max_cm1": 1699.9999999999998,
+    "omega_max_qe": 0.01549153985987227,
+    "omega_max_source": "fmax_cm1",
+    "omega_max_thz": 50.96471785999999,
+    "omega_min_qe": 0.0
+  },
+  "outputs": {
+    "data": "studies\\graphene_bulk_2026q1\\graphene\\runs\\20260226_034305Z_graphene_transmission_area\\transmission.tsv",
+    "eta_diagnostics": "studies\\graphene_bulk_2026q1\\graphene\\runs\\20260226_034305Z_graphene_transmission_area\\transmission_eta_diag.json",
+    "plot": "studies\\graphene_bulk_2026q1\\graphene\\runs\\20260226_034305Z_graphene_transmission_area\\transmission.png",
+    "plot_per_area": "studies\\graphene_bulk_2026q1\\graphene\\runs\\20260226_034305Z_graphene_transmission_area\\transmission_per_area.png"
+  },
+  "provenance": {
+    "config_sha256": "070c5c137b90cc754039784cfb435028304c1b8406f6a3b948c0e1617b850cce",
+    "git_dirty": true,
+    "git_head": "fe975e2b64aa07fe3d25652644bd951aa77cbd2b",
+    "hostname": "MyFocus",
+    "workspace": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy"
+  },
+  "run": {
+    "calculation": "transmission",
+    "finished_utc": "2026-02-26T03:43:49.968820+00:00",
+    "input_config": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\inputs\\configs\\transmission_area.json",
+    "name": "graphene_transmission_area",
+    "output_mode": "study",
+    "run_dir": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\graphene\\runs\\20260226_034305Z_graphene_transmission_area",
+    "runtime_seconds": 44.4158300999552,
+    "started_utc": "2026-02-26T03:43:05.555380+00:00"
+  },
+  "solver_summary": {
+    "eta_device": null,
+    "eta_fixed": 0.0001,
+    "eta_scheme": "adaptive",
+    "eta_values_base": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001
+    ],
+    "max_eta_over_omega": 5.099557611095439e-05,
+    "n_omega_failures": 0,
+    "surface_gf_method": "generalized_eigen_svd"
+  },
+  "study": {
+    "manifest_jsonl": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\graphene\\manifest.jsonl",
+    "material": "graphene",
+    "root": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\graphene",
+    "run_dir_name": "20260226_034305Z_graphene_transmission_area",
+    "study": "graphene_bulk_2026q1"
+  }
+}

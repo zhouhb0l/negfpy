@@ -5,7 +5,7 @@ Use this folder for application-scale calculations.
 Recommended pattern:
 - one folder per study campaign
 - configs under `inputs/configs/`
-- IFC inputs under `inputs/ifc/` (optional copy for reproducibility)
+- IFC inputs under `inputs/ifc/` (recommended copy for reproducibility)
 - run outputs auto-written to `runs/<timestamp>_<run_name>/` in study mode
 - publication products under `analysis/`
 
