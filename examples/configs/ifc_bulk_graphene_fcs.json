@@ -1,0 +1,69 @@
+{
+  "run": {
+    "name": "graphene_bulk_fcs_demo",
+    "calculation": "fcs",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "graphene_bulk_2026q1",
+    "material": "graphene",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true
+  },
+  "ifc": {
+    "path": "../../studies/graphene_bulk_2026q1/inputs/ifc/graphene.fc",
+    "reader": "qe",
+    "enforce_asr": false
+  },
+  "model": {
+    "transport_direction": 1,
+    "n_layers": 40,
+    "principal_layer_size": 4,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "onsite_pinning": 0.0,
+    "thickness_angstrom": 3.35,
+    "thickness_direction": 3,
+    "lattice_vectors_angstrom": [
+      [2.4696556963823012, 0.0, 0.0],
+      [-1.2348278481911506, 2.1380926429787676, 0.0],
+      [0.0, 0.0, 14.999990090129274]
+    ]
+  },
+  "kmesh": {
+    "dimension": 1,
+    "mode": "shifted",
+    "nk": 24,
+    "nk_low": 24,
+    "low_cm1": 200.0
+  },
+  "omega": {
+    "min": 0.0,
+    "n_points": 80,
+    "auto_max": false,
+    "fmax_cm1": 1700.0
+  },
+  "solver": {
+    "surface_gf_method": "generalized_eigen_svd",
+    "eta_scheme": "adaptive_global",
+    "eta_fixed": 1e-4,
+    "eta_device": null,
+    "eta_values": [1e-8, 1e-7, 1e-6, 1e-5, 1e-4],
+    "min_success_fraction": 0.7,
+    "nonnegative_tolerance": 1e-8
+  },
+  "fcs": {
+    "x": "temperature",
+    "y": "conductance_per_area",
+    "temperature_mode": "fixed_delta",
+    "temperature_min_k": 50.0,
+    "temperature_max_k": 1000.0,
+    "delta_t_k": 10.0,
+    "n_points": 120,
+    "measurement_time_s": 1e-6
+  }
+}

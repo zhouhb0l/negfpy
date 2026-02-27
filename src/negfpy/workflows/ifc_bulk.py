@@ -18,10 +18,13 @@ from typing import Any
 import numpy as np
 
 from negfpy.core import (
+    heat_current_cumulants_from_k_moments,
+    heat_current_uncertainty,
     lead_phonon_dispersion_3d,
     lead_surface_dos,
     lead_surface_dos_kavg,
     lead_surface_dos_kavg_adaptive,
+    transmission,
     transverse_area_from_vectors,
     transverse_length_from_vector,
     transmission_kavg_adaptive,
@@ -1378,6 +1381,34 @@ def _plot_thermal_conductance(path: Path, temperatures_k: np.ndarray, conductanc
     fig.savefig(path, dpi=220)
 
 
+def _plot_curve_with_band(
+    path: Path,
+    x: np.ndarray,
+    y: np.ndarray,
+    y_std: np.ndarray | None,
+    *,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    ax.plot(x, y, color="tab:blue", lw=1.8, label="mean")
+    if y_std is not None:
+        ys = np.asarray(y_std, dtype=float)
+        ax.fill_between(x, y - ys, y + ys, color="tab:blue", alpha=0.22, label=r"$\pm$ std")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    if y_std is not None:
+        ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(path, dpi=220)
+
+
 def _plot_dispersion(path: Path, kx: np.ndarray, bands_cm1: np.ndarray, *, title: str) -> None:
     import matplotlib.pyplot as plt
 
@@ -1391,6 +1422,255 @@ def _plot_dispersion(path: Path, kx: np.ndarray, bands_cm1: np.ndarray, *, title
     ax.grid(alpha=0.25)
     fig.tight_layout()
     fig.savefig(path, dpi=220)
+
+
+def _compute_fcs_k_moments(
+    cfg: dict[str, Any],
+    *,
+    device,
+    lead_left,
+    lead_right,
+    device_to_lead_left,
+    device_to_lead_right,
+    omegas: np.ndarray,
+    kmesh: dict[str, Any],
+) -> dict[str, np.ndarray]:
+    scfg = dict(cfg.get("solver", {}))
+    sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
+    eta_fixed = float(scfg.get("eta_fixed", 1e-4))
+    eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
+    eta_device_raw = scfg.get("eta_device", None)
+    eta_device = None if eta_device_raw is None else float(eta_device_raw)
+    min_success_fraction = float(scfg.get("min_success_fraction", 0.7))
+    nonnegative_tolerance = float(scfg.get("nonnegative_tolerance", 1e-8))
+    max_eta_over_omega_raw = scfg.get("max_eta_over_omega", None)
+    max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
+    eta_ratio_cm1_min_raw = scfg.get("eta_ratio_cm1_min", None)
+    eta_ratio_cm1_min = None if eta_ratio_cm1_min_raw is None else float(eta_ratio_cm1_min_raw)
+    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
+    if eta_scheme not in {"fixed", "adaptive_global"}:
+        eta_scheme = "adaptive_global"
+
+    n_omega = int(len(omegas))
+    t_mean = np.full((n_omega,), np.nan, dtype=float)
+    t2_mean = np.full((n_omega,), np.nan, dtype=float)
+    eta_selected = np.full((n_omega,), np.nan, dtype=float)
+    n_k_success = np.zeros((n_omega,), dtype=int)
+    omega_failures: list[dict[str, Any]] = []
+
+    for i, w in enumerate(omegas):
+        if w <= 0.0:
+            t_mean[i] = 0.0
+            t2_mean[i] = 0.0
+            continue
+        w_cm1 = float(np.asarray(qe_omega_to_cm1(w), dtype=float))
+        kpts = kmesh["low"]["kpoints"] if w_cm1 <= float(kmesh["low_cm1"]) else kmesh["high"]["kpoints"]
+        eta_values = _resolve_eta_values_for_omega(
+            float(w),
+            w_cm1,
+            eta_values=eta_values_base,
+            max_eta_over_omega=max_eta_over_omega,
+            eta_ratio_cm1_min=eta_ratio_cm1_min,
+        )
+        eta_try = (eta_fixed,) if eta_scheme == "fixed" else eta_values
+
+        accepted: np.ndarray | None = None
+        used_eta = np.nan
+        for eta in eta_try:
+            vals: list[float] = []
+            for kpar in kpts:
+                try:
+                    tval = transmission(
+                        omega=float(w),
+                        device=device,
+                        lead_left=lead_left,
+                        lead_right=lead_right,
+                        eta=float(eta),
+                        eta_device=eta_device,
+                        kpar=kpar,
+                        device_to_lead_left=device_to_lead_left,
+                        device_to_lead_right=device_to_lead_right,
+                        surface_gf_method=sgf_method,
+                    )
+                except Exception:
+                    continue
+                if (not np.isfinite(tval)) or (tval < -nonnegative_tolerance):
+                    continue
+                vals.append(float(max(tval, 0.0)))
+            frac = float(len(vals) / max(len(kpts), 1))
+            if len(vals) > 0 and frac >= min_success_fraction:
+                accepted = np.asarray(vals, dtype=float)
+                used_eta = float(eta)
+                break
+
+        if accepted is None:
+            omega_failures.append({"omega_qe": float(w), "omega_cm1": w_cm1, "reason": "no_eta_passed_threshold"})
+            continue
+
+        t_mean[i] = float(np.mean(accepted))
+        t2_mean[i] = float(np.mean(accepted * accepted))
+        eta_selected[i] = float(used_eta)
+        n_k_success[i] = int(accepted.size)
+
+    return {
+        "t_mean": t_mean,
+        "t2_mean": t2_mean,
+        "eta_selected": eta_selected,
+        "n_k_success": n_k_success,
+        "omega_failures": omega_failures,
+    }
+
+
+def _run_fcs(
+    cfg: dict[str, Any],
+    *,
+    omegas: np.ndarray,
+    kmesh: dict[str, Any],
+    device,
+    lead_left,
+    lead_right,
+    device_to_lead_left,
+    device_to_lead_right,
+    area_m2: float | None,
+) -> dict[str, Any]:
+    fcfg = dict(cfg.get("fcs", {}))
+    x_mode = str(fcfg.get("x", "temperature")).lower().replace("-", "_")
+    y_mode = str(fcfg.get("y", "conductance_per_area")).lower().replace("-", "_")
+    if x_mode not in {"temperature", "temperature_bias"}:
+        raise ValueError("fcs.x must be 'temperature' or 'temperature_bias'.")
+    if y_mode not in {"heat_current", "heat_current_per_area", "conductance", "conductance_per_area"}:
+        raise ValueError("fcs.y must be one of: heat_current, heat_current_per_area, conductance, conductance_per_area.")
+
+    t_min = float(fcfg.get("temperature_min_k", 50.0))
+    t_max = float(fcfg.get("temperature_max_k", 1000.0))
+    n_points = int(fcfg.get("n_points", 120))
+    tau_s = float(fcfg.get("measurement_time_s", 1e-6))
+    if n_points < 2:
+        raise ValueError("fcs.n_points must be >= 2.")
+    if tau_s <= 0.0:
+        raise ValueError("fcs.measurement_time_s must be positive.")
+
+    moments = _compute_fcs_k_moments(
+        cfg,
+        device=device,
+        lead_left=lead_left,
+        lead_right=lead_right,
+        device_to_lead_left=device_to_lead_left,
+        device_to_lead_right=device_to_lead_right,
+        omegas=omegas,
+        kmesh=kmesh,
+    )
+
+    omega_rad_s = np.asarray(qe_omega_to_rad_s(omegas), dtype=float)
+    valid = np.isfinite(moments["t_mean"]) & np.isfinite(moments["t2_mean"])
+    if int(np.sum(valid)) < 2:
+        raise RuntimeError("FCS failed: insufficient converged omega points.")
+    om = omega_rad_s[valid]
+    t1 = np.asarray(moments["t_mean"], dtype=float)[valid]
+    t2 = np.asarray(moments["t2_mean"], dtype=float)[valid]
+
+    if x_mode == "temperature":
+        temp_mode = str(fcfg.get("temperature_mode", "fixed_delta")).lower().replace("-", "_")
+        if temp_mode == "fixed_right":
+            tr_fixed = float(fcfg.get("temperature_right_k", 300.0))
+            xvals = np.linspace(t_min, t_max, n_points, endpoint=True)
+            t_left = xvals
+            t_right = np.full_like(xvals, tr_fixed)
+            x_label = "Temperature Left (K)"
+        else:
+            dT = float(fcfg.get("delta_t_k", 10.0))
+            if dT <= 0.0:
+                raise ValueError("fcs.delta_t_k must be positive.")
+            xvals = np.linspace(t_min, t_max, n_points, endpoint=True)
+            t_left = xvals + 0.5 * dT
+            t_right = xvals - 0.5 * dT
+            x_label = "Average Temperature (K)"
+    else:
+        tavg = float(fcfg.get("temperature_avg_k", 300.0))
+        xvals = np.linspace(t_min, t_max, n_points, endpoint=True)
+        t_left = tavg + 0.5 * xvals
+        t_right = tavg - 0.5 * xvals
+        x_label = "Temperature Bias (K)"
+
+    if np.any(t_left <= 0.0) or np.any(t_right <= 0.0):
+        raise ValueError("FCS sweep generates non-positive temperatures.")
+
+    y = np.zeros_like(xvals, dtype=float)
+    y_std = np.zeros_like(xvals, dtype=float)
+    c1 = np.zeros_like(xvals, dtype=float)
+    c2 = np.zeros_like(xvals, dtype=float)
+
+    for i in range(xvals.size):
+        cc = heat_current_cumulants_from_k_moments(
+            omega_rad_s=om,
+            t_mean_vs_omega=t1,
+            t2_mean_vs_omega=t2,
+            temp_left_k=float(t_left[i]),
+            temp_right_k=float(t_right[i]),
+        )
+        uu = heat_current_uncertainty(cc, measurement_time_s=tau_s)
+        c1[i] = float(cc.c1_j_per_s)
+        c2[i] = float(cc.c2_j2_per_s)
+
+        if y_mode in {"conductance", "conductance_per_area"}:
+            dtemp = float(t_left[i] - t_right[i])
+            if abs(dtemp) < 1e-12:
+                y[i] = np.nan
+                y_std[i] = np.nan
+            else:
+                y[i] = float(c1[i] / dtemp)
+                y_std[i] = float(uu.std_current_j_per_s / abs(dtemp))
+        else:
+            y[i] = float(c1[i])
+            y_std[i] = float(uu.std_current_j_per_s)
+
+    if y_mode in {"heat_current_per_area", "conductance_per_area"}:
+        if area_m2 is None or area_m2 <= 0.0:
+            raise ValueError("FCS y-mode requests per-area quantity but area is unavailable.")
+        y = y / float(area_m2)
+        y_std = y_std / float(area_m2)
+
+    if y_mode == "heat_current":
+        y_label = "Heat Current (J/s)"
+    elif y_mode == "heat_current_per_area":
+        y_label = "Heat Current per Area (J/s/m^2)"
+    elif y_mode == "conductance":
+        y_label = "Thermal Conductance (W/K)"
+    else:
+        y_label = "Thermal Conductance per Area (W/m^2/K)"
+
+    return {
+        "x_mode": x_mode,
+        "x_label": x_label,
+        "y_mode": y_mode,
+        "y_label": y_label,
+        "x": xvals,
+        "temp_left_k": t_left,
+        "temp_right_k": t_right,
+        "y": y,
+        "y_std": y_std,
+        "c1_j_per_s": c1,
+        "c2_j2_per_s": c2,
+        "measurement_time_s": float(tau_s),
+        "omega_qe": np.asarray(omegas, dtype=float),
+        "omega_rad_s_valid": om,
+        "t_mean_valid": t1,
+        "t2_mean_valid": t2,
+        "t_mean": np.asarray(moments["t_mean"], dtype=float),
+        "t2_mean": np.asarray(moments["t2_mean"], dtype=float),
+        "eta_selected": np.asarray(moments["eta_selected"], dtype=float),
+        "n_k_success": np.asarray(moments["n_k_success"], dtype=int),
+        "omega_failures": list(moments["omega_failures"]),
+        "n_omega_converged": int(np.sum(valid)),
+        "n_omega_total": int(len(omegas)),
+        "summary": {
+            "x_mode": x_mode,
+            "y_mode": y_mode,
+            "measurement_time_s": float(tau_s),
+            "n_omega_converged": int(np.sum(valid)),
+            "n_omega_total": int(len(omegas)),
+        },
+    }
 
 def _default_template() -> dict[str, Any]:
     return {
@@ -1488,6 +1768,18 @@ def _default_template() -> dict[str, Any]:
             "temperature_max_k": 400.0,
             "n_temperature_points": 161,
         },
+        "fcs": {
+            "x": "temperature",
+            "y": "conductance_per_area",
+            "temperature_mode": "fixed_delta",
+            "temperature_min_k": 50.0,
+            "temperature_max_k": 1000.0,
+            "temperature_right_k": 300.0,
+            "temperature_avg_k": 300.0,
+            "delta_t_k": 10.0,
+            "n_points": 120,
+            "measurement_time_s": 1e-6,
+        },
     }
 
 
@@ -1503,8 +1795,8 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     cfg = _load_json_config(cfg_path)
     run_cfg = dict(cfg.get("run", {}))
     calc_type = str(run_cfg.get("calculation", "transmission")).lower()
-    if calc_type not in {"transmission", "dos", "dispersion", "thermal_conductance"}:
-        raise ValueError("run.calculation must be one of: transmission, dos, dispersion, thermal_conductance.")
+    if calc_type not in {"transmission", "dos", "dispersion", "thermal_conductance", "fcs"}:
+        raise ValueError("run.calculation must be one of: transmission, dos, dispersion, thermal_conductance, fcs.")
 
     run_name = str(run_cfg.get("name", f"{calc_type}_{cfg_path.stem}"))
     run_name_safe = _sanitize_token(run_name)
@@ -1730,7 +2022,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     omega_info: dict[str, Any] | None = None
     omegas: np.ndarray | None = None
 
-    if calc_type in {"transmission", "dos"}:
+    if calc_type in {"transmission", "dos", "fcs"}:
         omegas, omega_info = _build_omega_grid(cfg, ifc_filtered)
         if calc_type == "transmission":
             results = _run_transmission(
@@ -1742,6 +2034,34 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
                 device_to_lead_right=device_to_lead_right,
                 omegas=omegas,
                 kmesh=kmesh_info,
+            )
+        elif calc_type == "fcs":
+            lv_m = _resolve_lattice_vectors_for_area(
+                ifc_lattice_vectors=(
+                    None if ifc_filtered.lattice_vectors is None else np.asarray(ifc_filtered.lattice_vectors, dtype=float)
+                ),
+                ifc_metadata=dict(ifc_filtered.metadata),
+                lattice_vectors_override_angstrom=lattice_vectors_override_angstrom,
+            )
+            area_m2: float | None = None
+            if lv_m is not None:
+                thickness_m = None if thickness_angstrom is None else float(thickness_angstrom) * ANGSTROM_M
+                area_m2 = _compute_effective_area_m2(
+                    lv_m,
+                    transport_direction=int(transport_direction),
+                    thickness_m=thickness_m,
+                    thickness_direction=thickness_direction,
+                )
+            results = _run_fcs(
+                cfg,
+                omegas=omegas,
+                kmesh=kmesh_info,
+                device=device,
+                lead_left=lead_left,
+                lead_right=lead_right,
+                device_to_lead_left=device_to_lead_left,
+                device_to_lead_right=device_to_lead_right,
+                area_m2=area_m2,
             )
         else:
             results = _run_dos(cfg, lead=lead_right, omegas=omegas, kmesh=kmesh_info)
@@ -1850,6 +2170,69 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             },
         )
         outputs["eta_diagnostics"] = str(eta_diag_path)
+    elif calc_type == "fcs" and omegas is not None:
+        xvals = np.asarray(results["x"], dtype=float)
+        t_left = np.asarray(results["temp_left_k"], dtype=float)
+        t_right = np.asarray(results["temp_right_k"], dtype=float)
+        y = np.asarray(results["y"], dtype=float)
+        y_std = np.asarray(results["y_std"], dtype=float)
+        c1 = np.asarray(results["c1_j_per_s"], dtype=float)
+        c2 = np.asarray(results["c2_j2_per_s"], dtype=float)
+
+        data_default = "fcs.tsv" if is_study_mode else f"{run_name}_fcs.tsv"
+        data_path = output_dir / run_cfg.get("data_filename", data_default)
+        if write_data:
+            with data_path.open("w", encoding="utf-8") as fh:
+                fh.write(
+                    "# x\ttemp_left_K\ttemp_right_K\ty\ty_std\ty_minus_std\ty_plus_std\tc1_J_per_s\tc2_J2_per_s\n"
+                )
+                for xx, tl, tr, yy, ss, cc1, cc2 in zip(xvals, t_left, t_right, y, y_std, c1, c2):
+                    fh.write(
+                        f"{xx:.10e}\t{tl:.10e}\t{tr:.10e}\t{yy:.10e}\t{ss:.10e}\t"
+                        f"{(yy-ss):.10e}\t{(yy+ss):.10e}\t{cc1:.10e}\t{cc2:.10e}\n"
+                    )
+            outputs["data"] = str(data_path)
+
+        if write_plot:
+            plot_default = "fcs.png" if is_study_mode else f"{run_name}_fcs.png"
+            plot_path = output_dir / run_cfg.get("plot_filename", plot_default)
+            _plot_curve_with_band(
+                plot_path,
+                x=xvals,
+                y=y,
+                y_std=y_std,
+                xlabel=str(results.get("x_label", "x")),
+                ylabel=str(results.get("y_label", "y")),
+                title=f"FCS ({run_name})",
+            )
+            outputs["plot"] = str(plot_path)
+
+        moments_default = "fcs_moments.npz" if is_study_mode else f"{run_name}_fcs_moments.npz"
+        moments_path = output_dir / run_cfg.get("moments_filename", moments_default)
+        np.savez(
+            moments_path,
+            omega_qe=np.asarray(results.get("omega_qe", []), dtype=float),
+            t_mean=np.asarray(results.get("t_mean", []), dtype=float),
+            t2_mean=np.asarray(results.get("t2_mean", []), dtype=float),
+            eta_selected=np.asarray(results.get("eta_selected", []), dtype=float),
+            n_k_success=np.asarray(results.get("n_k_success", []), dtype=int),
+        )
+        outputs["moments"] = str(moments_path)
+
+        diag_default = "fcs_diag.json" if is_study_mode else f"{run_name}_fcs_diag.json"
+        diag_path = output_dir / run_cfg.get("diag_filename", diag_default)
+        _save_json(
+            diag_path,
+            {
+                "x_mode": results.get("x_mode"),
+                "y_mode": results.get("y_mode"),
+                "measurement_time_s": results.get("measurement_time_s"),
+                "n_omega_converged": results.get("n_omega_converged"),
+                "n_omega_total": results.get("n_omega_total"),
+                "omega_failures": results.get("omega_failures", []),
+            },
+        )
+        outputs["diagnostics"] = str(diag_path)
     else:
         kx = np.asarray(results["kx"], dtype=float)
         bands_qe = np.asarray(results["bands_qe"], dtype=float)

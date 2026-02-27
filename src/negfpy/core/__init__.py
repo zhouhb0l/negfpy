@@ -30,6 +30,13 @@ from .thermal_current import (
     transverse_area_from_vectors,
     transverse_length_from_vector,
 )
+from .fcs import (
+    HeatCurrentCumulants,
+    HeatCurrentUncertainty,
+    heat_current_cumulants_from_k_moments,
+    heat_current_cumulants_from_spectrum,
+    heat_current_uncertainty,
+)
 from .types import Device1D, DeviceKSpace, LeadBlocks, LeadKSpace
 
 __all__ = [
@@ -63,4 +70,9 @@ __all__ = [
     "heat_current_density_3d",
     "transverse_length_from_vector",
     "transverse_area_from_vectors",
+    "HeatCurrentCumulants",
+    "HeatCurrentUncertainty",
+    "heat_current_cumulants_from_spectrum",
+    "heat_current_cumulants_from_k_moments",
+    "heat_current_uncertainty",
 ]

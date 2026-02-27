@@ -7,6 +7,7 @@ Supported calculations:
 - `transmission`
 - `dos`
 - `dispersion`
+- `fcs`
 
 Entry point:
 
@@ -50,7 +51,7 @@ python examples/run_ifc_bulk.py --input examples/configs/ifc_bulk_template.json
 ## Fast Start Config (Transmission)
 
 Use these defaults when starting with a new QE `.fc`:
-- `run.calculation`: `transmission`
+- `run.calculation`: `transmission` (or `fcs`)
 - `ifc.reader`: `qe`
 - `ifc.enforce_asr`: `false` (set `true` only if you need explicit ASR correction)
 - `solver.surface_gf_method`: `generalized_eigen_svd`
@@ -105,6 +106,7 @@ Directions not chosen for transport are treated as transverse periodic direction
 - `solver`: SGF method, eta strategy, quality filters
 - `dos`: DOS-specific options
 - `dispersion`: dispersion path options
+- `fcs`: full counting statistics sweep/plot controls
 
 Important `run` fields for application-scale organization:
 - `output_mode`: `flat` or `study`
@@ -129,6 +131,25 @@ Important `run` fields for application-scale organization:
 - `solver.eta_scheme = adaptive`: eta chosen per k-point
 - `solver.eta_scheme = adaptive-global`: one eta chosen per omega for all k-points
 - `solver.eta_device`: explicit device broadening override; if `null`, follows lead eta used by the current scheme
+
+## FCS Configuration
+
+When `run.calculation = "fcs"`, use the `fcs` section:
+
+- `x`: `temperature` or `temperature_bias`
+- `y`: `heat_current`, `heat_current_per_area`, `conductance`, `conductance_per_area`
+- `temperature_mode` (for `x=temperature`): `fixed_delta` or `fixed_right`
+- `temperature_min_k`, `temperature_max_k`, `n_points`
+- `delta_t_k` (for `fixed_delta`)
+- `temperature_right_k` (for `fixed_right`)
+- `temperature_avg_k` (for `x=temperature_bias`)
+- `measurement_time_s` (sets std-current to std-conductance conversion)
+
+Outputs include:
+- `fcs.tsv` with mean and `+/- std` columns
+- `fcs.png`
+- `fcs_moments.npz` (`<T>`, `<T^2>`, eta/k diagnostics per omega)
+- `fcs_diag.json`
 
 ## Reproducibility Tips
 
@@ -161,3 +182,4 @@ Unexpected transmission differences between runs:
 - `examples/configs/ifc_bulk_graphene_transmission.json`
 - `examples/configs/ifc_bulk_silicon_transmission.json`
 - `examples/configs/ifc_bulk_graphene_benchmark_match.json`
+- `examples/configs/ifc_bulk_graphene_fcs.json`
