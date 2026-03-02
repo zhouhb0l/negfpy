@@ -72,7 +72,13 @@
     "collect_rejected": false,
     "max_eta_over_omega": null,
     "eta_ratio_cm1_min": null,
-    "omega_scale_mode": "none"
+    "omega_scale_mode": "none",
+    "parallel": {
+      "enabled": false,
+      "backend": "thread",
+      "workers": null,
+      "blas_threads": null
+    }
   },
   "dos": {
     "normalize_per_mode": false,

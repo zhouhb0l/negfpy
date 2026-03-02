@@ -4,8 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import contextlib
+import ctypes
+import ctypes.util
 import hashlib
 import json
+import multiprocessing as mp
+import os
 import re
 import socket
 import subprocess
@@ -589,6 +595,81 @@ def _resolve_eta_values_for_omega(
     return filtered if len(filtered) > 0 else (min(eta_values),)
 
 
+def _resolve_parallel_solver_config(scfg: dict[str, Any]) -> dict[str, Any]:
+    pcfg = dict(scfg.get("parallel", {}))
+    enabled = bool(pcfg.get("enabled", False))
+    backend = str(pcfg.get("backend", "thread")).lower()
+    if backend not in {"thread", "process"}:
+        raise ValueError("solver.parallel.backend must be one of: thread, process.")
+    workers_raw = pcfg.get("workers", None)
+    if workers_raw is None:
+        workers = int(os.cpu_count() or 1)
+    else:
+        workers = int(workers_raw)
+    workers = max(workers, 1)
+    blas_threads_raw = pcfg.get("blas_threads", 1 if enabled else None)
+    blas_threads = None if blas_threads_raw is None else max(int(blas_threads_raw), 1)
+    return {
+        "enabled": enabled and workers > 1,
+        "backend": backend,
+        "workers": workers,
+        "blas_threads": blas_threads,
+    }
+
+
+@contextlib.contextmanager
+def _openblas_thread_limit(n_threads: int | None):
+    if n_threads is None:
+        yield
+        return
+
+    lib_candidates = []
+    for name in ("openblas", "openblasp", "libopenblas.so.0", "libopenblasp-r0.3.30.so"):
+        loc = ctypes.util.find_library(name)
+        if loc:
+            lib_candidates.append(loc)
+        lib_candidates.append(name)
+
+    libs: list[ctypes.CDLL] = []
+    for cand in dict.fromkeys(lib_candidates):
+        try:
+            libs.append(ctypes.CDLL(cand))
+        except Exception:
+            continue
+
+    old_counts: list[tuple[Any, int]] = []
+    for lib in libs:
+        try:
+            get_fn = getattr(lib, "openblas_get_num_threads")
+            set_fn = getattr(lib, "openblas_set_num_threads")
+            get_fn.restype = ctypes.c_int
+            set_fn.argtypes = [ctypes.c_int]
+            set_fn.restype = None
+            old_counts.append((set_fn, int(get_fn())))
+            set_fn(int(n_threads))
+        except Exception:
+            continue
+
+    old_env = {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}
+    os.environ["OPENBLAS_NUM_THREADS"] = str(int(n_threads))
+    os.environ["OMP_NUM_THREADS"] = str(int(n_threads))
+    os.environ["MKL_NUM_THREADS"] = str(int(n_threads))
+
+    try:
+        yield
+    finally:
+        for set_fn, old in old_counts:
+            try:
+                set_fn(int(old))
+            except Exception:
+                pass
+        for key, val in old_env.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+
 def _parse_ky_kz(kpar: tuple[float, ...] | None) -> tuple[float, float]:
     if kpar is None or len(kpar) == 0:
         return 0.0, 0.0
@@ -867,6 +948,114 @@ def _lead_surface_dos_kavg_adaptive_global_eta(
     raise RuntimeError("No eta value satisfied global adaptive DOS quality threshold.")
 
 
+def _run_transmission_omega_task(task: dict[str, Any]) -> dict[str, Any]:
+    i = int(task["index"])
+    w = float(task["omega_qe"])
+    if w <= 0.0:
+        return {"index": i, "omega_qe": w, "value": 0.0, "eta_record": None, "failure": None, "n_rejected": 0}
+
+    eta_scheme = str(task["eta_scheme"])
+    eta_fixed = float(task["eta_fixed"])
+    eta_values = tuple(float(v) for v in task["eta_values"])
+    w_cm1 = float(task["omega_cm1"])
+    collect_rejected = bool(task["collect_rejected"])
+
+    common = dict(
+        omega=w,
+        device=task["device"],
+        lead_left=task["lead_left"],
+        lead_right=task["lead_right"],
+        kpoints=task["kpoints"],
+        eta_device=task["eta_device"],
+        min_success_fraction=float(task["min_success_fraction"]),
+        device_to_lead_left=task["device_to_lead_left"],
+        device_to_lead_right=task["device_to_lead_right"],
+        surface_gf_method=str(task["surface_gf_method"]),
+        omega_scale=task["omega_scale"],
+        nonnegative_tolerance=float(task["nonnegative_tolerance"]),
+        max_channel_factor=task["max_channel_factor"],
+        collect_rejected=collect_rejected,
+    )
+
+    try:
+        if eta_scheme == "fixed":
+            tavg, info = transmission_kavg_adaptive_global_eta(**common, eta_values=(eta_fixed,))
+        elif eta_scheme == "adaptive_global":
+            tavg, info = transmission_kavg_adaptive_global_eta(**common, eta_values=eta_values)
+        else:
+            tavg, info = transmission_kavg_adaptive(**common, eta_values=eta_values)
+        tval = float(tavg)
+    except Exception as exc:
+        return {
+            "index": i,
+            "omega_qe": w,
+            "value": np.nan,
+            "eta_record": None,
+            "failure": {"omega_qe": w, "omega_cm1": w_cm1, "error": str(exc)},
+            "n_rejected": 0,
+        }
+
+    hist = dict(info.get("eta_histogram", {}))
+    used = [float(e) for e, c in hist.items() if int(c) > 0]
+    max_eta_used = max(used) if used else np.nan
+    eta_record = {
+        "omega_qe": w,
+        "omega_cm1": w_cm1,
+        "n_failed_kpoints": int(info.get("n_failed", 0)),
+        "success_fraction": float(info.get("success_fraction", 0.0)),
+        "eta_histogram": hist,
+        "eta_selected": info.get("eta_selected", None),
+        "max_eta_used": None if not np.isfinite(max_eta_used) else float(max_eta_used),
+        "max_eta_over_omega": None if not np.isfinite(max_eta_used) else float(max_eta_used / w),
+    }
+    return {
+        "index": i,
+        "omega_qe": w,
+        "value": tval,
+        "eta_record": eta_record,
+        "failure": None,
+        "n_rejected": int(info.get("n_rejected", 0)) if collect_rejected else 0,
+    }
+
+
+_TRANSMISSION_PROCESS_STATE: dict[str, Any] | None = None
+
+
+def _set_transmission_process_state(state: dict[str, Any] | None) -> None:
+    global _TRANSMISSION_PROCESS_STATE
+    _TRANSMISSION_PROCESS_STATE = state
+
+
+def _run_transmission_omega_task_process(light_task: dict[str, Any]) -> dict[str, Any]:
+    state = _TRANSMISSION_PROCESS_STATE
+    if state is None:
+        raise RuntimeError("Transmission process state is not initialized.")
+    w_cm1 = float(light_task["omega_cm1"])
+    use_low = bool(light_task["use_low_kmesh"])
+    full_task = {
+        "index": int(light_task["index"]),
+        "omega_qe": float(light_task["omega_qe"]),
+        "eta_scheme": state["eta_scheme"],
+        "eta_fixed": state["eta_fixed"],
+        "eta_values": tuple(float(v) for v in light_task["eta_values"]),
+        "omega_cm1": w_cm1,
+        "collect_rejected": state["collect_rejected"],
+        "device": state["device"],
+        "lead_left": state["lead_left"],
+        "lead_right": state["lead_right"],
+        "kpoints": state["kpoints_low"] if use_low else state["kpoints_high"],
+        "eta_device": state["eta_device"],
+        "min_success_fraction": state["min_success_fraction"],
+        "device_to_lead_left": state["device_to_lead_left"],
+        "device_to_lead_right": state["device_to_lead_right"],
+        "surface_gf_method": state["surface_gf_method"],
+        "omega_scale": state["omega_scale"],
+        "nonnegative_tolerance": state["nonnegative_tolerance"],
+        "max_channel_factor": state["max_channel_factor"],
+    }
+    return _run_transmission_omega_task(full_task)
+
+
 def _run_transmission(
     cfg: dict[str, Any],
     *,
@@ -894,6 +1083,7 @@ def _run_transmission(
     max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
     eta_ratio_cm1_min_raw = scfg.get("eta_ratio_cm1_min", None)
     eta_ratio_cm1_min = None if eta_ratio_cm1_min_raw is None else float(eta_ratio_cm1_min_raw)
+    parallel_cfg = _resolve_parallel_solver_config(scfg)
 
     omega_scale_mode = str(scfg.get("omega_scale_mode", "none")).lower()
     if omega_scale_mode == "ev":
@@ -909,97 +1099,164 @@ def _run_transmission(
     rejected_total = 0
     success_count = 0
     fail_count = 0
+    eta_records_by_index: list[dict[str, Any] | None] = [None] * int(len(omegas))
+    omega_failures_by_index: list[dict[str, Any] | None] = [None] * int(len(omegas))
 
+    tasks_thread: list[dict[str, Any]] = []
+    tasks_light: list[dict[str, Any]] = []
     for i, w in enumerate(omegas):
-        if w <= 0.0:
-            vals[i] = 0.0
-            success_count += 1
-            _log_omega_progress(
-                cfg=cfg,
-                calc_label="transmission",
-                i=i,
-                total=int(len(omegas)),
-                omega_qe=float(w),
-                success_count=success_count,
-                fail_count=fail_count,
+        w_float = float(w)
+        if w_float <= 0.0:
+            tasks_light.append(
+                {
+                    "index": i,
+                    "omega_qe": w_float,
+                    "eta_values": (),
+                    "omega_cm1": 0.0,
+                    "use_low_kmesh": True,
+                }
+            )
+            tasks_thread.append(
+                {
+                    "index": i,
+                    "omega_qe": w_float,
+                    "eta_scheme": eta_scheme,
+                    "eta_fixed": eta_fixed,
+                    "eta_values": (),
+                    "omega_cm1": 0.0,
+                    "collect_rejected": collect_rejected,
+                    "device": device,
+                    "lead_left": lead_left,
+                    "lead_right": lead_right,
+                    "kpoints": [],
+                    "eta_device": eta_device,
+                    "min_success_fraction": min_success_fraction,
+                    "device_to_lead_left": device_to_lead_left,
+                    "device_to_lead_right": device_to_lead_right,
+                    "surface_gf_method": sgf_method,
+                    "omega_scale": omega_scale,
+                    "nonnegative_tolerance": nonnegative_tolerance,
+                    "max_channel_factor": max_channel_factor,
+                }
             )
             continue
-        w_cm1 = float(np.asarray(qe_omega_to_cm1(w), dtype=float))
-        kpts = kmesh["low"]["kpoints"] if w_cm1 <= float(kmesh["low_cm1"]) else kmesh["high"]["kpoints"]
+        w_cm1 = float(np.asarray(qe_omega_to_cm1(w_float), dtype=float))
+        use_low = bool(w_cm1 <= float(kmesh["low_cm1"]))
+        kpts = kmesh["low"]["kpoints"] if use_low else kmesh["high"]["kpoints"]
         eta_values = _resolve_eta_values_for_omega(
-            float(w),
+            w_float,
             w_cm1,
             eta_values=eta_values_base,
             max_eta_over_omega=max_eta_over_omega,
             eta_ratio_cm1_min=eta_ratio_cm1_min,
         )
-
-        common = dict(
-            omega=float(w),
-            device=device,
-            lead_left=lead_left,
-            lead_right=lead_right,
-            kpoints=kpts,
-            eta_device=eta_device,
-            min_success_fraction=min_success_fraction,
-            device_to_lead_left=device_to_lead_left,
-            device_to_lead_right=device_to_lead_right,
-            surface_gf_method=sgf_method,
-            omega_scale=omega_scale,
-            nonnegative_tolerance=nonnegative_tolerance,
-            max_channel_factor=max_channel_factor,
-            collect_rejected=collect_rejected,
-        )
-        try:
-            if eta_scheme == "fixed":
-                tavg, info = transmission_kavg_adaptive_global_eta(**common, eta_values=(eta_fixed,))
-            elif eta_scheme == "adaptive_global":
-                tavg, info = transmission_kavg_adaptive_global_eta(**common, eta_values=eta_values)
-            else:
-                tavg, info = transmission_kavg_adaptive(**common, eta_values=eta_values)
-            vals[i] = float(tavg)
-        except Exception as exc:
-            vals[i] = np.nan
-            omega_failures.append({"omega_qe": float(w), "omega_cm1": w_cm1, "error": str(exc)})
-            fail_count += 1
-            _log_omega_progress(
-                cfg=cfg,
-                calc_label="transmission",
-                i=i,
-                total=int(len(omegas)),
-                omega_qe=float(w),
-                success_count=success_count,
-                fail_count=fail_count,
-            )
-            continue
-
-        hist = dict(info.get("eta_histogram", {}))
-        used = [float(e) for e, c in hist.items() if int(c) > 0]
-        max_eta_used = max(used) if used else np.nan
-        eta_records.append(
+        tasks_light.append(
             {
-                "omega_qe": float(w),
+                "index": i,
+                "omega_qe": w_float,
+                "eta_values": eta_values,
                 "omega_cm1": w_cm1,
-                "n_failed_kpoints": int(info.get("n_failed", 0)),
-                "success_fraction": float(info.get("success_fraction", 0.0)),
-                "eta_histogram": hist,
-                "eta_selected": info.get("eta_selected", None),
-                "max_eta_used": None if not np.isfinite(max_eta_used) else float(max_eta_used),
-                "max_eta_over_omega": None if not np.isfinite(max_eta_used) else float(max_eta_used / float(w)),
+                "use_low_kmesh": use_low,
             }
         )
-        if collect_rejected:
-            rejected_total += int(info.get("n_rejected", 0))
-        success_count += 1
+        tasks_thread.append(
+            {
+                "index": i,
+                "omega_qe": w_float,
+                "eta_scheme": eta_scheme,
+                "eta_fixed": eta_fixed,
+                "eta_values": eta_values,
+                "omega_cm1": w_cm1,
+                "collect_rejected": collect_rejected,
+                "device": device,
+                "lead_left": lead_left,
+                "lead_right": lead_right,
+                "kpoints": kpts,
+                "eta_device": eta_device,
+                "min_success_fraction": min_success_fraction,
+                "device_to_lead_left": device_to_lead_left,
+                "device_to_lead_right": device_to_lead_right,
+                "surface_gf_method": sgf_method,
+                "omega_scale": omega_scale,
+                "nonnegative_tolerance": nonnegative_tolerance,
+                "max_channel_factor": max_channel_factor,
+            }
+        )
+
+    def _consume_task_result(res: dict[str, Any], *, progress_index: int) -> None:
+        nonlocal success_count, fail_count, rejected_total
+        idx = int(res["index"])
+        vals[idx] = float(res["value"])
+        if res.get("failure") is not None:
+            omega_failures_by_index[idx] = dict(res["failure"])
+            fail_count += 1
+        else:
+            eta_record = res.get("eta_record")
+            if eta_record is not None:
+                eta_records_by_index[idx] = dict(eta_record)
+            if collect_rejected:
+                rejected_total += int(res.get("n_rejected", 0))
+            success_count += 1
         _log_omega_progress(
             cfg=cfg,
             calc_label="transmission",
-            i=i,
+            i=progress_index,
             total=int(len(omegas)),
-            omega_qe=float(w),
+            omega_qe=float(res["omega_qe"]),
             success_count=success_count,
             fail_count=fail_count,
         )
+
+    run_parallel = bool(parallel_cfg["enabled"]) and len(tasks_light) > 1
+    with _openblas_thread_limit(parallel_cfg["blas_threads"] if run_parallel else None):
+        if run_parallel:
+            backend = str(parallel_cfg["backend"])
+            done_count = 0
+            if backend == "thread":
+                with concurrent.futures.ThreadPoolExecutor(max_workers=int(parallel_cfg["workers"])) as ex:
+                    futures = [ex.submit(_run_transmission_omega_task, t) for t in tasks_thread]
+                    for fut in concurrent.futures.as_completed(futures):
+                        done_count += 1
+                        _consume_task_result(fut.result(), progress_index=done_count - 1)
+            elif backend == "process":
+                if os.name != "posix":
+                    raise RuntimeError("solver.parallel.backend='process' currently requires POSIX (fork).")
+                proc_state = {
+                    "eta_scheme": eta_scheme,
+                    "eta_fixed": eta_fixed,
+                    "collect_rejected": collect_rejected,
+                    "device": device,
+                    "lead_left": lead_left,
+                    "lead_right": lead_right,
+                    "kpoints_low": kmesh["low"]["kpoints"],
+                    "kpoints_high": kmesh["high"]["kpoints"],
+                    "eta_device": eta_device,
+                    "min_success_fraction": min_success_fraction,
+                    "device_to_lead_left": device_to_lead_left,
+                    "device_to_lead_right": device_to_lead_right,
+                    "surface_gf_method": sgf_method,
+                    "omega_scale": omega_scale,
+                    "nonnegative_tolerance": nonnegative_tolerance,
+                    "max_channel_factor": max_channel_factor,
+                }
+                _set_transmission_process_state(proc_state)
+                try:
+                    ctx = mp.get_context("fork")
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=int(parallel_cfg["workers"]), mp_context=ctx) as ex:
+                        futures = [ex.submit(_run_transmission_omega_task_process, t) for t in tasks_light]
+                        for fut in concurrent.futures.as_completed(futures):
+                            done_count += 1
+                            _consume_task_result(fut.result(), progress_index=done_count - 1)
+                finally:
+                    _set_transmission_process_state(None)
+            else:
+                raise RuntimeError(f"Unsupported parallel backend '{backend}'.")
+        else:
+            for i, task in enumerate(tasks_thread):
+                _consume_task_result(_run_transmission_omega_task(task), progress_index=i)
+
+    eta_records = [r for r in eta_records_by_index if r is not None]
+    omega_failures = [f for f in omega_failures_by_index if f is not None]
 
     if np.all(~np.isfinite(vals)):
         raise RuntimeError("Transmission calculation failed for all omega points.")
@@ -1019,6 +1276,12 @@ def _run_transmission(
             "eta_fixed": eta_fixed,
             "eta_values_base": eta_values_base,
             "eta_device": eta_device,
+            "parallel": {
+                "enabled": bool(parallel_cfg["enabled"]),
+                "backend": str(parallel_cfg["backend"]),
+                "workers": int(parallel_cfg["workers"]),
+                "blas_threads": parallel_cfg["blas_threads"],
+            },
             "max_eta_over_omega": max_ratio,
             "n_omega_failures": len(omega_failures),
         },
@@ -1748,6 +2011,12 @@ def _default_template() -> dict[str, Any]:
             "max_eta_over_omega": None,
             "eta_ratio_cm1_min": None,
             "omega_scale_mode": "none",
+            "parallel": {
+                "enabled": False,
+                "backend": "thread",
+                "workers": None,
+                "blas_threads": None,
+            },
         },
         "dos": {
             "normalize_per_mode": False,

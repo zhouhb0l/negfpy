@@ -132,6 +132,28 @@ Important `run` fields for application-scale organization:
 - `solver.eta_scheme = adaptive-global`: one eta chosen per omega for all k-points
 - `solver.eta_device`: explicit device broadening override; if `null`, follows lead eta used by the current scheme
 
+## Parallel Options
+
+By default, omega points are evaluated serially (current behavior).
+
+Set `solver.parallel` to enable multi-worker execution for transmission runs:
+
+```json
+"solver": {
+  "...": "...",
+  "parallel": {
+    "enabled": true,
+    "backend": "thread",
+    "workers": 4
+  }
+}
+```
+
+- `enabled`: turn parallel mode on/off (default `false`)
+- `backend`: `thread` or `process` (`process` currently requires POSIX/fork, e.g. Linux)
+- `workers`: number of workers; `null` uses CPU count
+- `blas_threads`: native BLAS threads per worker during parallel runs (`null` keeps library default; use `1` to avoid oversubscription)
+
 ## FCS Configuration
 
 When `run.calculation = "fcs"`, use the `fcs` section:
