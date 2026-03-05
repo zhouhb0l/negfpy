@@ -1,0 +1,95 @@
+{
+  "run": {
+    "name": "graphene_x_fcs_cond_area_20260304",
+    "calculation": "fcs",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "graphene_bulk_2026q1",
+    "material": "graphene",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "ifc": {
+    "path": "C:\\Users\\zhbho\\OneDrive\\Desktop\\workspace\\15. NEGFPy\\negfpy\\studies\\graphene_bulk_2026q1\\inputs\\ifc\\graphene.fc",
+    "reader": "qe",
+    "enforce_asr": false,
+    "dy_cutoff": null,
+    "dz_cutoff": null
+  },
+  "model": {
+    "n_layers": 40,
+    "principal_layer_size": 4,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "onsite_pinning": 0.0,
+    "transport_direction": 1,
+    "thickness_angstrom": 3.35,
+    "thickness_direction": 3,
+    "lattice_vectors_angstrom": [
+      [
+        2.469655696382301,
+        0.0,
+        0.0
+      ],
+      [
+        -1.2348278481911505,
+        2.1380926429787674,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        14.999990090129273
+      ]
+    ]
+  },
+  "kmesh": {
+    "dimension": 1,
+    "mode": "shifted",
+    "nk": 24,
+    "nk_low": 24,
+    "low_cm1": 200.0
+  },
+  "omega": {
+    "min": 0.0,
+    "n_points": 80,
+    "auto_max": false,
+    "fmax_cm1": 1700.0
+  },
+  "solver": {
+    "surface_gf_method": "generalized_eigen_svd",
+    "eta_scheme": "adaptive",
+    "eta_fixed": 0.0001,
+    "eta_device": null,
+    "eta_values": [
+      1e-08,
+      1e-07,
+      1e-06,
+      1e-05,
+      0.0001
+    ],
+    "min_success_fraction": 0.7,
+    "max_channel_factor": 1.5,
+    "nonnegative_tolerance": 1e-08,
+    "collect_rejected": false,
+    "max_eta_over_omega": null,
+    "eta_ratio_cm1_min": null,
+    "omega_scale_mode": "none"
+  },
+  "fcs": {
+    "x": "temperature",
+    "y": "conductance_per_area",
+    "temperature_mode": "fixed_delta",
+    "delta_t_k": 2.0,
+    "temperature_min_k": 2.0,
+    "temperature_max_k": 400.0,
+    "n_points": 201,
+    "measurement_time_s": 1e-06
+  }
+}

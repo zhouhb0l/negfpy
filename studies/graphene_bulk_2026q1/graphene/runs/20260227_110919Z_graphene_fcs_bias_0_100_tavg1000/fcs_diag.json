@@ -1,0 +1,8 @@
+{
+  "measurement_time_s": 1e-06,
+  "n_omega_converged": 80,
+  "n_omega_total": 80,
+  "omega_failures": [],
+  "x_mode": "temperature_bias",
+  "y_mode": "heat_current"
+}

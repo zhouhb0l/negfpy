@@ -1,0 +1,47 @@
+{
+  "run": {
+    "name": "tan_dispersion_x_20260304",
+    "calculation": "dispersion",
+    "output_mode": "study",
+    "studies_root": "studies",
+    "study": "TaN",
+    "material": "TaN",
+    "timestamped_run_dir": true,
+    "write_input_snapshot": true,
+    "manifest_jsonl": "manifest.jsonl",
+    "write_plot": true,
+    "write_data": true,
+    "write_report": true,
+    "x_unit": "cm-1"
+  },
+  "ifc": {
+    "path": "../../FORCE_CONSTANTS",
+    "reader": "phonopy",
+    "enforce_asr": false,
+    "dy_cutoff": null,
+    "dz_cutoff": null
+  },
+  "model": {
+    "transport_direction": 1,
+    "n_layers": 30,
+    "principal_layer_size": 4,
+    "auto_principal_layer_enlargement": true,
+    "infer_fc01_from_negative_dx": true,
+    "enforce_hermitian_fc00": true,
+    "nyquist_split_half": true,
+    "mass_mode": "ifc",
+    "drop_nyquist_transverse": false,
+    "onsite_pinning": 0.0
+  },
+  "dispersion": {
+    "kpar": [
+      0.0,
+      0.0
+    ],
+    "kx_min": 0.0,
+    "kx_max": 3.141592653589793,
+    "n_kx": 800,
+    "negative_tolerance": 1e-06,
+    "allow_unstable": true
+  }
+}
