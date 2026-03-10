@@ -17,9 +17,10 @@ _SPECIES_RE = re.compile(r"^\s*(\d+)\s+'([^']+)'\s+([Ee0-9\+\-\.]+)\s*$")
 
 def _signed_fft_index(m: int, n: int) -> int:
     idx = int(m) - 1
-    # For even grids, map the Nyquist index to the negative side
-    # so shifts are in a symmetric signed range.
-    if n > 1 and idx >= n // 2:
+    # Wrap FFT-grid indices into a signed range centered at zero:
+    # - odd n:  [-(n//2), ..., 0, ..., +(n//2)] (e.g. n=3 -> [-1,0,1])
+    # - even n: [-(n//2), ..., -1, 0, ..., +(n//2-1)] (Nyquist on negative side)
+    if n > 1 and ((n % 2 == 0 and idx >= n // 2) or (n % 2 == 1 and idx > n // 2)):
         idx -= n
     return idx
 

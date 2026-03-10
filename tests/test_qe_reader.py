@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from negfpy.io import list_readers, read_ifc
+from negfpy.io.readers.qe import _signed_fft_index
 from negfpy.modeling import qe_omega_to_cm1, qe_omega_to_thz
 
 
@@ -71,3 +72,15 @@ def test_qe_frequency_conversion_factors() -> None:
     cm1 = float(qe_omega_to_cm1(1.0))
     assert np.isclose(thz, 3289.8419602568943, rtol=0.0, atol=1e-9)
     assert np.isclose(cm1, 109737.31568180058, rtol=0.0, atol=1e-6)
+
+
+def test_signed_fft_index_uses_symmetric_center_for_odd_n() -> None:
+    mapped = [_signed_fft_index(m, 3) for m in (1, 2, 3)]
+    assert mapped == [0, 1, -1]
+    assert sorted(mapped) == [-1, 0, 1]
+
+
+def test_signed_fft_index_keeps_negative_nyquist_for_even_n() -> None:
+    mapped = [_signed_fft_index(m, 4) for m in (1, 2, 3, 4)]
+    assert mapped == [0, 1, -2, -1]
+    assert sorted(mapped) == [-2, -1, 0, 1]
