@@ -39,7 +39,10 @@ def _parse_term(item: dict[str, Any]) -> IFCTerm:
 
 
 def _signed_fft_index(raw_idx: int, n: int) -> int:
-    if n > 1 and raw_idx >= (n // 2):
+    # Wrap FFT-grid indices into a signed range centered at zero:
+    # - odd n:  [-(n//2), ..., 0, ..., +(n//2)]
+    # - even n: [-(n//2), ..., -1, 0, ..., +(n//2-1)] (Nyquist on negative side)
+    if n > 1 and ((n % 2 == 0 and raw_idx >= n // 2) or (n % 2 == 1 and raw_idx > n // 2)):
         return raw_idx - n
     return raw_idx
 

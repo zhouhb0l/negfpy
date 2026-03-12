@@ -1,6 +1,7 @@
 import numpy as np
 
 from negfpy.io import list_readers, read_ifc
+from negfpy.io.readers.phonopy import _signed_fft_index as _phonopy_signed_fft_index
 from negfpy.modeling import (
     BuildConfig,
     IFCData,
@@ -13,6 +14,7 @@ from negfpy.workflows.ifc_bulk import (
     _drop_nyquist_transverse_terms,
     _enforce_transverse_pm_symmetry,
     _reorient_ifc_for_transport_direction,
+    _unwrap_transport_n1_minimum_image,
 )
 
 
@@ -31,6 +33,48 @@ def _toy_ifc_payload() -> dict:
 
 def test_phonopy_reader_is_registered() -> None:
     assert "phonopy" in list_readers()
+
+
+def test_phonopy_signed_fft_index_odd_and_even_grids() -> None:
+    mapped3 = [_phonopy_signed_fft_index(i, 3) for i in (0, 1, 2)]
+    assert mapped3 == [0, 1, -1]
+    assert sorted(mapped3) == [-1, 0, 1]
+
+    mapped4 = [_phonopy_signed_fft_index(i, 4) for i in (0, 1, 2, 3)]
+    assert mapped4 == [0, 1, -2, -1]
+    assert sorted(mapped4) == [-2, -1, 0, 1]
+
+
+def test_n1_transport_unwrap_minimum_image_can_create_nonzero_dx() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0, 1.0]),
+        dof_per_atom=1,
+        terms=(IFCTerm(dx=0, dy=0, dz=0, block=np.array([[2.0, -0.3], [-0.3, 2.0]])),),
+        metadata={"nr": (1, 2, 1)},
+        lattice_vectors=np.eye(3),
+        atom_positions=np.array([[0.0, 0.0, 0.0], [0.6, 0.0, 0.0]]),
+    )
+    out, info = _unwrap_transport_n1_minimum_image(ifc, mode="minimum_image")
+    assert info["applied"] is True
+    dx_set = {int(t.dx) for t in out.terms}
+    assert -1 in dx_set
+    assert 0 in dx_set
+
+
+def test_n1_transport_unwrap_auto_applies_when_nr1_is_1() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0, 1.0]),
+        dof_per_atom=1,
+        terms=(IFCTerm(dx=0, dy=0, dz=0, block=np.array([[2.0, -0.3], [-0.3, 2.0]])),),
+        metadata={"nr": (1, 2, 1)},
+        lattice_vectors=np.eye(3),
+        atom_positions=np.array([[0.0, 0.0, 0.0], [0.6, 0.0, 0.0]]),
+    )
+    out, info = _unwrap_transport_n1_minimum_image(ifc, mode="auto")
+    assert info["applied"] is True
+    dx_set = {int(t.dx) for t in out.terms}
+    assert -1 in dx_set
+    assert 0 in dx_set
 
 
 def _write_phonopy_fc_and_poscar(tmp_path) -> tuple:

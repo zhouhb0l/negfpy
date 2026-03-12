@@ -41,6 +41,7 @@ from negfpy.io import read_ifc
 from negfpy.modeling import (
     BuildConfig,
     IFCData,
+    IFCTerm,
     enforce_translational_asr_on_self_term,
     qe_ev_to_omega,
     qe_omega_to_cm1,
@@ -529,6 +530,137 @@ def _reorient_ifc_for_transport_direction(ifc: IFCData, *, direction: int) -> IF
         atom_symbols=ifc.atom_symbols,
         index_convention=ifc.index_convention,
     )
+
+
+def _unwrap_transport_n1_minimum_image(
+    ifc: IFCData,
+    *,
+    mode: str | None,
+    tie_tolerance: float = 1e-12,
+) -> tuple[IFCData, dict[str, Any]]:
+    """Optionally reconstruct transport coupling when nr1 == 1 via minimum image.
+
+    For transport-axis repeat of 1, wrapped FFT indices collapse all dx to zero.
+    This opt-in routine reassigns each atom-pair sub-block from dx=0 terms to
+    dx in {-1, 0, +1} by choosing the shortest Cartesian image distance.
+    """
+
+    info: dict[str, Any] = {
+        "mode": None,
+        "applied": False,
+        "reason": None,
+        "tie_tolerance": float(tie_tolerance),
+        "ambiguous_pair_count": 0,
+        "pairs_assigned_nonzero_dx": 0,
+    }
+    mode_raw = None if mode is None else str(mode).strip()
+    if mode_raw is None or mode_raw == "" or mode_raw.lower() in {"none", "off", "false"}:
+        info["reason"] = "disabled"
+        return ifc, info
+    mode_norm = mode_raw.lower()
+    if mode_norm not in {"auto", "minimum_image"}:
+        raise ValueError("model.n1_transport_unwrap must be one of: null, auto, minimum_image.")
+    info["mode"] = mode_norm
+
+    nr = ifc.metadata.get("nr") if isinstance(ifc.metadata, dict) else None
+    if not (isinstance(nr, (tuple, list)) and len(nr) == 3):
+        info["reason"] = "nr_metadata_missing"
+        return ifc, info
+    try:
+        nr1 = int(nr[0])
+    except Exception:
+        info["reason"] = "nr_metadata_invalid"
+        return ifc, info
+    if nr1 != 1:
+        info["reason"] = "nr1_not_1"
+        return ifc, info
+
+    if ifc.lattice_vectors is None or ifc.atom_positions is None:
+        if mode_norm == "minimum_image":
+            raise ValueError("model.n1_transport_unwrap=minimum_image requires IFC lattice_vectors and atom_positions.")
+        info["reason"] = "geometry_missing"
+        return ifc, info
+
+    lv = np.asarray(ifc.lattice_vectors, dtype=float)
+    frac = np.asarray(ifc.atom_positions, dtype=float)
+    nat = int(np.asarray(ifc.masses).size)
+    dof = int(ifc.dof_per_atom)
+    ndof = nat * dof
+    if lv.shape != (3, 3):
+        raise ValueError("Invalid IFC lattice_vectors shape; expected (3,3).")
+    if frac.shape != (nat, 3):
+        raise ValueError(f"Invalid IFC atom_positions shape; expected ({nat},3).")
+
+    accum: dict[tuple[int, int, int], np.ndarray] = {}
+    ambiguous = 0
+    reassigned_nonzero = 0
+    preferred_order = (0, -1, 1)
+
+    def _ensure_term(key: tuple[int, int, int]) -> np.ndarray:
+        out = accum.get(key)
+        if out is None:
+            out = np.zeros((ndof, ndof), dtype=np.complex128)
+            accum[key] = out
+        return out
+
+    for term in ifc.terms:
+        dx0, dy, dz = int(term.dx), int(term.dy), int(term.dz)
+        block = np.asarray(term.block, dtype=np.complex128)
+        if block.shape != (ndof, ndof):
+            raise ValueError(f"Invalid IFC term block shape {block.shape}; expected ({ndof},{ndof}).")
+        if dx0 != 0:
+            _ensure_term((dx0, dy, dz))[:, :] += block
+            continue
+
+        for i in range(nat):
+            rs = i * dof
+            ri = frac[i, :]
+            for j in range(nat):
+                cs = j * dof
+                sub = block[rs : rs + dof, cs : cs + dof]
+                if not np.any(sub):
+                    continue
+                rj = frac[j, :]
+
+                dist: dict[int, float] = {}
+                for m in (-1, 0, 1):
+                    dfrac = (rj - ri) + np.asarray([float(m), float(dy), float(dz)], dtype=float)
+                    dcart = dfrac @ lv
+                    dist[m] = float(np.linalg.norm(dcart))
+
+                dmin = min(dist.values())
+                candidates = [m for m, d in dist.items() if abs(d - dmin) <= tie_tolerance]
+                if len(candidates) > 1:
+                    ambiguous += 1
+                best_m = next(m for m in preferred_order if m in candidates)
+                if best_m != 0:
+                    reassigned_nonzero += 1
+
+                _ensure_term((best_m, dy, dz))[rs : rs + dof, cs : cs + dof] += sub
+
+    terms_new = tuple(IFCTerm(dx=k[0], dy=k[1], dz=k[2], block=v) for k, v in sorted(accum.items()))
+    meta = dict(ifc.metadata)
+    meta["n1_transport_unwrap"] = {
+        "mode": "minimum_image",
+        "applied": True,
+        "ambiguous_pair_count": int(ambiguous),
+        "pairs_assigned_nonzero_dx": int(reassigned_nonzero),
+    }
+    info["applied"] = True
+    info["reason"] = "applied"
+    info["ambiguous_pair_count"] = int(ambiguous)
+    info["pairs_assigned_nonzero_dx"] = int(reassigned_nonzero)
+    return IFCData(
+        masses=np.asarray(ifc.masses, dtype=float),
+        dof_per_atom=int(ifc.dof_per_atom),
+        terms=terms_new,
+        units=ifc.units,
+        metadata=meta,
+        lattice_vectors=np.asarray(ifc.lattice_vectors, dtype=float),
+        atom_positions=np.asarray(ifc.atom_positions, dtype=float),
+        atom_symbols=ifc.atom_symbols,
+        index_convention=ifc.index_convention,
+    ), info
 
 
 def _build_omega_grid(cfg: dict[str, Any], ifc: IFCData) -> tuple[np.ndarray, dict[str, Any]]:
@@ -1976,6 +2108,7 @@ def _default_template() -> dict[str, Any]:
             "nyquist_split_half": False,
             "mass_mode": "ifc",
             "drop_nyquist_transverse": False,
+            "n1_transport_unwrap": "auto",
             "onsite_pinning": 0.0,
             "thickness_angstrom": None,
             "thickness_direction": None,
@@ -2263,6 +2396,8 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
 
     ifc_oriented = _reorient_ifc_for_transport_direction(ifc_work, direction=transport_direction)
     ifc_filtered, n_terms_removed = _apply_transverse_cutoff(ifc_oriented, dy_cutoff=dy_cutoff, dz_cutoff=dz_cutoff)
+    n1_unwrap_mode = mcfg.get("n1_transport_unwrap", "auto")
+    ifc_model, n1_unwrap_info = _unwrap_transport_n1_minimum_image(ifc_filtered, mode=n1_unwrap_mode)
 
     n_layers = int(mcfg.get("n_layers", 30))
     build_cfg = BuildConfig(
@@ -2274,12 +2409,12 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         nyquist_split_half=bool(mcfg.get("nyquist_split_half", False)),
         dtype=str(mcfg.get("dtype", "complex128")),
     )
-    params = build_material_kspace_params(ifc=ifc_filtered, config=build_cfg)
+    params = build_material_kspace_params(ifc=ifc_model, config=build_cfg)
     params, mass_mode = _apply_mass_mode(params, mcfg.get("mass_mode", "ifc"))
     drop_nyquist = bool(mcfg.get("drop_nyquist_transverse", False))
     params, nyquist_info, pm_sym_info = _apply_transverse_stability_controls(
         params,
-        ifc_metadata=dict(ifc_filtered.metadata),
+        ifc_metadata=dict(ifc_model.metadata),
         drop_nyquist=drop_nyquist,
     )
 
@@ -2292,7 +2427,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     omegas: np.ndarray | None = None
 
     if calc_type in {"transmission", "dos", "fcs"}:
-        omegas, omega_info = _build_omega_grid(cfg, ifc_filtered)
+        omegas, omega_info = _build_omega_grid(cfg, ifc_model)
         if calc_type == "transmission":
             results = _run_transmission(
                 cfg,
@@ -2307,9 +2442,9 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         elif calc_type == "fcs":
             lv_m = _resolve_lattice_vectors_for_area(
                 ifc_lattice_vectors=(
-                    None if ifc_filtered.lattice_vectors is None else np.asarray(ifc_filtered.lattice_vectors, dtype=float)
+                    None if ifc_model.lattice_vectors is None else np.asarray(ifc_model.lattice_vectors, dtype=float)
                 ),
-                ifc_metadata=dict(ifc_filtered.metadata),
+                ifc_metadata=dict(ifc_model.metadata),
                 lattice_vectors_override_angstrom=lattice_vectors_override_angstrom,
             )
             area_m2: float | None = None
@@ -2539,14 +2674,15 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "asr_residual_max": asr_residual_max,
             "n_terms_raw": int(n_terms_raw),
             "n_terms_after_filter": int(len(ifc_filtered.terms)),
+            "n_terms_after_n1_unwrap": int(len(ifc_model.terms)),
             "n_terms_removed_by_cutoff": int(n_terms_removed),
             "dy_cutoff": dy_cutoff,
             "dz_cutoff": dz_cutoff,
-            "n_atoms": int(len(ifc_filtered.masses)),
-            "dof_per_atom": int(ifc_filtered.dof_per_atom),
-            "atom_symbols": None if ifc_filtered.atom_symbols is None else list(ifc_filtered.atom_symbols),
-            "lattice_vectors": None if ifc_filtered.lattice_vectors is None else np.asarray(ifc_filtered.lattice_vectors).tolist(),
-            "metadata": dict(ifc_filtered.metadata),
+            "n_atoms": int(len(ifc_model.masses)),
+            "dof_per_atom": int(ifc_model.dof_per_atom),
+            "atom_symbols": None if ifc_model.atom_symbols is None else list(ifc_model.atom_symbols),
+            "lattice_vectors": None if ifc_model.lattice_vectors is None else np.asarray(ifc_model.lattice_vectors).tolist(),
+            "metadata": dict(ifc_model.metadata),
         },
         "model": {
             "transport_direction": int(transport_direction),
@@ -2558,6 +2694,8 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "nyquist_split_half": bool(build_cfg.nyquist_split_half),
             "mass_mode": mass_mode,
             "drop_nyquist_transverse": bool(drop_nyquist),
+            "n1_transport_unwrap": n1_unwrap_mode,
+            "n1_transport_unwrap_info": n1_unwrap_info,
             "nyquist_filter": nyquist_info,
             "enforce_transverse_pm_symmetry": True,
             "pm_symmetry": pm_sym_info,
