@@ -71,6 +71,39 @@ def _ifc_has_full_realspace_grid(ifc: IFCData) -> bool:
     return len(unique_shifts) == nr1 * nr2 * nr3
 
 
+def _expected_signed_fft_indices(n: int) -> set[int]:
+    if n <= 0:
+        return set()
+    if n == 1:
+        return {0}
+    if n % 2 == 0:
+        return set(range(-(n // 2), n // 2))
+    return set(range(-(n // 2), (n // 2) + 1))
+
+
+def _ifc_has_complete_transport_axis_grid(ifc: IFCData) -> bool:
+    """Return True when the x/transport FFT grid is complete.
+
+    After the minimum-image unwrap for repeat-1 transverse axes, the IFC can no
+    longer look like a full nr1*nr2*nr3 Cartesian grid even though the
+    transport-axis FFT sampling is still complete.  The principal-layer builder
+    only needs the x-axis completeness to decide whether Nyquist splitting and
+    negative-dx inference are exact or heuristic.
+    """
+
+    nr = ifc.metadata.get("nr") if isinstance(ifc.metadata, dict) else None
+    if nr is None or len(nr) != 3:
+        return False
+    try:
+        nr1 = int(nr[0])
+    except Exception:
+        return False
+    if nr1 <= 0:
+        return False
+    present_dx = {int(t.dx) for t in ifc.terms}
+    return present_dx == _expected_signed_fft_indices(nr1)
+
+
 def build_fc_terms(
     ifc: IFCData,
     config: BuildConfig | None = None,
@@ -87,7 +120,8 @@ def build_fc_terms(
     ndof = pl_size * block_size
     present_shifts = {(int(term.dx), int(term.dy), int(term.dz)) for term in ifc.terms}
     is_full_grid = _ifc_has_full_realspace_grid(ifc)
-    enable_negative_dx_inference = config.infer_fc01_from_negative_dx and not is_full_grid
+    has_complete_transport_axis_grid = _ifc_has_complete_transport_axis_grid(ifc)
+    enable_negative_dx_inference = config.infer_fc01_from_negative_dx and not has_complete_transport_axis_grid
     terms_in = ifc.terms
 
     nr = ifc.metadata.get("nr") if isinstance(ifc.metadata, dict) else None
@@ -100,12 +134,11 @@ def build_fc_terms(
     max_abs_dx = max(abs(int(term.dx)) for term in ifc.terms)
     use_nyquist_half_split = bool(
         config.nyquist_split_half
-        and is_full_grid
+        and has_complete_transport_axis_grid
         and nr1 is not None
         and nr1 > 1
         and (nr1 % 2 == 0)
         and max_abs_dx == (nr1 // 2)
-        and pl_size > max_abs_dx
     )
     if use_nyquist_half_split:
         nyq = nr1 // 2

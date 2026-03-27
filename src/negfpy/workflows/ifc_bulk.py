@@ -197,6 +197,15 @@ def _prepare_kmesh(cfg: dict[str, Any]) -> dict[str, Any]:
     kcfg = dict(cfg.get("kmesh", {}))
     dim = int(kcfg.get("dimension", 2))
     mode = str(kcfg.get("mode", "auto"))
+    if mode == "hybrid_centered_shifted":
+        mode_low_default = "centered"
+        mode_high_default = "shifted"
+    elif mode == "hybrid_shifted_centered":
+        mode_low_default = "shifted"
+        mode_high_default = "centered"
+    else:
+        mode_low_default = mode
+        mode_high_default = mode
 
     nk = int(kcfg.get("nk", 1))
     nky = int(kcfg.get("nky", nk))
@@ -205,12 +214,16 @@ def _prepare_kmesh(cfg: dict[str, Any]) -> dict[str, Any]:
     nky_low = int(kcfg.get("nky_low", max(nky, nk_low)))
     nkz_low = int(kcfg.get("nkz_low", max(nkz, nk_low)))
     low_cm1 = float(kcfg.get("low_cm1", 0.0))
+    mode_low = str(kcfg.get("mode_low", mode_low_default))
+    mode_high = str(kcfg.get("mode_high", mode_high_default))
 
-    kpts_hi, info_hi = _build_kpoints(dim, nky=nky, nkz=nkz, mode=mode)
-    kpts_lo, info_lo = _build_kpoints(dim, nky=nky_low, nkz=nkz_low, mode=mode)
+    kpts_hi, info_hi = _build_kpoints(dim, nky=nky, nkz=nkz, mode=mode_high)
+    kpts_lo, info_lo = _build_kpoints(dim, nky=nky_low, nkz=nkz_low, mode=mode_low)
     return {
         "dim": dim,
         "mode": mode,
+        "mode_low": mode_low,
+        "mode_high": mode_high,
         "low_cm1": low_cm1,
         "high": {"kpoints": kpts_hi, **info_hi},
         "low": {"kpoints": kpts_lo, **info_lo},
@@ -538,11 +551,13 @@ def _unwrap_transport_n1_minimum_image(
     mode: str | None,
     tie_tolerance: float = 1e-12,
 ) -> tuple[IFCData, dict[str, Any]]:
-    """Optionally reconstruct transport coupling when nr1 == 1 via minimum image.
+    """Optionally reconstruct collapsed IFC axes with repeat 1 via minimum image.
 
-    For transport-axis repeat of 1, wrapped FFT indices collapse all dx to zero.
-    This opt-in routine reassigns each atom-pair sub-block from dx=0 terms to
-    dx in {-1, 0, +1} by choosing the shortest Cartesian image distance.
+    For any lattice axis whose repeat is 1, wrapped FFT indices collapse that
+    shift to zero. This opt-in routine reassigns each atom-pair sub-block along
+    every collapsed axis by choosing the shortest Cartesian image distance over
+    shifts in {-1, 0, +1}. After transport reorientation this covers both the
+    transport axis and any transverse axes with repeat 1.
     """
 
     info: dict[str, Any] = {
@@ -551,7 +566,9 @@ def _unwrap_transport_n1_minimum_image(
         "reason": None,
         "tie_tolerance": float(tie_tolerance),
         "ambiguous_pair_count": 0,
+        "pairs_assigned_nonzero_shift": 0,
         "pairs_assigned_nonzero_dx": 0,
+        "collapsed_axes": [],
     }
     mode_raw = None if mode is None else str(mode).strip()
     if mode_raw is None or mode_raw == "" or mode_raw.lower() in {"none", "off", "false"}:
@@ -567,13 +584,15 @@ def _unwrap_transport_n1_minimum_image(
         info["reason"] = "nr_metadata_missing"
         return ifc, info
     try:
-        nr1 = int(nr[0])
+        repeats = tuple(int(v) for v in nr)
     except Exception:
         info["reason"] = "nr_metadata_invalid"
         return ifc, info
-    if nr1 != 1:
-        info["reason"] = "nr1_not_1"
+    collapsed_axes = tuple(i for i, n in enumerate(repeats) if n == 1)
+    if len(collapsed_axes) == 0:
+        info["reason"] = "no_repeat1_axis"
         return ifc, info
+    info["collapsed_axes"] = [int(v) for v in collapsed_axes]
 
     if ifc.lattice_vectors is None or ifc.atom_positions is None:
         if mode_norm == "minimum_image":
@@ -622,33 +641,41 @@ def _unwrap_transport_n1_minimum_image(
                     continue
                 rj = frac[j, :]
 
-                dist: dict[int, float] = {}
-                for m in (-1, 0, 1):
-                    dfrac = (rj - ri) + np.asarray([float(m), float(dy), float(dz)], dtype=float)
-                    dcart = dfrac @ lv
-                    dist[m] = float(np.linalg.norm(dcart))
+                candidate_shifts = []
+                for sx in ((-1, 0, 1) if 0 in collapsed_axes else (dx0,)):
+                    for sy in ((-1, 0, 1) if 1 in collapsed_axes else (dy,)):
+                        for sz in ((-1, 0, 1) if 2 in collapsed_axes else (dz,)):
+                            dfrac = (rj - ri) + np.asarray([float(sx), float(sy), float(sz)], dtype=float)
+                            dcart = dfrac @ lv
+                            candidate_shifts.append(((int(sx), int(sy), int(sz)), float(np.linalg.norm(dcart))))
 
-                dmin = min(dist.values())
-                candidates = [m for m, d in dist.items() if abs(d - dmin) <= tie_tolerance]
+                dmin = min(d for _, d in candidate_shifts)
+                candidates = [shift for shift, d in candidate_shifts if abs(d - dmin) <= tie_tolerance]
                 if len(candidates) > 1:
                     ambiguous += 1
-                best_m = next(m for m in preferred_order if m in candidates)
-                if best_m != 0:
+                best_shift = min(
+                    candidates,
+                    key=lambda shift: tuple(preferred_order.index(int(v)) for v in shift),
+                )
+                if best_shift != (dx0, dy, dz):
                     reassigned_nonzero += 1
 
-                _ensure_term((best_m, dy, dz))[rs : rs + dof, cs : cs + dof] += sub
+                _ensure_term(best_shift)[rs : rs + dof, cs : cs + dof] += sub
 
     terms_new = tuple(IFCTerm(dx=k[0], dy=k[1], dz=k[2], block=v) for k, v in sorted(accum.items()))
     meta = dict(ifc.metadata)
     meta["n1_transport_unwrap"] = {
         "mode": "minimum_image",
         "applied": True,
+        "collapsed_axes": [int(v) for v in collapsed_axes],
         "ambiguous_pair_count": int(ambiguous),
+        "pairs_assigned_nonzero_shift": int(reassigned_nonzero),
         "pairs_assigned_nonzero_dx": int(reassigned_nonzero),
     }
     info["applied"] = True
     info["reason"] = "applied"
     info["ambiguous_pair_count"] = int(ambiguous)
+    info["pairs_assigned_nonzero_shift"] = int(reassigned_nonzero)
     info["pairs_assigned_nonzero_dx"] = int(reassigned_nonzero)
     return IFCData(
         masses=np.asarray(ifc.masses, dtype=float),
@@ -926,10 +953,106 @@ def _apply_transverse_stability_controls(params, *, ifc_metadata: dict[str, Any]
     out = params
     if drop_nyquist:
         out, nyquist_info = _drop_nyquist_transverse_terms(out, ifc_metadata=ifc_metadata)
+    # For even transverse FFT grids, a signed-index convention stores only one
+    # Nyquist sign (e.g. dy=-1 for nr2=2).  That is sufficient on the sampled
+    # FFT mesh, but transport later evaluates continuous k_parallel phases
+    # exp(i * ky * dy), where +nyquist and -nyquist are distinct.  Split any
+    # ambiguous Nyquist terms into explicit +/- partners before enforcing
+    # conjugate-pair completion.
+    out, transverse_split_info = _split_transverse_nyquist_terms(out, ifc_metadata=ifc_metadata)
     # Always enforce Nyquist +/- pair symmetry for longest-range transverse
     # terms to keep numerical behavior stable across interfaces.
     out, pm_sym_info = _enforce_transverse_pm_symmetry(out, ifc_metadata=ifc_metadata)
+    pm_sym_info = dict(pm_sym_info)
+    pm_sym_info["transverse_nyquist_split"] = transverse_split_info
     return out, nyquist_info, pm_sym_info
+
+
+def _split_transverse_nyquist_terms(params, ifc_metadata: dict[str, Any] | None = None):
+    """Split ambiguous transverse Nyquist terms into explicit +/- partners.
+
+    For even transverse grids the signed FFT convention retains only one of the
+    two Nyquist signs.  To evaluate continuous transverse k, we need both signs
+    explicitly present.  We therefore split any unpaired Nyquist term evenly
+    across its +/- partner.
+    """
+
+    nr = ifc_metadata.get("nr") if isinstance(ifc_metadata, dict) else None
+    if nr is None or len(nr) != 3:
+        return params, {"enabled": False, "reason": "missing_nr_metadata"}
+    try:
+        nr2 = int(nr[1])
+        nr3 = int(nr[2])
+    except Exception:
+        return params, {"enabled": False, "reason": "invalid_nr_metadata"}
+
+    nyq_abs_dy = (nr2 // 2) if (nr2 > 1 and nr2 % 2 == 0) else None
+    nyq_abs_dz = (nr3 // 2) if (nr3 > 1 and nr3 % 2 == 0) else None
+    if nyq_abs_dy is None and nyq_abs_dz is None:
+        return params, {"enabled": False, "reason": "no_even_transverse_grid"}
+
+    def _touches_nyquist(key: tuple[int, int]) -> bool:
+        dy, dz = int(key[0]), int(key[1])
+        if nyq_abs_dy is not None and abs(dy) == nyq_abs_dy:
+            return True
+        if nyq_abs_dz is not None and abs(dz) == nyq_abs_dz:
+            return True
+        return False
+
+    def _split_self_conjugate_terms(terms: dict[tuple[int, int], np.ndarray] | None):
+        if terms is None:
+            return None, {"n_terms_in": 0, "n_terms_out": 0, "n_split": 0}
+        out = {k: np.asarray(v, dtype=np.complex128).copy() for k, v in terms.items()}
+        n_split = 0
+        for k in list(terms.keys()):
+            if not _touches_nyquist(k):
+                continue
+            kp = (-int(k[0]), -int(k[1]))
+            if kp in out or kp == k:
+                continue
+            block = np.asarray(out[k], dtype=np.complex128)
+            out[k] = 0.5 * block
+            out[kp] = 0.5 * block.conj().T
+            n_split += 1
+        return out, {
+            "n_terms_in": int(len(terms)),
+            "n_terms_out": int(len(out)),
+            "n_split": int(n_split),
+        }
+
+    def _split_interface_terms(terms: dict[tuple[int, int], np.ndarray] | None):
+        if terms is None:
+            return None, {"n_terms_in": 0, "n_terms_out": 0, "n_split": 0}
+        out = {k: np.asarray(v, dtype=np.complex128).copy() for k, v in terms.items()}
+        n_split = 0
+        for k in list(terms.keys()):
+            if not _touches_nyquist(k):
+                continue
+            kp = (-int(k[0]), -int(k[1]))
+            if kp in out or kp == k:
+                continue
+            block = np.asarray(out[k], dtype=np.complex128)
+            out[k] = 0.5 * block
+            out[kp] = 0.5 * block
+            n_split += 1
+        return out, {
+            "n_terms_in": int(len(terms)),
+            "n_terms_out": int(len(out)),
+            "n_split": int(n_split),
+        }
+
+    fc00, info00 = _split_self_conjugate_terms(params.fc00_terms)
+    fc01, info01 = _split_interface_terms(params.fc01_terms)
+    fc10, info10 = _split_interface_terms(params.fc10_terms)
+    info = {
+        "enabled": True,
+        "nyquist_abs_dy": nyq_abs_dy,
+        "nyquist_abs_dz": nyq_abs_dz,
+        "fc00": info00,
+        "fc01": info01,
+        "fc10": info10,
+    }
+    return replace(params, fc00_terms=fc00, fc01_terms=fc01, fc10_terms=fc10), info
 
 
 def _enforce_transverse_pm_symmetry(params, ifc_metadata: dict[str, Any] | None = None):
@@ -2711,6 +2834,8 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         "kmesh": {
             "dimension": int(kmesh_info["dim"]),
             "mode": str(kmesh_info["mode"]),
+            "mode_low": str(kmesh_info["mode_low"]),
+            "mode_high": str(kmesh_info["mode_high"]),
             "low_cm1": float(kmesh_info["low_cm1"]),
             "high": {k: v for k, v in kmesh_info["high"].items() if k != "kpoints"},
             "low": {k: v for k, v in kmesh_info["low"].items() if k != "kpoints"},
