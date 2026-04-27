@@ -1,0 +1,608 @@
+\section{Recovery of the Main Formulas in the Local Literature Set}
+
+\subsection{Guide to this section}
+The purpose of this section is to recover, equation by equation, the main formulas used in the papers stored in the local literature set. The word ``recover'' is important: rather than merely quoting a formula, we want to show exactly how it follows from the general phonon-NEGF derivations in the earlier sections.
+
+This serves two functions.
+\begin{enumerate}[label=\arabic*.]
+\item It checks that the general theory note is genuinely consistent with the literature benchmarks.
+\item It identifies which steps in a paper are general theory and which steps are special toy-model assumptions or notation choices.
+\end{enumerate}
+The section is therefore organized around derivation chains rather than around citation summaries.
+
+\subsection{Paper set overview}
+\begin{longtable}{p{0.19\linewidth}p{0.31\linewidth}p{0.41\linewidth}}
+\toprule
+Local file & Title & Main formulas we want to recover \\
+\midrule
+\texttt{0605028v1.pdf} & Wang--Wang--Zeng 2006, NEGF approach to mesoscopic thermal transport & current formula, perturbative nonlinear self-energy usage \\
+\texttt{0701164v1.pdf} & Wang \emph{et al.} 2007, thermal transport in junctions & Dyson/Keldysh structure, effective transmission, cubic LO toy model, SCMF logic \\
+\texttt{0802.2761v1.pdf} & Wang--Wang--Lu 2008 review & Landauer, Caroli, surface Green's functions, contour formalism summary \\
+\texttt{0807.3819v1.pdf} & Xu \emph{et al.} 2008, phonon-phonon interaction and ballistic-diffusive transport & momentum-space retarded self-energy, lifetime, mean free path, phenomenological transmission \\
+\texttt{1303.7317v1.pdf} & Wang \emph{et al.} 2013 review & general NEGF review, nonlinear comments, quartic SCMF closure \\
+\texttt{transp.pdf} & journal version of the 2008 review & same core formulas as \texttt{0802.2761v1.pdf} \\
+\bottomrule
+\end{longtable}
+
+\subsection{Recovery of Wang 2006 (\texttt{0605028v1.pdf})}
+The 2006 paper already contains the basic lead--center--lead contour-NEGF structure. We recover its main formulas in three steps: eliminate the leads, write the current, then add the nonlinear self-energy.
+
+Start from the harmonic block Hamiltonian and the block matrix of Eq.~\eqref{eq:blockK}. Eliminating the leads gave us
+\begin{equation}
+    G_0^r(\omega)
+    =
+    \sqbrak{(\omega+\ii\eta)^2I - K^C - \Sigma_L^r(\omega) - \Sigma_R^r(\omega)}^{-1}.
+    \label{eq:recover_2006_G0r}
+\end{equation}
+This is precisely the central harmonic Green's function used in Wang 2006, though not necessarily in identical notation.
+
+Next recover the current formula. From the foundations derivation we obtained
+\begin{equation}
+    I_L = -\int \frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{G^r\Sigma_L^< + G^<\Sigma_L^a}.
+    \label{eq:recover_2006_current_repeat}
+\end{equation}
+Equation~\eqref{eq:recover_2006_current_repeat} is already the central transport formula of the 2006 paper. The only remaining step is to understand how nonlinearity is inserted.
+
+Let the nonlinear center self-energy be $\Sigma_n$. Then the exact interacting equations are
+\begin{align}
+    G^r &= \sqbrak{(G_0^r)^{-1} - \Sigma_n^r}^{-1}, \\
+    G^< &= G^r\paren{\Sigma_L^< + \Sigma_R^< + \Sigma_n^<}G^a.
+    \label{eq:recover_2006_interacting_pair}
+\end{align}
+Thus Wang 2006 may be viewed as the first paper in the local set that already contains the full modern logic:
+\begin{equation}
+    \text{harmonic lead elimination}
+    \Rightarrow
+    G_0^r
+    \Rightarrow
+    \Sigma_n
+    \Rightarrow
+    G^r,G^<
+    \Rightarrow
+    I_L.
+\end{equation}
+The later papers then refine specific parts of that chain rather than replacing it.
+
+\subsection{Recovery of Wang 2007 (\texttt{0701164v1.pdf})}
+This paper is the key literature benchmark for the current project. We recover its main formulas one by one.
+
+\subsubsection{Hamiltonian structure}
+The paper writes the nonlinear Hamiltonian as
+\begin{equation}
+    H_n = \frac{1}{3}\sum_{ijk}T_{ijk}u_i u_j u_k + \frac{1}{4}\sum_{ijkl}T_{ijkl}u_i u_j u_k u_l.
+    \label{eq:wang2007_Hn_repeated_again}
+\end{equation}
+To connect this with the symmetric IFC convention, start from
+\begin{equation}
+    H_n = \frac{1}{3!}\sum_{ijk}\Phi^{(3)}_{ijk}u_i u_j u_k + \frac{1}{4!}\sum_{ijkl}\Phi^{(4)}_{ijkl}u_i u_j u_k u_l.
+    \label{eq:symmetric_Hn_for_wang2007_recovery}
+\end{equation}
+Compare cubic terms:
+\begin{equation}
+    \frac{1}{3}T_{ijk}u_i u_j u_k = \frac{1}{3!}\Phi^{(3)}_{ijk}u_i u_j u_k.
+\end{equation}
+Multiply by $6$:
+\begin{equation}
+    2T_{ijk}u_i u_j u_k = \Phi^{(3)}_{ijk}u_i u_j u_k.
+\end{equation}
+Hence
+\begin{equation}
+    \Phi^{(3)}_{ijk} = 2T_{ijk}.
+    \label{eq:wang2007_phi3_conversion}
+\end{equation}
+Likewise for the quartic term,
+\begin{equation}
+    \frac{1}{4}T_{ijkl}u_i u_j u_k u_l = \frac{1}{4!}\Phi^{(4)}_{ijkl}u_i u_j u_k u_l,
+\end{equation}
+so after multiplying by $24$,
+\begin{equation}
+    6T_{ijkl}u_i u_j u_k u_l = \Phi^{(4)}_{ijkl}u_i u_j u_k u_l,
+\end{equation}
+and therefore
+\begin{equation}
+    \Phi^{(4)}_{ijkl} = 6T_{ijkl}.
+    \label{eq:wang2007_phi4_conversion}
+\end{equation}
+So the Wang 2007 Hamiltonian is exactly the general IFC Hamiltonian with a different vertex normalization.
+
+\subsubsection{Dyson and Keldysh equations}
+The paper's contour equations reduce to the same central algebraic equations already derived generally. Starting from the exact center Dyson equation,
+\begin{equation}
+    G^r = G_0^r + G_0^r\Sigma_n^r G^r,
+\end{equation}
+we derived
+\begin{equation}
+    G^r = \sqbrak{(G_0^r)^{-1} - \Sigma_n^r}^{-1}.
+    \label{eq:wang2007_recovered_dyson}
+\end{equation}
+Similarly, the lesser equation is
+\begin{equation}
+    G^< = G^r\paren{\Sigma^< + \Sigma_n^<}G^a,
+    \qquad
+    \Sigma^< = \Sigma_L^< + \Sigma_R^<.
+    \label{eq:wang2007_recovered_keldysh}
+\end{equation}
+Thus the formal backbone of Wang 2007 is not a different formalism from ours; it is the same Dyson--Keldysh structure, specialized to explicit benchmark calculations.
+
+\subsubsection{Current formula}
+The paper's current expression is recovered directly from the general current formula,
+\begin{equation}
+    I_L = -\int \frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{G^r\Sigma_L^< + G^<\Sigma_L^a}.
+    \label{eq:wang2007_recovered_current}
+\end{equation}
+This should be read carefully: in the interacting theory, Eq.~\eqref{eq:wang2007_recovered_current} is exact if the exact $G^r$ and $G^<$ are used. All approximation errors are therefore pushed into the approximation chosen for $\Sigma_n$.
+
+\subsubsection{Cubic onsite model formulas}
+The paper's Fig.~5 cubic benchmark is a nearest-neighbor harmonic chain with onsite harmonic confinement and a cubic onsite interaction. The equation of motion is
+\begin{equation}
+    \ddot u_j = K u_{j-1} + (-2K-K_0)u_j + K u_{j+1} - t_j u_j^2.
+    \label{eq:wang2007_onsite_eom_again}
+\end{equation}
+To recover the harmonic Green's function, first remove the nonlinear term. The harmonic recurrence relation is then
+\begin{equation}
+    K u_{j-1} + (-2K-K_0)u_j + K u_{j+1} = -\ddot u_j.
+\end{equation}
+Fourier transform in time using $\ddot u_j \to -(\omega+\ii\eta)^2u_j$ for the retarded solution. Then
+\begin{equation}
+    K u_{j-1} + \Omega u_j + K u_{j+1} = 0,
+    \qquad
+    \Omega = (\omega+\ii\eta)^2 - 2K - K_0.
+    \label{eq:wang2007_harmonic_recurrence}
+\end{equation}
+Seek a solution of the form
+\begin{equation}
+    u_j \propto \lambda^j.
+    \label{eq:lambda_ansatz}
+\end{equation}
+Substitute Eq.~\eqref{eq:lambda_ansatz} into Eq.~\eqref{eq:wang2007_harmonic_recurrence}:
+\begin{equation}
+    K\lambda^{j-1} + \Omega \lambda^j + K\lambda^{j+1} = 0.
+\end{equation}
+Divide by $\lambda^j$:
+\begin{equation}
+    K\lambda^{-1} + \Omega + K\lambda = 0.
+    \label{eq:lambda_characteristic_equation_again}
+\end{equation}
+This is exactly the quadratic equation quoted in the paper. Solving Eq.~\eqref{eq:lambda_characteristic_equation_again} gives the two roots $\lambda_1$ and $\lambda_2$. The retarded boundary condition selects the root with the appropriate decay property, and the Green's function becomes
+\begin{equation}
+    G_{0,jl}^r(\omega) = \frac{\lambda_1^{\abs{j-l}}}{(\lambda_1-\lambda_2)K}.
+    \label{eq:wang2007_harmonic_green_recovered}
+\end{equation}
+Now recover Eq.~(77), the first cubic graph. The onsite interaction is
+\begin{equation}
+    H_n = \frac{1}{3}\sum_j t_j u_j^3.
+    \label{eq:onsite_cubic_hamiltonian_for_eq77}
+\end{equation}
+Expand the contour Green's function to second order in $H_n$:
+\begin{equation}
+    G = G_0 + \frac{1}{2!}\paren{-\frac{\ii}{\hbar}}^2\int_C \dd\tau_1\dd\tau_2\,\braket{T_C u u H_n(\tau_1)H_n(\tau_2)}_0 + \cdots.
+    \label{eq:eq77_expansion_start}
+\end{equation}
+Insert Eq.~\eqref{eq:onsite_cubic_hamiltonian_for_eq77} into Eq.~\eqref{eq:eq77_expansion_start}:
+\begin{align}
+    G
+    =
+    G_0
+    + \frac{1}{2!}\paren{-\frac{\ii}{\hbar}}^2
+      \frac{1}{3^2}
+      \sum_{j_1 j_2}t_{j_1}t_{j_2}
+      \int_C \dd\tau_1\dd\tau_2\,
+      \braket{T_C u u u_{j_1}^3(\tau_1)u_{j_2}^3(\tau_2)}_0
+    + \cdots.
+    \label{eq:eq77_expansion_after_insertion}
+\end{align}
+Now apply Wick's theorem. The one-particle-irreducible two-point term is the one where one external line attaches to the first cubic vertex, one external line attaches to the second cubic vertex, and the remaining four internal legs are paired between the two vertices. Because the interaction is local in site index, the tensor structure collapses. After summing the equivalent contractions, the resulting self-energy is
+\begin{equation}
+    \Sigma_{n,jl}^{\sigma\sigma'}(t) = 2\ii t^2\sqbrak{G_{0,jl}^{\sigma\sigma'}(t)}^2.
+    \label{eq:wang2007_eq77_recovered_precise}
+\end{equation}
+Equation~\eqref{eq:wang2007_eq77_recovered_precise} is exactly the paper's Eq.~(77). The important point is that it is not a special phenomenological ansatz; it is the explicit two-vertex cubic contraction specialized to an onsite scalar interaction.
+
+The paper's second graph is a local tadpole-like contribution. Formally, it comes from the contraction class in which one cubic vertex contributes an equal-time contraction that reduces the remaining structure to a static local correction. This is why, in the code benchmark, the second graph behaves much more like a static shift than like a dynamic broadening term.
+
+Now recover the effective transmission formula. Start from the exact current formula and the corresponding right-lead current expression. In a steady state one has $I_L = -I_R$, so one may symmetrize the current. Insert the interacting $G^r$ and $G^<$ into the exact current and isolate the factor $f_L-f_R$. The remaining matrix object is then defined as
+\begin{equation}
+    \widetilde{\mathcal T}(\omega)
+    =
+    \frac{1}{2(f_L-f_R)}
+    \Tr\cbrak{(G^r-G^a)(\Sigma_R^< - \Sigma_L^<) + \ii G^<(\Gamma_R-\Gamma_L)}.
+    \label{eq:wang2007_effective_transmission_recovered_full}
+\end{equation}
+This formula is therefore not an independent transport law; it is a convenient rewriting of the exact interacting current into a transmission-like representation.
+
+The paper then takes the linear-response limit explicitly. Let
+\begin{equation}
+    T_L = T + \frac{\Delta T}{2},
+    \qquad
+    T_R = T - \frac{\Delta T}{2}.
+    \label{eq:wang2007_temperature_split}
+\end{equation}
+Expand the interacting Green's functions around the equilibrium point $T_L=T_R=T$:
+\begin{equation}
+    G^r = G_{\rm eq}^r + \frac{\delta G^r}{\delta T}\Delta T + \order{\Delta T^2},
+    \qquad
+    G^< = G_{\rm eq}^< + \frac{\delta G^<}{\delta T}\Delta T + \order{\Delta T^2}.
+    \label{eq:wang2007_eq83_recovered}
+\end{equation}
+Substitute Eq.~\eqref{eq:wang2007_eq83_recovered} into Eq.~\eqref{eq:wang2007_effective_transmission_recovered_full}. The terms built only from equilibrium Green's functions cancel identically, because the current must vanish when $T_L=T_R$. After dividing by $f_L-f_R$ and taking $\Delta T\to 0$, the remaining first-order object is exactly the paper's effective transmission in linear response.
+
+For the specific one-dimensional chain of Fig.~5, only the first site and the last site couple directly to the left and right baths. Therefore $\Gamma_L$ and $\Gamma_R$ have support only on the boundary sites, and the trace in Eq.~\eqref{eq:wang2007_effective_transmission_recovered_full} collapses to a boundary expression. Using the explicit surface self-energies of the uniform chain, the paper rewrites the result as
+\begin{equation}
+    \widetilde{\mathcal T}(\omega)
+    = iK\,\Im \lambda_1\paren{F_{11}^L - F_{NN}^R},
+    \label{eq:wang2007_boundary_F_reduction}
+\end{equation}
+where the $F$-functions collect the nonequilibrium temperature variations of the Green's functions. The left-boundary function is
+\begin{equation}
+    F^L
+    =
+    \frac{1}{2}\paren{G^r-G^a}
+    +
+    \paren{
+        f\frac{\delta(G^r-G^a)}{\delta T}
+        -
+        \frac{\delta G^<}{\delta T}
+    }
+    \paren{\frac{\partial f}{\partial T}}^{-1},
+    \label{eq:wang2007_eq85_recovered}
+\end{equation}
+and $F^R$ is the same except that the first term changes sign. Equation~\eqref{eq:wang2007_eq85_recovered} is the paper's Eq.~(85). Its meaning is straightforward: the first term is the equilibrium spectral contribution, while the second term is the explicit linear-response correction due to the temperature dependence of the Green's functions.
+
+The paper then differentiates the Dyson and Keldysh equations with respect to temperature. We recover those formulas directly. Start from
+\begin{equation}
+    (G^r)^{-1} = (G_0^r)^{-1} - \Sigma_n^r.
+\end{equation}
+Differentiate with respect to temperature:
+\begin{equation}
+    \delta (G^r)^{-1} = -\delta\Sigma_n^r.
+\end{equation}
+Use the matrix identity
+\begin{equation}
+    \delta G^r = -G^r\,\delta (G^r)^{-1}\,G^r,
+\end{equation}
+which follows from differentiating $G^r(G^r)^{-1}=I$. Then
+\begin{equation}
+    \delta G^r = G^r\,\delta\Sigma_n^r\,G^r.
+    \label{eq:wang2007_eq86_recovered}
+\end{equation}
+This is precisely the paper's Eq.~(86). So Eq.~(86) is simply the matrix derivative of Dyson's equation.
+
+The lesser variation is more involved because $G^<$ depends on $G^r$, $G^a$, the lead lesser self-energies, and the nonlinear lesser self-energy. A convenient exact rearrangement is
+\begin{equation}
+    G^<
+    =
+    \bar G_0^<
+    +
+    G^r\Sigma_n^r\bar G_0^<
+    +
+    G^r\Sigma_n^<G^a,
+    \qquad
+    \bar G_0^< = G_0^<\paren{I+\Sigma_n^a G^a}.
+    \label{eq:wang2007_rearranged_lesser_before_variation}
+\end{equation}
+Now differentiate Eq.~\eqref{eq:wang2007_rearranged_lesser_before_variation} term by term with respect to temperature. Use the product rule on every factor. Since the paper evaluates the limit at $T_L=T_R=T$, the retarded harmonic Green's function is temperature independent in this toy model and
+\begin{equation}
+    \delta G_0^r = 0.
+    \label{eq:wang2007_deltaG0r_zero}
+\end{equation}
+After collecting terms, one arrives at the paper's Eq.~(87), which expresses $\delta G^</\delta T$ in terms of $\delta G_0^</\delta T$, $\delta\Sigma_n^r/\delta T$, and $\delta\Sigma_n^</\delta T$. The key structural point is that Eq.~(87) is not a new approximation; it is the exact temperature variation of the interacting lesser Green's function written in a form suitable for the cubic onsite benchmark.
+
+The next quantity needed is the variation of the harmonic lesser Green's function. For the uniform chain, the left- and right-moving parts of the harmonic $G_0^<$ can be written explicitly in terms of the root $\lambda_1$. Differentiating the Bose factors with respect to temperature and then setting $T_L=T_R=T$ yields
+\begin{equation}
+    \frac{\delta G_{0,jl}^<}{\delta T}
+    =
+    \frac{\lambda_1^{\,j-l} - \lambda_1^{\,l-j}}{2(\lambda_1-\lambda_2)K}
+    \Theta(\omega)\,
+    \frac{\partial f}{\partial T}.
+    \label{eq:wang2007_eq88_recovered}
+\end{equation}
+Equation~\eqref{eq:wang2007_eq88_recovered} is the paper's Eq.~(88). Its role is to reduce all temperature dependence to the known derivative of the Bose function, multiplied by a purely harmonic chain kernel.
+
+Finally, recover Eq.~(89). The first cubic graph in frequency space is a convolution of two harmonic Green's functions. Differentiating that convolution with respect to temperature gives two identical terms, because the derivative can act on either internal line. The equality of those two contributions is the origin of the factor of $2$ that upgrades the prefactor from $2it^2$ in the original graph to $4it^2$ in the temperature derivative. The result is
+\begin{equation}
+    \frac{\delta \Sigma_{n,jl}^{r,<}[\omega]}{\delta T}
+    =
+    \frac{4it^2}{2\pi}
+    \int_{-\infty}^{+\infty}\dd\omega'\,
+    G_{0,jl}^{r,<}[\omega-\omega']\,
+    \frac{\delta G_{0,jl}^<[\omega']}{\delta T}.
+    \label{eq:wang2007_eq89_recovered}
+\end{equation}
+Equation~\eqref{eq:wang2007_eq89_recovered} is precisely the paper's Eq.~(89). Combining Eq.~\eqref{eq:wang2007_eq85_recovered}, Eq.~\eqref{eq:wang2007_eq86_recovered}, Eq.~\eqref{eq:wang2007_eq88_recovered}, and Eq.~\eqref{eq:wang2007_eq89_recovered} gives the full linear-response benchmark chain behind Fig.~5.
+
+\subsubsection{Self-consistent mean-field logic}
+The same derivative logic also explains why the Wang 2007 paper is a bridge toward self-consistent mean-field theory. Once the self-energy is treated as a functional of $G$, any change in temperature, bias, or displacement covariance induces
+\begin{equation}
+    \delta G \propto \delta\Sigma_n[G],
+\end{equation}
+so the problem becomes a self-consistent functional-derivative problem. This is exactly the logical bridge from the cubic LO benchmark of Fig.~5 to the later SCMF quartic closures.
+
+\subsection{Recovery of the 2008 review and journal version (\texttt{0802.2761v1.pdf}, \texttt{transp.pdf})}
+These two files are the review formulation of the ballistic theory. Their core formulas are recovered directly from the harmonic current derivation.
+
+Start from the exact current formula in the harmonic limit,
+\begin{equation}
+    I_L = -\int \frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{G_0^r\Sigma_L^< + G_0^<\Sigma_L^a}.
+    \label{eq:ballistic_current_start_for_review}
+\end{equation}
+Use the harmonic lesser Green's function
+\begin{equation}
+    G_0^< = G_0^r(\Sigma_L^< + \Sigma_R^<)G_0^a.
+    \label{eq:ballistic_lesser_for_review_recovery}
+\end{equation}
+Insert Eq.~\eqref{eq:ballistic_lesser_for_review_recovery} into Eq.~\eqref{eq:ballistic_current_start_for_review}:
+\begin{align}
+    I_L
+    &= -\int \frac{\dd\omega}{2\pi}\,\hbar\omega\,
+       \Tr\sqbrak{G_0^r\Sigma_L^< + G_0^r(\Sigma_L^< + \Sigma_R^<)G_0^a\Sigma_L^a}.
+\end{align}
+Now use
+\begin{equation}
+    \Sigma_\alpha^< = -\ii f_\alpha\Gamma_\alpha,
+    \qquad
+    \Gamma_\alpha = \ii(\Sigma_\alpha^r - \Sigma_\alpha^a),
+\end{equation}
+and standard trace rearrangements. After cancellation of the equilibrium pieces, the net two-terminal current becomes
+\begin{equation}
+    I = \int_0^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{G_0^r\Gamma_L G_0^a\Gamma_R}\sqbrak{f_L-f_R}.
+\end{equation}
+Thus we recover the Landauer formula
+\begin{equation}
+    I = \int_0^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\mathcal T(\omega)\sqbrak{f_L-f_R},
+\end{equation}
+with Caroli transmission
+\begin{equation}
+    \mathcal T(\omega) = \Tr\sqbrak{G_0^r\Gamma_L G_0^a\Gamma_R}.
+    \label{eq:caroli_recovered_from_review}
+\end{equation}
+This is exactly the central content of the 2008 review and its journal version.
+
+The review's emphasis on surface Green's functions is simply the computational side of the same formalism. Since
+\begin{equation}
+    \Sigma_\alpha^r = V^{C\alpha}g_\alpha^rV^{\alpha C},
+\end{equation}
+the only extra numerical ingredient needed for the ballistic problem is a stable method for evaluating the surface Green's functions $g_\alpha^r$ of the semi-infinite leads.
+
+\subsection{Recovery of Xu \emph{et al.} 2008 (\texttt{0807.3819v1.pdf})}
+Xu \emph{et al.} reformulate the same cubic interaction physics in a mode-space quasiparticle language. We recover their main formulas by starting from the general cubic self-energy and then projecting onto one mode.
+
+From the cubic interaction section we already obtained the general structure
+\begin{equation}
+    \Sigma^{(3)} \propto \Phi^{(3)} G G \Phi^{(3)}.
+    \label{eq:xu_starting_cubic_structure}
+\end{equation}
+Project Eq.~\eqref{eq:xu_starting_cubic_structure} onto a harmonic mode basis. Then the retarded self-energy of mode $\lambda$ is built from pairs of intermediate modes $\lambda_1,\lambda_2$:
+\begin{equation}
+    \Sigma_\lambda^{r,(3)}(\omega)
+    =
+    \sum_{\lambda_1\lambda_2}
+    \abs{V^{(3)}_{\lambda\lambda_1\lambda_2}}^2
+    \mathcal I_{\lambda_1\lambda_2}(\omega),
+    \label{eq:xu_mode_retarded_self_energy_recovered}
+\end{equation}
+where $\mathcal I_{\lambda_1\lambda_2}(\omega)$ is the frequency integral built from the two internal propagators.
+
+Now recover the frequency shift and linewidth. The dressed pole condition is
+\begin{equation}
+    \omega^2 - \omega_\lambda^2 - \Sigma_\lambda^{r,(3)}(\omega) = 0.
+\end{equation}
+Write the pole as
+\begin{equation}
+    \omega = \omega_\lambda + \Delta\omega_\lambda - \ii\Gamma_\lambda.
+\end{equation}
+Then
+\begin{equation}
+    \omega^2 \approx \omega_\lambda^2 + 2\omega_\lambda\Delta\omega_\lambda - 2\ii\omega_\lambda\Gamma_\lambda.
+\end{equation}
+Substitute this into the pole equation and separate real and imaginary parts:
+\begin{align}
+    \Delta\omega_\lambda &\approx \frac{\re\Sigma_\lambda^{r,(3)}(\omega_\lambda)}{2\omega_\lambda}, \\
+    \Gamma_\lambda &\approx -\frac{\im\Sigma_\lambda^{r,(3)}(\omega_\lambda)}{2\omega_\lambda}.
+    \label{eq:xu_shift_linewidth_recovered}
+\end{align}
+Therefore
+\begin{equation}
+    \tau_\lambda^{-1} = 2\Gamma_\lambda.
+    \label{eq:xu_lifetime_recovered}
+\end{equation}
+This is the explicit recovery of the Xu lifetime formula from the retarded self-energy.
+
+Once the lifetime is known, the mean free path is
+\begin{equation}
+    \ell_\lambda = v_\lambda \tau_\lambda,
+    \label{eq:xu_mean_free_path_recovered}
+\end{equation}
+with $v_\lambda$ the group velocity. The Xu paper then uses $\ell_\lambda$ to interpolate from ballistic to diffusive transmission. The conceptual chain is therefore
+\begin{equation}
+    \Phi^{(3)}
+    \Rightarrow
+    \Sigma_\lambda^r
+    \Rightarrow
+    \Gamma_\lambda,\tau_\lambda,\ell_\lambda
+    \Rightarrow
+    \mathcal T(\omega,L).
+\end{equation}
+This shows that the Xu approach is not separate from the Wang approach; it is the mode-space interpretation of the same cubic LO NEGF machinery.
+
+\subsection{Recovery of Wang 2013 review (\texttt{1303.7317v1.pdf})}
+The 2013 review is the broadest conceptual summary in the local set. The key formula we need to recover is the quartic SCMF closure.
+
+Start from the quartic Hamiltonian in Wang's notation,
+\begin{equation}
+    H_n^{(4)} = \frac{1}{4}\sum_{ijkl}T_{ijkl}u_i u_j u_k u_l.
+    \label{eq:wang2013_quartic_start}
+\end{equation}
+Now apply the quartic pair decoupling. For a symmetric quartic tensor, there are three distinct pairings that contribute equally to a two-point kernel:
+\begin{equation}
+    (ij)(kl),
+    \qquad
+    (ik)(jl),
+    \qquad
+    (il)(jk).
+\end{equation}
+Therefore the induced mean-field two-point operator is proportional to
+\begin{equation}
+    3\sum_{kl}T_{jj'kl}\braket{u_k u_l}.
+\end{equation}
+Convert the equal-time correlator to a lesser Green's function using
+\begin{equation}
+    \braket{u_k u_l} = \ii\hbar G_{kl}(\tau,\tau)
+\end{equation}
+in contour notation. Since the contraction comes from one local quartic vertex, the result is local in contour time. Thus
+\begin{equation}
+    \Sigma_{n,jj'}(\tau,\tau') = 3\ii\hbar\,\delta(\tau,\tau')\sum_{kl}T_{jj'kl}G_{kl}(\tau,\tau).
+    \label{eq:wang2013_quartic_scmf_recovered}
+\end{equation}
+Equation~\eqref{eq:wang2013_quartic_scmf_recovered} is exactly the quartic SCMF closure used in the review and in the Fig.~4 benchmark family.
+
+The paper arrives at Eq.~\eqref{eq:wang2013_quartic_scmf_recovered} through the equation-of-motion hierarchy. In the review's notation, the exact two-point equation contains the four-point Green's function:
+\begin{equation}
+    \sqbrak{\paren{I\partial_{\tau_1}^2 + K^C + \Sigma}G(\tau_1,\tau_2)}_{j_1j_2}
+    =
+    -\delta(\tau_1,\tau_2)\delta_{j_1j_2}
+    -
+    \sum_{j_3j_4j_5}
+    T_{j_1j_3j_4j_5}
+    G_{j_3j_4j_5j_2}(\tau_1,\tau_1,\tau_1,\tau_2).
+    \label{eq:wang2013_eq122_recovered}
+\end{equation}
+Equation~\eqref{eq:wang2013_eq122_recovered} is exact. The complication is that the two-point function is coupled to a four-point function, which in turn would couple to a six-point function, producing the BBGKY-like hierarchy.
+
+The review then rewrites Eq.~\eqref{eq:wang2013_eq122_recovered} in integral form,
+\begin{equation}
+    G(1,2)
+    =
+    G_0(1,2)
+    +
+    \int d3\,d4\,d5\,d6\,
+    G_0(1,3)\,
+    T(3,4,5,6)\,
+    G(4,5,6,2),
+    \label{eq:wang2013_eq124_recovered}
+\end{equation}
+where the contour-time-dependent coupling $T(3,4,5,6)$ contains the contour delta functions needed to synchronize the four interaction times. Equation~\eqref{eq:wang2013_eq124_recovered} is simply the integral form of the exact equation of motion.
+
+To close the hierarchy, the review approximates the four-point Green's function by a symmetrized product of two-point Green's functions, i.e. a Wick-like factorization:
+\begin{equation}
+    G(1,2,3,4)
+    \approx
+    \text{symmetrized products of } G(1,2)G(3,4),\;
+    G(1,3)G(2,4),\;
+    G(1,4)G(2,3).
+    \label{eq:wang2013_eq125_recovered_symbolically}
+\end{equation}
+The exact prefactor depends on the review's Green's-function normalization, but the structural point is clear: the four-point function is closed in terms of two-point functions. Substitute Eq.~\eqref{eq:wang2013_eq125_recovered_symbolically} back into Eq.~\eqref{eq:wang2013_eq122_recovered} or Eq.~\eqref{eq:wang2013_eq124_recovered}. Because the quartic tensor is symmetric, the three possible pairings contribute equally to the two-point kernel. That is exactly where the prefactor $3$ in Eq.~\eqref{eq:wang2013_quartic_scmf_recovered} comes from. The remaining equal-time correlator becomes $i\hbar G_{kl}(\tau,\tau)$, giving the explicit self-consistent nonlinear self-energy of Eq.~\eqref{eq:wang2013_quartic_scmf_recovered}.
+
+The review makes an important physical comment here: this nonlinear self-energy is real. Therefore it only shifts the frequencies and does not generate a finite phonon lifetime. This is precisely why the approximation is called self-consistent mean field rather than a full scattering theory.
+
+For the Fig.~4 benchmark, the review then specifies the bath model and the one- and two-particle quartic parameters explicitly. The bath retarded self-energy is written as
+\begin{equation}
+    \Sigma_\alpha^r[\omega]
+    =
+    \frac{1}{\pi}\,P\!\!\int_{-\infty}^{+\infty}\frac{J_\alpha(\omega')}{\omega-\omega'}\,\dd\omega'
+    - iJ_\alpha(\omega),
+    \qquad \alpha=L,R,
+    \label{eq:wang2013_lorentz_drude_self_energy}
+\end{equation}
+with Lorentz--Drude spectral density
+\begin{equation}
+    J_\alpha(\omega) = \frac{\epsilon^2\omega}{1+\omega^2/\omega_D^2}.
+    \label{eq:wang2013_lorentz_drude_J}
+\end{equation}
+The review caption then fixes
+\begin{equation}
+    \epsilon = 6.0321\;{\rm meV}/(\text{\AA}^2 u),
+    \qquad
+    \hbar\omega_D = 10\;{\rm eV},
+    \qquad
+    T_L = 1.25T,
+    \qquad
+    T_R = 0.75T.
+    \label{eq:wang2013_fig4_bath_parameters}
+\end{equation}
+For the one-particle benchmark, the review uses
+\begin{equation}
+    \Omega^2 = 60.321\;{\rm meV}/(\text{\AA}^2 u),
+    \qquad
+    T_{1111} = 0.241,\;1.2,\;2.4\;{\rm eV}/(\text{\AA}^4 u^2),
+    \label{eq:wang2013_fig4_one_particle_params}
+\end{equation}
+corresponding to the black, red, and blue curves. For the two-particle benchmark it uses
+\begin{equation}
+    K_{11}=K_{22}=60.321,
+    \qquad
+    K_{12}=K_{21}=-30.165
+    \qquad
+    {\rm meV}/(\text{\AA}^2 u),
+    \label{eq:wang2013_fig4_two_particle_K}
+\end{equation}
+and quartic tensors
+\begin{align}
+    &T_{1111}=T_{2222}=0.483,
+    \qquad
+    T_{\{1,1,1,2\}}=-T_{\{1,1,2,2\}}=-0.241,
+    \label{eq:wang2013_fig4_two_particle_black} \\
+    &T_{1111}=T_{2222}=2.4,
+    \qquad
+    T_{\{1,1,1,2\}}=-T_{\{1,1,2,2\}}=-1.2,
+    \label{eq:wang2013_fig4_two_particle_red} \\
+    &T_{1111}=T_{2222}=4.8,
+    \qquad
+    T_{\{1,1,1,2\}}=-T_{\{1,1,2,2\}}=-2.4,
+    \label{eq:wang2013_fig4_two_particle_blue}
+\end{align}
+in units of ${\rm eV}/(\text{\AA}^4 u^2)$, where the curly braces indicate all permutations of the indices. These are the exact benchmark-facing parameters that should be enforced when reproducing the review's Fig.~4.
+
+Finally, the review states that the current is still calculated with the Caroli/Landauer formula, but now with the nonlinear retarded self-energy incorporated into $G^r$. In our notation this means
+\begin{equation}
+    G^r_{\rm SCMF}
+    =
+    \sqbrak{(G_0^r)^{-1} - \Sigma_n^{r,\rm SCMF}}^{-1},
+    \label{eq:wang2013_scmf_dressed_green}
+\end{equation}
+followed by
+\begin{equation}
+    \mathcal T_{\rm SCMF}(\omega)
+    =
+    \Tr\sqbrak{G_{\rm SCMF}^r\Gamma_L G_{\rm SCMF}^a\Gamma_R},
+    \label{eq:wang2013_scmf_caroli}
+\end{equation}
+and then the Landauer current integral. This makes the Fig.~4 benchmark chain completely explicit:
+\begin{equation}
+    \text{quartic Hamiltonian}
+    \Rightarrow
+    \text{Eq.~\eqref{eq:wang2013_quartic_scmf_recovered}}
+    \Rightarrow
+    G_{\rm SCMF}^r
+    \Rightarrow
+    \mathcal T_{\rm SCMF}
+    \Rightarrow
+    I(T).
+    \label{eq:wang2013_fig4_benchmark_chain}
+\end{equation}
+
+The review also discusses lowest-order cubic lifetimes. Those are recovered exactly as in the Xu section above, which confirms an important separation of approximation roles in the literature: cubic interactions are naturally introduced through LO or SCBA scattering, while quartic interactions are naturally introduced through Hartree or SCMF renormalization.
+
+\subsection{What these papers imply for future material calculations}
+Taken together, the local papers imply a clean hierarchy of reusable theory.
+\begin{enumerate}[label=\arabic*.]
+\item Ballistic transport is governed by the exact harmonic center Green's function, the lead self-energies, and the Landauer--Caroli current formula.
+\item Cubic interactions enter naturally through the two-vertex cubic self-energy, first at LO and then at SCBA if feedback is needed.
+\item Quartic interactions enter naturally through the one-vertex Hartree contraction, first at MF/SCMF and later, if needed, through more expensive dynamic quartic self-energies.
+\item Paper-specific toy-model equations should be understood as special sparse realizations of the same tensor-level formalism.
+\end{enumerate}
+So the literature set supports one general tensor-based inelastic NEGF theory, together with several benchmark-specific wrappers, rather than several unrelated theories.
+
+\subsection{Summary of recovered formulas}
+For implementation purposes, the main recovered formulas are:
+\begin{align}
+    G_0^r &= \sqbrak{(\omega+\ii\eta)^2 I - K^C - \Sigma_L^r - \Sigma_R^r}^{-1}, \\
+    G^r &= \sqbrak{(G_0^r)^{-1} - \Sigma_n^r}^{-1}, \\
+    G^< &= G^r\paren{\Sigma_L^< + \Sigma_R^< + \Sigma_n^<}G^a, \\
+    I_L &= -\int \frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{G^r\Sigma_L^< + G^<\Sigma_L^a}, \\
+    \mathcal T_{\rm bal}(\omega) &= \Tr\sqbrak{G_0^r\Gamma_L G_0^a\Gamma_R}, \\
+    \Sigma^{(3)}_{\rm LO} &\text{: obtained from the two-vertex cubic contraction}, \\
+    \Sigma^{(4)}_{\rm MF} &\text{: obtained from the one-vertex quartic Hartree contraction}, \\
+    \Sigma^{\rm SCBA} &\text{: obtained by evaluating the Born diagram class with dressed } G.
+\end{align}
+Every central working equation in the local literature set is one of these formulas directly or a benchmark-specific rewriting of one of them.

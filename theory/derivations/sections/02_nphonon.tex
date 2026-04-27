@@ -1,0 +1,425 @@
+\section{General \texorpdfstring{$n$}{n}-Phonon Processes, and the Special Cases of Three- and Four-Phonon Interactions}
+
+\subsection{General interaction vertices}
+We begin from the Born--Oppenheimer potential energy surface expanded around the chosen equilibrium reference configuration. In physical displacement coordinates $x_i$, the Taylor series is
+\begin{equation}
+    V(\{x\})
+    =
+    V_0
+    + \frac{1}{2!}\sum_{ij}\phi^{(2)}_{ij}x_i x_j
+    + \frac{1}{3!}\sum_{ijk}\phi^{(3)}_{ijk}x_i x_j x_k
+    + \frac{1}{4!}\sum_{ijkl}\phi^{(4)}_{ijkl}x_i x_j x_k x_l
+    + \cdots.
+    \label{eq:pes_taylor_physical}
+\end{equation}
+The coefficient $\phi^{(m)}_{i_1\cdots i_m}$ is the $m$th derivative of the potential with respect to physical coordinates, evaluated at the reference equilibrium point. Because mixed partial derivatives commute, the tensor is invariant under any permutation of its indices,
+\begin{equation}
+    \phi^{(m)}_{i_1\cdots i_m} = \phi^{(m)}_{i_{\pi(1)}\cdots i_{\pi(m)}}
+    \qquad \text{for any permutation } \pi.
+    \label{eq:physical_ifc_permutation_symmetry}
+\end{equation}
+
+Now pass to mass-normalized coordinates,
+\begin{equation}
+    u_i = \sqrt{m_i}x_i,
+    \qquad
+    x_i = \frac{u_i}{\sqrt{m_i}}.
+    \label{eq:mass_norm_for_interactions}
+\end{equation}
+Substitute Eq.~\eqref{eq:mass_norm_for_interactions} into the $m$th-order term of Eq.~\eqref{eq:pes_taylor_physical}:
+\begin{align}
+    V^{(m)}
+    &= \frac{1}{m!}\sum_{i_1\cdots i_m}\phi^{(m)}_{i_1\cdots i_m}
+       x_{i_1}\cdots x_{i_m} \\
+    &= \frac{1}{m!}\sum_{i_1\cdots i_m}\phi^{(m)}_{i_1\cdots i_m}
+       \frac{u_{i_1}}{\sqrt{m_{i_1}}}\cdots \frac{u_{i_m}}{\sqrt{m_{i_m}}} \\
+    &= \frac{1}{m!}\sum_{i_1\cdots i_m}
+       \frac{\phi^{(m)}_{i_1\cdots i_m}}{\sqrt{m_{i_1}\cdots m_{i_m}}}
+       u_{i_1}\cdots u_{i_m}.
+\end{align}
+This motivates the mass-normalized anharmonic tensor
+\begin{equation}
+    \Phi^{(m)}_{i_1\cdots i_m}
+    =
+    \frac{\phi^{(m)}_{i_1\cdots i_m}}{\sqrt{m_{i_1}\cdots m_{i_m}}}.
+    \label{eq:mass_norm_ifc_general_again}
+\end{equation}
+With this definition the full interaction Hamiltonian is
+\begin{equation}
+    H_{\rm int}
+    =
+    \sum_{m\ge 3}
+    \frac{1}{m!}
+    \sum_{i_1\cdots i_m}
+    \Phi^{(m)}_{i_1\cdots i_m}
+    u_{i_1}\cdots u_{i_m}.
+    \label{eq:Hint_tensor_general}
+\end{equation}
+Equation~\eqref{eq:Hint_tensor_general} is the most general tensor-level statement of the phonon interaction problem. In a realistic material workflow, this is the object imported from third-order, fourth-order, or higher-order IFC calculations.
+
+When the interaction Hamiltonian is inserted into the contour-ordered evolution operator, each vertex is local in contour time because the IFCs are static numbers. Thus an $m$-leg vertex contributes the contour kernel
+\begin{equation}
+    \Phi^{(m)}_{i_1\cdots i_m}(\tau_1,\ldots,\tau_m)
+    =
+    \Phi^{(m)}_{i_1\cdots i_m}
+    \delta_C(\tau_1-\tau_2)\cdots \delta_C(\tau_1-\tau_m).
+    \label{eq:local_contour_vertex_again}
+\end{equation}
+This formula is worth emphasizing. It means that all time nonlocality in the self-energy comes from the Green's functions, not from the bare interaction vertex.
+
+\subsection{Normal-mode representation and general scattering channels}
+To interpret Eq.~\eqref{eq:Hint_tensor_general} physically, we now transform to the harmonic normal-mode basis. Let the harmonic eigenvalue problem be
+\begin{equation}
+    \sum_j K_{ij}e_{j\lambda} = \omega_\lambda^2 e_{i\lambda}.
+    \label{eq:harmonic_mode_eigenproblem}
+\end{equation}
+The eigenvectors are chosen orthonormal,
+\begin{equation}
+    \sum_i e_{i\lambda}e_{i\lambda'} = \delta_{\lambda\lambda'},
+    \qquad
+    \sum_\lambda e_{i\lambda}e_{j\lambda} = \delta_{ij}.
+    \label{eq:harmonic_mode_orthogonality}
+\end{equation}
+Expand the displacement operators in that basis:
+\begin{equation}
+    u_i = \sum_\lambda e_{i\lambda}Q_\lambda.
+    \label{eq:u_mode_expand_again}
+\end{equation}
+The normal coordinates are quantized as
+\begin{equation}
+    Q_\lambda = \sqrt{\frac{\hbar}{2\omega_\lambda}}\paren{a_\lambda + a_\lambda^\dagger}.
+    \label{eq:normal_coordinate_quantization_again}
+\end{equation}
+Now substitute Eq.~\eqref{eq:u_mode_expand_again} into the $m$th-order interaction term:
+\begin{align}
+    H^{(m)}
+    &=
+    \frac{1}{m!}\sum_{i_1\cdots i_m}\Phi^{(m)}_{i_1\cdots i_m}
+    \paren{\sum_{\lambda_1}e_{i_1\lambda_1}Q_{\lambda_1}}
+    \cdots
+    \paren{\sum_{\lambda_m}e_{i_m\lambda_m}Q_{\lambda_m}} \\
+    &=
+    \frac{1}{m!}
+    \sum_{\lambda_1\cdots \lambda_m}
+    \sum_{i_1\cdots i_m}
+    \Phi^{(m)}_{i_1\cdots i_m}
+    e_{i_1\lambda_1}\cdots e_{i_m\lambda_m}
+    Q_{\lambda_1}\cdots Q_{\lambda_m}.
+\end{align}
+Define the mode-space interaction tensor
+\begin{equation}
+    \widetilde\Phi^{(m)}_{\lambda_1\cdots \lambda_m}
+    =
+    \sum_{i_1\cdots i_m}
+    \Phi^{(m)}_{i_1\cdots i_m}
+    e_{i_1\lambda_1}\cdots e_{i_m\lambda_m}.
+    \label{eq:mode_ifc_not_yet_quantized}
+\end{equation}
+Then
+\begin{equation}
+    H^{(m)} = \frac{1}{m!}\sum_{\lambda_1\cdots \lambda_m}\widetilde\Phi^{(m)}_{\lambda_1\cdots \lambda_m}Q_{\lambda_1}\cdots Q_{\lambda_m}.
+    \label{eq:mode_hamiltonian_before_aadag}
+\end{equation}
+Now insert Eq.~\eqref{eq:normal_coordinate_quantization_again} for each normal coordinate. Since every $Q_{\lambda_p}$ contributes a factor $\sqrt{\hbar/(2\omega_{\lambda_p})}$, we get
+\begin{align}
+    H^{(m)}
+    &= \frac{1}{m!}\sum_{\lambda_1\cdots \lambda_m}
+       \widetilde\Phi^{(m)}_{\lambda_1\cdots \lambda_m}
+       \prod_{p=1}^m \sqrt{\frac{\hbar}{2\omega_{\lambda_p}}}
+       \prod_{p=1}^m \paren{a_{\lambda_p}+a_{\lambda_p}^\dagger} \\
+    &= \frac{1}{m!}\sum_{\lambda_1\cdots \lambda_m}
+       V^{(m)}_{\lambda_1\cdots \lambda_m}
+       \prod_{p=1}^m \paren{a_{\lambda_p}+a_{\lambda_p}^\dagger},
+    \label{eq:mode_hamiltonian_quantized}
+\end{align}
+where
+\begin{equation}
+    V^{(m)}_{\lambda_1\cdots \lambda_m}
+    =
+    \sum_{i_1\cdots i_m}
+    \Phi^{(m)}_{i_1\cdots i_m}
+    e_{i_1\lambda_1}\cdots e_{i_m\lambda_m}
+    \prod_{p=1}^m \sqrt{\frac{\hbar}{2\omega_{\lambda_p}}}.
+    \label{eq:mode_vertex_general}
+\end{equation}
+Equation~\eqref{eq:mode_vertex_general} is the general mode-space vertex that later appears in lifetime formulas and scattering rates.
+
+To understand the scattering channels, expand the product
+\begin{equation}
+    \prod_{p=1}^m \paren{a_{\lambda_p}+a_{\lambda_p}^\dagger}.
+\end{equation}
+Each factor contributes either an annihilation operator or a creation operator, so there are $2^m$ operator monomials. In the interaction picture,
+\begin{equation}
+    a_\lambda(t) = a_\lambda\ee^{-\ii\omega_\lambda t},
+    \qquad
+    a_\lambda^\dagger(t) = a_\lambda^\dagger\ee^{+\ii\omega_\lambda t}.
+    \label{eq:a_time_evolution_modes}
+\end{equation}
+Therefore each operator monomial carries a time phase of the form
+\begin{equation}
+    \exp\sqbrak{-\ii\paren{s_1\omega_{\lambda_1} + \cdots + s_m\omega_{\lambda_m}}t},
+    \qquad s_p = \pm 1,
+\end{equation}
+where $s_p = +1$ corresponds to an annihilation operator and $s_p=-1$ to a creation operator under the sign convention of the phase. The stationary or resonant channels are exactly those for which the phase is time independent, namely
+\begin{equation}
+    s_1\omega_{\lambda_1} + \cdots + s_m\omega_{\lambda_m} = 0.
+    \label{eq:general_mode_energy_conservation}
+\end{equation}
+For $m=3$, Eq.~\eqref{eq:general_mode_energy_conservation} contains channels such as
+\begin{equation}
+    \omega_1 - \omega_2 - \omega_3 = 0,
+    \qquad
+    \omega_1 + \omega_2 - \omega_3 = 0.
+\end{equation}
+For $m=4$, it contains channels such as
+\begin{equation}
+    \omega_1 + \omega_2 - \omega_3 - \omega_4 = 0.
+\end{equation}
+This is the precise meaning of a general $n$-phonon process: it is the collection of all channels encoded by one $n$-leg interaction vertex after the harmonic basis is quantized.
+
+\subsection{General structure of the self-energy}
+We now derive the general diagrammatic structure of the self-energy from the contour interaction expansion. Start from the definition of the full contour Green's function,
+\begin{equation}
+    G_{12}(\tau,\tau')
+    =
+    -\frac{\ii}{\hbar}
+    \frac{\braket{T_C u_1(\tau)u_2(\tau') S_C}}{\braket{S_C}},
+    \qquad
+    S_C = \exp\sqbrak{-\frac{\ii}{\hbar}\int_C \dd\tau_1 H_{\rm int}(\tau_1)}.
+    \label{eq:full_contour_green_with_SC}
+\end{equation}
+Expand $S_C$ in powers of the interaction,
+\begin{equation}
+    S_C = 1 - \frac{\ii}{\hbar}\int_C \dd\tau_1 H_{\rm int}(\tau_1)
+    + \frac{1}{2!}\paren{-\frac{\ii}{\hbar}}^2\int_C \dd\tau_1\dd\tau_2 H_{\rm int}(\tau_1)H_{\rm int}(\tau_2) + \cdots.
+    \label{eq:SC_expansion_general}
+\end{equation}
+Insert Eq.~\eqref{eq:SC_expansion_general} into Eq.~\eqref{eq:full_contour_green_with_SC}. The result is a series of contour-ordered expectation values evaluated with respect to the harmonic reference system. Wick's theorem reduces each term to sums of products of harmonic propagators. The self-energy is defined as the sum of one-particle-irreducible two-point contributions generated by those contractions.
+
+Rather than jumping directly to the final answer, it is useful to count legs carefully. Suppose a diagram contains $V_m$ vertices of order $m$, and no other vertex types. Then the total number of interaction legs is
+\begin{equation}
+    N_{\rm legs} = mV_m.
+\end{equation}
+A two-point self-energy diagram has two external legs, so the number of remaining internal legs is
+\begin{equation}
+    N_{\rm internal\,legs} = mV_m - 2.
+\end{equation}
+Every propagator consumes two internal legs. Therefore the number of internal Green's-function lines is
+\begin{equation}
+    N_G = \frac{mV_m-2}{2}.
+    \label{eq:internal_line_count_general}
+\end{equation}
+Equation~\eqref{eq:internal_line_count_general} immediately gives the two most important cases in phonon NEGF:
+\begin{align}
+    m=3,\;V_3=2 &\Rightarrow N_G = 2, \\
+    m=4,\;V_4=1 &\Rightarrow N_G = 1.
+\end{align}
+The first line is the leading dynamic cubic self-energy. The second line is the leading static quartic Hartree self-energy.
+
+We now derive the index structure of the static contribution. Take one $m$-leg vertex and keep two indices external, say $1$ and $2$. The remaining $m-2$ operators are contracted into equal-time expectation values. Therefore the resulting two-point object has the structure
+\begin{equation}
+    \Sigma^{\rm static}_{12}(\tau,\tau')
+    \propto
+    \delta_C(\tau-\tau')
+    \sum_{3\cdots m}
+    \Phi^{(m)}_{12 3\cdots m}
+    \braket{T_C u_3(\tau)\cdots u_m(\tau)}.
+    \label{eq:static_self_energy_general_detail}
+\end{equation}
+The contour delta function appears because all operators originate from one local-in-time interaction vertex.
+
+For the leading dynamic contribution from two vertices, distribute one external leg on the first vertex and one on the second vertex, then contract all remaining legs pairwise. The result has the general contour structure
+\begin{equation}
+    \Sigma^{\rm dyn}_{12}(\tau,\tau')
+    \propto
+    \sum \Phi_{1\cdots} G(\tau,\tau')\cdots G(\tau,\tau')\Phi_{2\cdots},
+    \label{eq:dynamic_self_energy_general_detail}
+\end{equation}
+with the exact number of Green's functions fixed by Eq.~\eqref{eq:internal_line_count_general}. This is the basic origin of the frequency-dependent scattering self-energy.
+
+\subsection{Three-phonon interaction}
+For cubic interactions,
+\begin{equation}
+    H^{(3)} = \frac{1}{3!}\sum_{ijk}\Phi^{(3)}_{ijk}u_i u_j u_k.
+    \label{eq:cubic_hamiltonian_general_again}
+\end{equation}
+We now derive why the lowest nontrivial dynamic self-energy is second order in the cubic vertex. Expand the contour Green's function to first order in Eq.~\eqref{eq:cubic_hamiltonian_general_again}. The first-order correction is
+\begin{equation}
+    \delta G^{(1)}_{12}
+    =
+    -\frac{\ii}{\hbar}
+    \frac{1}{3!}
+    \sum_{abc}\Phi^{(3)}_{abc}
+    \int_C \dd\tau_1\,
+    \braket{T_C u_1 u_2 u_a u_b u_c}_0.
+    \label{eq:first_order_cubic_green_correction}
+\end{equation}
+The expectation value in Eq.~\eqref{eq:first_order_cubic_green_correction} contains five harmonic fields. For a Gaussian harmonic reference state with vanishing odd moments, every expectation value with an odd number of fields vanishes. Therefore
+\begin{equation}
+    \delta G^{(1)}_{12} = 0
+    \qquad
+    \text{for the dynamic cubic correction in the centered harmonic reference state.}
+\end{equation}
+This is the formal reason the leading cubic dynamic self-energy does not appear at first order.
+
+Now expand to second order in the cubic interaction:
+\begin{align}
+    \delta G^{(2)}_{12}
+    &=
+    \frac{1}{2!}\paren{-\frac{\ii}{\hbar}}^2
+    \int_C \dd\tau_3\dd\tau_4\,
+    \braket{T_C u_1 u_2 H^{(3)}(\tau_3)H^{(3)}(\tau_4)}_0 \\
+    &=
+    \frac{1}{2!}\paren{-\frac{\ii}{\hbar}}^2
+    \frac{1}{(3!)^2}
+    \sum_{abc}\sum_{def}
+    \Phi^{(3)}_{abc}\Phi^{(3)}_{def}
+    \int_C \dd\tau_3\dd\tau_4\,
+    \braket{T_C u_1 u_2 u_a u_b u_c u_d u_e u_f}_0.
+    \label{eq:second_order_cubic_green_correction}
+\end{align}
+Now Wick-contract the eight fields. The one-particle-irreducible two-point contribution is the one in which one external operator is attached to the first vertex, the other external operator is attached to the second vertex, and the remaining four internal fields are paired across the two vertices. This gives two internal propagators. After collecting the contractions, the self-energy structure is
+\begin{equation}
+    \Sigma^{(3)}_{12}(\tau,\tau')
+    =
+    \frac{\ii\hbar}{2}
+    \sum_{3456}
+    \Phi^{(3)}_{134}
+    G_{35}(\tau,\tau')
+    G_{46}(\tau,\tau')
+    \Phi^{(3)}_{256}
+    + \text{tadpole-type terms},
+    \label{eq:cubic_contour_self_energy_detail}
+\end{equation}
+up to convention-dependent prefactors. The exact coefficient changes with the normalization of the interaction tensor, but the index and propagator structure is fixed. Equation~\eqref{eq:cubic_contour_self_energy_detail} is the general contour expression behind cubic lowest-order scattering.
+
+To connect Eq.~\eqref{eq:cubic_contour_self_energy_detail} with a quasiparticle rate, project it to harmonic mode space and then to the retarded component. Near an isolated mode pole, the dressed propagator denominator is
+\begin{equation}
+    D_\lambda(\omega) = \omega^2 - \omega_\lambda^2 - \Sigma^{r,(3)}_\lambda(\omega).
+    \label{eq:mode_denominator_with_self_energy}
+\end{equation}
+Suppose the interaction is weak enough that the pole is near $\omega = \omega_\lambda$. Write the complex pole as
+\begin{equation}
+    \omega = \widetilde\omega_\lambda - \ii\Gamma_\lambda,
+    \qquad
+    \widetilde\omega_\lambda = \omega_\lambda + \Delta\omega_\lambda.
+    \label{eq:complex_mode_pole_definition}
+\end{equation}
+Insert Eq.~\eqref{eq:complex_mode_pole_definition} into Eq.~\eqref{eq:mode_denominator_with_self_energy} and expand to first order in $\Delta\omega_\lambda$ and $\Gamma_\lambda$:
+\begin{align}
+    \omega^2
+    &= \paren{\omega_\lambda + \Delta\omega_\lambda - \ii\Gamma_\lambda}^2 \\
+    &\approx \omega_\lambda^2 + 2\omega_\lambda\Delta\omega_\lambda - 2\ii\omega_\lambda\Gamma_\lambda.
+\end{align}
+Therefore the pole condition $D_\lambda(\omega)=0$ becomes
+\begin{equation}
+    2\omega_\lambda\Delta\omega_\lambda - 2\ii\omega_\lambda\Gamma_\lambda - \Sigma^{r,(3)}_\lambda(\omega_\lambda) \approx 0.
+\end{equation}
+Separating real and imaginary parts gives
+\begin{align}
+    \Delta\omega_\lambda &\approx \frac{\re\Sigma^{r,(3)}_\lambda(\omega_\lambda)}{2\omega_\lambda}, \\
+    \Gamma_\lambda &\approx -\frac{\im\Sigma^{r,(3)}_\lambda(\omega_\lambda)}{2\omega_\lambda}.
+    \label{eq:cubic_shift_and_linewidth_again}
+\end{align}
+Finally,
+\begin{equation}
+    \tau_\lambda^{-1} = 2\Gamma_\lambda.
+    \label{eq:lifetime_from_linewidth_again}
+\end{equation}
+This is the mode-lifetime formula used in Xu \emph{et al.} 2008.
+
+We now show how the Wang 2007 onsite cubic model emerges as a special case of the general expression. In that model,
+\begin{equation}
+    H_n^{\rm onsite} = \frac{1}{3}\sum_j t_j u_j^3.
+    \label{eq:onsite_cubic_special_hamiltonian}
+\end{equation}
+Comparing Eq.~\eqref{eq:onsite_cubic_special_hamiltonian} with Eq.~\eqref{eq:cubic_hamiltonian_general_again}, we see that the only nonzero cubic tensor elements are local in site index. Therefore every tensor contraction in Eq.~\eqref{eq:cubic_contour_self_energy_detail} collapses onto one site, and the general expression reduces to
+\begin{equation}
+    \Sigma_{n,jl}^{\sigma\sigma'}(t) = 2\ii t^2 \sqbrak{G_{0,jl}^{\sigma\sigma'}(t)}^2,
+    \label{eq:wang77_recovered_again}
+\end{equation}
+which is precisely Wang 2007 Eq.~(77). This is why that toy model is such a useful benchmark: it converts the full cubic tensor structure into a single-site scalar interaction while preserving the genuine cubic two-vertex physics.
+
+\subsection{Four-phonon interaction}
+For quartic interactions,
+\begin{equation}
+    H^{(4)} = \frac{1}{4!}\sum_{ijkl}\Phi^{(4)}_{ijkl}u_i u_j u_k u_l.
+    \label{eq:quartic_hamiltonian_general_again}
+\end{equation}
+The reason quartic interactions are naturally associated with mean-field closures is that a nonzero two-point correction already appears at first order. Expand the contour Green's function to first order in Eq.~\eqref{eq:quartic_hamiltonian_general_again}:
+\begin{equation}
+    \delta G^{(1)}_{12}
+    =
+    -\frac{\ii}{\hbar}\frac{1}{4!}
+    \sum_{abcd}\Phi^{(4)}_{abcd}
+    \int_C \dd\tau_3\,
+    \braket{T_C u_1 u_2 u_a u_b u_c u_d}_0.
+    \label{eq:first_order_quartic_green_correction}
+\end{equation}
+The expectation value in Eq.~\eqref{eq:first_order_quartic_green_correction} contains six fields, so it is not forced to vanish. Wick's theorem can pair two of those fields with the external operators and the remaining four fields into two internal contractions. The Hartree-type term is the one in which two fields remain as a correlator at the same contour time and the other two are attached to the external legs. This gives a two-point correction proportional to an equal-time correlator.
+
+A more transparent operator derivation comes from direct mean-field decoupling. Start from the quartic operator product
+\begin{equation}
+    u_i u_j u_k u_l.
+\end{equation}
+Use Wick-style pair decoupling,
+\begin{align}
+    u_i u_j u_k u_l
+    \approx
+    &\braket{u_i u_j}u_k u_l
+    + \braket{u_i u_k}u_j u_l
+    + \braket{u_i u_l}u_j u_k \\
+    &+ \braket{u_j u_k}u_i u_l
+    + \braket{u_j u_l}u_i u_k
+    + \braket{u_k u_l}u_i u_j
+    - \text{constant terms}.
+    \label{eq:quartic_pair_decoupling_again}
+\end{align}
+Substitute Eq.~\eqref{eq:quartic_pair_decoupling_again} into Eq.~\eqref{eq:quartic_hamiltonian_general_again}. Because $\Phi^{(4)}_{ijkl}$ is fully symmetric, all six pairings lead to the same effective two-point kernel after relabeling dummy indices. Hence the induced quadratic Hamiltonian is
+\begin{equation}
+    H^{(4)}_{\rm MF}
+    =
+    \frac{1}{2}\sum_{ij}\Delta K^{(4)}_{ij}u_i u_j + \const,
+\end{equation}
+with
+\begin{equation}
+    \Delta K^{(4)}_{ij}
+    =
+    \frac{1}{2}\sum_{kl}\Phi^{(4)}_{ijkl}\braket{u_k u_l}
+    \times \text{(symmetry factor depending on convention)}.
+    \label{eq:quartic_deltaK_from_decoupling}
+\end{equation}
+Equation~\eqref{eq:quartic_deltaK_from_decoupling} is the origin of quartic Hartree mean field.
+
+To rewrite Eq.~\eqref{eq:quartic_deltaK_from_decoupling} in NEGF language, use the equal-time lesser Green's function. By definition,
+\begin{equation}
+    G^<_{kl}(t,t) = -\frac{\ii}{\hbar}\braket{u_l(t)u_k(t)}.
+\end{equation}
+Since equal-time displacements commute,
+\begin{equation}
+    \braket{u_k(t)u_l(t)} = \braket{u_l(t)u_k(t)} = \ii\hbar G^<_{kl}(t,t).
+    \label{eq:equal_time_displacement_from_lesser_again}
+\end{equation}
+Substitute Eq.~\eqref{eq:equal_time_displacement_from_lesser_again} into Eq.~\eqref{eq:quartic_deltaK_from_decoupling}. The quartic mean-field kernel becomes a functional of the equal-time lesser Green's function.
+
+In Wang's tensor convention, the symmetry factor simplifies and the result is
+\begin{equation}
+    \Sigma_{n,jj'}(\tau,\tau') = 3\ii\hbar\,\delta(\tau,\tau')\sum_{kl}T_{jj'kl}G_{kl}(\tau,\tau).
+    \label{eq:wang_quartic_scmf_again}
+\end{equation}
+The prefactor $3$ comes from the three distinct pairings of a quartic vertex into a two-point external kernel and an internal two-point correlator. This is the basic derivation behind quartic SCMF.
+
+The leading dynamic quartic scattering term appears only at second order in the quartic tensor, i.e. from two quartic vertices. Using Eq.~\eqref{eq:internal_line_count_general} with $m=4$ and $V_4=2$ gives
+\begin{equation}
+    N_G = \frac{4\times 2 - 2}{2} = 3.
+\end{equation}
+Therefore the leading dynamic quartic self-energy contains three internal propagators. This is why quartic SCBA is substantially heavier numerically than quartic mean field.
+
+\subsection{What should be called a general \texorpdfstring{$n$}{n}-phonon process in code?}
+The derivations above point to a precise code-level abstraction.
+\begin{enumerate}[label=\arabic*.]
+\item A material input should be represented by the harmonic matrix $K$ and the anharmonic tensors $\Phi^{(3)}, \Phi^{(4)}, \ldots$.
+\item An approximation scheme should be defined by which contractions of those tensors with Green's functions are retained.
+\item A toy-model benchmark should be a special sparse choice of those tensors, together with a paper-specific unit convention and observable definition.
+\end{enumerate}
+Thus, in a future materials workflow, ``three-phonon LO'' should mean: start from $\Phi^{(3)}$, build the two-vertex cubic self-energy, evaluate it with the chosen internal propagators, and insert it into Dyson/Keldysh. Likewise, ``four-phonon MF'' should mean: start from $\Phi^{(4)}$, build the quartic Hartree contraction, and solve the resulting effective harmonic problem self-consistently. This tensor-first interpretation is the theory reason the codebase should remain general and approximation-first.

@@ -18,6 +18,13 @@ These are kept at top-level because they are useful for solver and regression ch
 - `examples/graphene_ifc_transmission_benchmark.py`
 - `examples/graphene_kmatrix_legacy_benchmark.py`
 - `examples/silicon_ifc_dispersion_compare.py`
+- `examples/chain_inelastic_validation.py`
+- `examples/fpu_alpha_lowest_order_conductance.py`
+- `examples/phi4_approximations_conductance.py`
+- `examples/wang_fig4_quartic_scmf.py`
+- `examples/wang0701164_fig5_cubic_onsite_lo.py`
+- `examples/wang0701164_fig5_convergence.py`
+- `examples/wang0701164_extract_fig5_vector_reference.py`
 
 ## Legacy Archive
 

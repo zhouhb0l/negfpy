@@ -1,0 +1,566 @@
+\section{Foundations of Phonon NEGF}
+
+\subsection{Mass-normalized coordinates and the harmonic Hamiltonian}
+We begin from physical displacement coordinates $x_i$ and atomic masses $m_i$. The physical kinetic energy is
+\begin{equation}
+    T = \frac{1}{2}\sum_i m_i \dot x_i^2.
+    \label{eq:physical_kinetic_energy}
+\end{equation}
+Introduce mass-normalized coordinates
+\begin{equation}
+    u_i = \sqrt{m_i}\,x_i,
+    \qquad
+    x_i = \frac{u_i}{\sqrt{m_i}}.
+    \label{eq:mass_normalized_coordinate_def}
+\end{equation}
+Differentiate Eq.~\eqref{eq:mass_normalized_coordinate_def} with respect to time:
+\begin{equation}
+    \dot x_i = \frac{\dot u_i}{\sqrt{m_i}}.
+    \label{eq:xdot_from_udot}
+\end{equation}
+Substitute Eq.~\eqref{eq:xdot_from_udot} into Eq.~\eqref{eq:physical_kinetic_energy}:
+\begin{align}
+    T
+    &= \frac{1}{2}\sum_i m_i \paren{\frac{\dot u_i}{\sqrt{m_i}}}^2 \\
+    &= \frac{1}{2}\sum_i m_i \frac{\dot u_i^2}{m_i} \\
+    &= \frac{1}{2}\sum_i \dot u_i^2.
+    \label{eq:kinetic_energy_mass_normalized}
+\end{align}
+Thus the masses disappear from the kinetic term.
+
+Now expand the harmonic potential energy around equilibrium in physical coordinates:
+\begin{equation}
+    V^{(2)} = \frac{1}{2}\sum_{ij}\phi^{(2)}_{ij}x_i x_j.
+    \label{eq:physical_harmonic_potential}
+\end{equation}
+Substituting $x_i = u_i/\sqrt{m_i}$ gives
+\begin{align}
+    V^{(2)}
+    &= \frac{1}{2}\sum_{ij}\phi^{(2)}_{ij}\frac{u_i}{\sqrt{m_i}}\frac{u_j}{\sqrt{m_j}} \\
+    &= \frac{1}{2}\sum_{ij}\frac{\phi^{(2)}_{ij}}{\sqrt{m_i m_j}}u_i u_j.
+\end{align}
+Define the mass-normalized harmonic matrix
+\begin{equation}
+    K_{ij} = \frac{\phi^{(2)}_{ij}}{\sqrt{m_i m_j}}.
+    \label{eq:mass_normalized_harmonic_matrix}
+\end{equation}
+Then the harmonic Hamiltonian becomes
+\begin{equation}
+    H^{(2)} = \frac{1}{2}\sum_i \dot u_i^2 + \frac{1}{2}\sum_{ij}u_i K_{ij}u_j.
+    \label{eq:harmonic_hamiltonian_mass_normalized}
+\end{equation}
+In matrix form,
+\begin{equation}
+    H^{(2)} = \frac{1}{2}\dot u^{\mathsf T}\dot u + \frac{1}{2}u^{\mathsf T}K u.
+    \label{eq:harmonic_hamiltonian_matrix_form}
+\end{equation}
+
+We now derive the equations of motion from Eq.~\eqref{eq:harmonic_hamiltonian_matrix_form}. The canonical momentum conjugate to $u_i$ is
+\begin{equation}
+    p_i = \frac{\partial L}{\partial \dot u_i} = \dot u_i,
+\end{equation}
+so Hamilton's equation gives
+\begin{equation}
+    \dot p_i = -\frac{\partial H}{\partial u_i} = -\sum_j K_{ij}u_j.
+\end{equation}
+Since $p_i = \dot u_i$, we get
+\begin{equation}
+    \ddot u_i = -\sum_j K_{ij}u_j.
+    \label{eq:eom_component_harmonic}
+\end{equation}
+Collecting all components,
+\begin{equation}
+    \ddot u + Ku = 0.
+    \label{eq:eom_matrix_harmonic}
+\end{equation}
+This is one of the major advantages of mass normalization: the harmonic equations become a clean eigenvalue problem for $K$.
+
+We partition the full system into left lead $L$, center $C$, and right lead $R$. For each region $\alpha \in \{L,C,R\}$, the harmonic Hamiltonian is
+\begin{equation}
+    H_\alpha = \frac{1}{2}\dot u_\alpha^{\mathsf T}\dot u_\alpha + \frac{1}{2}u_\alpha^{\mathsf T}K^\alpha u_\alpha.
+    \label{eq:subsystem_harmonic_hamiltonian}
+\end{equation}
+The full linear Hamiltonian reads
+\begin{equation}
+    H_0 = H_L + H_C + H_R + u_L^{\mathsf T}V^{LC}u_C + u_C^{\mathsf T}V^{CR}u_R.
+    \label{eq:partitioned_harmonic_hamiltonian}
+\end{equation}
+In block-matrix notation, the full harmonic matrix is
+\begin{equation}
+    K =
+    \begin{pmatrix}
+        K^L & V^{LC} & 0 \\
+        V^{CL} & K^C & V^{CR} \\
+        0 & V^{RC} & K^R
+    \end{pmatrix}.
+    \label{eq:blockK}
+\end{equation}
+The central region is finite, while the leads are infinite or semi-infinite. The entire NEGF reduction to a central problem comes from integrating out the lead blocks of Eq.~\eqref{eq:blockK}.
+
+\subsection{Anharmonic Hamiltonian and convention changes}
+The Wang-family papers often write the nonlinear Hamiltonian as
+\begin{equation}
+    H_n = \frac{1}{3}\sum_{ijk}T_{ijk}u_i u_j u_k + \frac{1}{4}\sum_{ijkl}T_{ijkl}u_i u_j u_k u_l + \cdots.
+    \label{eq:wang_Hn}
+\end{equation}
+A more symmetric field-theory convention is
+\begin{equation}
+    H_n = \sum_{m\ge 3}\frac{1}{m!}\sum_{i_1\cdots i_m}\Phi^{(m)}_{i_1\cdots i_m}u_{i_1}\cdots u_{i_m}.
+    \label{eq:symmetric_Hn}
+\end{equation}
+To translate between them, compare the cubic terms. Equating the cubic pieces of Eq.~\eqref{eq:wang_Hn} and Eq.~\eqref{eq:symmetric_Hn} gives
+\begin{equation}
+    \frac{1}{3}T_{ijk}u_i u_j u_k = \frac{1}{3!}\Phi^{(3)}_{ijk}u_i u_j u_k.
+\end{equation}
+Since $3! = 6$, multiplying both sides by $6$ yields
+\begin{equation}
+    2T_{ijk}u_i u_j u_k = \Phi^{(3)}_{ijk}u_i u_j u_k,
+\end{equation}
+and therefore
+\begin{equation}
+    \Phi^{(3)}_{ijk} = 2T_{ijk}.
+    \label{eq:phi3_vs_T3}
+\end{equation}
+Likewise, for quartic terms we equate
+\begin{equation}
+    \frac{1}{4}T_{ijkl}u_i u_j u_k u_l = \frac{1}{4!}\Phi^{(4)}_{ijkl}u_i u_j u_k u_l.
+\end{equation}
+Since $4! = 24$, multiplying both sides by $24$ yields
+\begin{equation}
+    6T_{ijkl}u_i u_j u_k u_l = \Phi^{(4)}_{ijkl}u_i u_j u_k u_l,
+\end{equation}
+so
+\begin{equation}
+    \Phi^{(4)}_{ijkl} = 6T_{ijkl}.
+    \label{eq:phi4_vs_T4}
+\end{equation}
+This is a crucial practical point. Two formulas that look different on paper may in fact describe the same physics once the tensor convention is translated properly.
+
+For future material-based work, the most general Hamiltonian to keep in mind is
+\begin{equation}
+    H = H_0 + \sum_{m\ge 3}\frac{1}{m!}\sum_{i_1\cdots i_m}\Phi^{(m)}_{i_1\cdots i_m}u_{i_1}\cdots u_{i_m}.
+    \label{eq:general_hamiltonian}
+\end{equation}
+Toy-model tensors are then just sparse special cases of the general IFC tensors $\Phi^{(m)}$.
+
+\subsection{Contour-ordered Green's functions}
+The contour-ordered Green's function on the Keldysh contour $C$ is defined by
+\begin{equation}
+    G_{jk}(\tau,\tau') = -\frac{\ii}{\hbar}\braket{T_C u_j(\tau)u_k(\tau')}.
+    \label{eq:contour_green_definition}
+\end{equation}
+To connect this with real-time transport, we introduce the usual components. If both contour times lie on the forward branch, the time-ordering operator becomes the ordinary real-time ordering operator and one obtains the time-ordered Green's function. From the contour construction we define the lesser and greater functions as
+\begin{align}
+    G^<_{jk}(t,t') &= -\frac{\ii}{\hbar}\braket{u_k(t')u_j(t)},
+    \label{eq:lesser_def} \\
+    G^>_{jk}(t,t') &= -\frac{\ii}{\hbar}\braket{u_j(t)u_k(t')}.
+    \label{eq:greater_def}
+\end{align}
+The retarded and advanced functions are then
+\begin{align}
+    G^r_{jk}(t,t') &= -\frac{\ii}{\hbar}\theta(t-t')\braket{[u_j(t),u_k(t')]},
+    \label{eq:retarded_def} \\
+    G^a_{jk}(t,t') &= \frac{\ii}{\hbar}\theta(t'-t)\braket{[u_j(t),u_k(t')]}.
+    \label{eq:advanced_def}
+\end{align}
+These are not independent. Start from the commutator identity
+\begin{equation}
+    [u_j(t),u_k(t')] = u_j(t)u_k(t') - u_k(t')u_j(t).
+\end{equation}
+Multiply by $-\ii/\hbar$:
+\begin{equation}
+    -\frac{\ii}{\hbar}\braket{[u_j(t),u_k(t')]} = G^>_{jk}(t,t') - G^<_{jk}(t,t').
+\end{equation}
+Comparing with Eq.~\eqref{eq:retarded_def} and Eq.~\eqref{eq:advanced_def} yields
+\begin{equation}
+    G^r - G^a = G^> - G^<.
+    \label{eq:spectral_identity}
+\end{equation}
+In a steady state, all two-time functions depend only on the time difference $t-t'$. We therefore Fourier transform with the convention
+\begin{equation}
+    G[\omega] = \int_{-\infty}^{+\infty}\dd t\;\ee^{\ii\omega t}G(t),
+    \qquad
+    G(t) = \int_{-\infty}^{+\infty}\frac{\dd\omega}{2\pi}\;\ee^{-\ii\omega t}G[\omega].
+    \label{eq:fourier_convention_GF}
+\end{equation}
+The sign convention matters because it determines how derivatives transform. Under Eq.~\eqref{eq:fourier_convention_GF}, one has
+\begin{equation}
+    \frac{\dd}{\dd t} \longrightarrow -\ii\omega,
+    \qquad
+    \frac{\dd^2}{\dd t^2} \longrightarrow -\omega^2.
+    \label{eq:derivative_fourier_rule}
+\end{equation}
+
+\subsection{Equation-of-motion derivation of the harmonic retarded Green's function}
+We now derive the harmonic retarded Green's function step by step. Start from the definition
+\begin{equation}
+    G^r_{jk}(t,t') = -\frac{\ii}{\hbar}\theta(t-t')\braket{[u_j(t),u_k(t')]}. 
+    \label{eq:retarded_start_eom}
+\end{equation}
+Differentiate Eq.~\eqref{eq:retarded_start_eom} once with respect to $t$. Use the product rule:
+\begin{align}
+    \partial_t G^r_{jk}(t,t')
+    &= -\frac{\ii}{\hbar}\partial_t\theta(t-t')\braket{[u_j(t),u_k(t')]} 
+       -\frac{\ii}{\hbar}\theta(t-t')\partial_t\braket{[u_j(t),u_k(t')]}. 
+\end{align}
+Since $\partial_t\theta(t-t') = \delta(t-t')$ and only the first operator depends on $t$, this becomes
+\begin{align}
+    \partial_t G^r_{jk}(t,t')
+    &= -\frac{\ii}{\hbar}\delta(t-t')\braket{[u_j(t),u_k(t')]} 
+       -\frac{\ii}{\hbar}\theta(t-t')\braket{[\dot u_j(t),u_k(t')]}. 
+    \label{eq:first_derivative_retarded}
+\end{align}
+At equal times, displacement operators commute, so
+\begin{equation}
+    [u_j(t),u_k(t)] = 0,
+\end{equation}
+which means the $\delta$-term of Eq.~\eqref{eq:first_derivative_retarded} vanishes. Thus
+\begin{equation}
+    \partial_t G^r_{jk}(t,t') = -\frac{\ii}{\hbar}\theta(t-t')\braket{[\dot u_j(t),u_k(t')]}. 
+    \label{eq:first_derivative_retarded_simplified}
+\end{equation}
+Differentiate Eq.~\eqref{eq:first_derivative_retarded_simplified} once more:
+\begin{align}
+    \partial_t^2 G^r_{jk}(t,t')
+    &= -\frac{\ii}{\hbar}\delta(t-t')\braket{[\dot u_j(t),u_k(t')]} 
+       -\frac{\ii}{\hbar}\theta(t-t')\braket{[\ddot u_j(t),u_k(t')]}. 
+    \label{eq:second_derivative_retarded}
+\end{align}
+Now use the canonical commutator in mass-normalized coordinates. Since the conjugate momentum is $p_j = \dot u_j$, one has
+\begin{equation}
+    [u_j(t),p_k(t)] = \ii\hbar\delta_{jk}.
+\end{equation}
+Therefore
+\begin{equation}
+    [\dot u_j(t),u_k(t)] = [p_j(t),u_k(t)] = -\ii\hbar\delta_{jk}.
+    \label{eq:canonical_commutator_udot_u}
+\end{equation}
+Substitute Eq.~\eqref{eq:canonical_commutator_udot_u} into the first term of Eq.~\eqref{eq:second_derivative_retarded}:
+\begin{align}
+    -\frac{\ii}{\hbar}\delta(t-t')\braket{[\dot u_j(t),u_k(t')]}
+    &= -\frac{\ii}{\hbar}\delta(t-t')\paren{-\ii\hbar\delta_{jk}} \\
+    &= -\delta_{jk}\delta(t-t').
+\end{align}
+Thus Eq.~\eqref{eq:second_derivative_retarded} becomes
+\begin{equation}
+    \partial_t^2 G^r_{jk}(t,t')
+    = -\delta_{jk}\delta(t-t') -\frac{\ii}{\hbar}\theta(t-t')\braket{[\ddot u_j(t),u_k(t')]}. 
+    \label{eq:second_derivative_with_delta}
+\end{equation}
+Use the harmonic equation of motion Eq.~\eqref{eq:eom_component_harmonic}, namely
+\begin{equation}
+    \ddot u_j(t) = -\sum_l K_{jl}u_l(t).
+\end{equation}
+Then
+\begin{align}
+    -\frac{\ii}{\hbar}\theta(t-t')\braket{[\ddot u_j(t),u_k(t')]}
+    &= -\frac{\ii}{\hbar}\theta(t-t')\braket{\left[-\sum_l K_{jl}u_l(t),u_k(t')\right]} \\
+    &= \sum_l K_{jl}\frac{\ii}{\hbar}\theta(t-t')\braket{[u_l(t),u_k(t')]} \\
+    &= -\sum_l K_{jl}G^r_{lk}(t,t').
+\end{align}
+Hence
+\begin{equation}
+    \partial_t^2 G^r_{jk}(t,t') = -\delta_{jk}\delta(t-t') - \sum_l K_{jl} G^r_{lk}(t,t').
+\end{equation}
+Writing this in matrix form,
+\begin{equation}
+    \sqbrak{\partial_t^2 I + K}G^r(t,t') = -I\delta(t-t').
+    \label{eq:EOM_retarded_time}
+\end{equation}
+Now Fourier transform Eq.~\eqref{eq:EOM_retarded_time}. Using Eq.~\eqref{eq:derivative_fourier_rule},
+\begin{equation}
+    \partial_t^2 G^r(t,t') \longrightarrow -\omega^2 G^r(\omega).
+\end{equation}
+The retarded boundary condition is implemented by shifting $\omega \to \omega+\ii\eta$, so the Fourier-space equation is
+\begin{equation}
+    \sqbrak{-(\omega+\ii\eta)^2I + K}G^r(\omega) = -I.
+\end{equation}
+Multiply both sides by $-1$:
+\begin{equation}
+    \sqbrak{(\omega+\ii\eta)^2I - K}G^r(\omega) = I.
+\end{equation}
+Finally,
+\begin{equation}
+    G^r(\omega) = \sqbrak{(\omega+\ii\eta)^2I - K}^{-1}.
+    \label{eq:retarded_full_harmonic}
+\end{equation}
+This is the fundamental harmonic retarded Green's function.
+
+\subsection{Eliminating the leads and deriving the central harmonic Green's function}
+We now reduce the full harmonic problem to an effective problem in the center. The full resolvent equation is
+\begin{equation}
+    \sqbrak{(\omega+\ii\eta)^2 I - K}G^r = I.
+\end{equation}
+Use the block structure of Eq.~\eqref{eq:blockK}. Then
+\begin{equation}
+    (\omega+\ii\eta)^2I - K =
+    \begin{pmatrix}
+        (\omega+\ii\eta)^2I - K^L & -V^{LC} & 0 \\
+        -V^{CL} & (\omega+\ii\eta)^2I - K^C & -V^{CR} \\
+        0 & -V^{RC} & (\omega+\ii\eta)^2I - K^R
+    \end{pmatrix}.
+    \label{eq:block_resolvent_matrix}
+\end{equation}
+Write the full Green's function in block form:
+\begin{equation}
+    G^r =
+    \begin{pmatrix}
+        G_{LL}^r & G_{LC}^r & G_{LR}^r \\
+        G_{CL}^r & G_{CC}^r & G_{CR}^r \\
+        G_{RL}^r & G_{RC}^r & G_{RR}^r
+    \end{pmatrix}.
+\end{equation}
+Multiply Eq.~\eqref{eq:block_resolvent_matrix} by this block matrix and focus on the center column. The left and right block equations are
+\begin{align}
+    \sqbrak{(\omega+\ii\eta)^2I - K^L}G_{LC}^r - V^{LC}G_{CC}^r &= 0,
+    \label{eq:left_block_center_column} \\
+    \sqbrak{(\omega+\ii\eta)^2I - K^R}G_{RC}^r - V^{RC}G_{CC}^r &= 0.
+    \label{eq:right_block_center_column}
+\end{align}
+Define the isolated lead Green's functions
+\begin{equation}
+    g_\alpha^r = \sqbrak{(\omega+\ii\eta)^2I - K^\alpha}^{-1},
+    \qquad \alpha \in \{L,R\}.
+    \label{eq:isolated_lead_retarded}
+\end{equation}
+Multiply Eq.~\eqref{eq:left_block_center_column} and Eq.~\eqref{eq:right_block_center_column} by $g_L^r$ and $g_R^r$ respectively:
+\begin{align}
+    G_{LC}^r &= g_L^r V^{LC}G_{CC}^r,
+    \label{eq:GLC_in_terms_of_GCC} \\
+    G_{RC}^r &= g_R^r V^{RC}G_{CC}^r.
+    \label{eq:GRC_in_terms_of_GCC}
+\end{align}
+Now examine the center block equation:
+\begin{equation}
+    -V^{CL}G_{LC}^r + \sqbrak{(\omega+\ii\eta)^2I - K^C}G_{CC}^r - V^{CR}G_{RC}^r = I.
+    \label{eq:center_block_equation_raw}
+\end{equation}
+Insert Eq.~\eqref{eq:GLC_in_terms_of_GCC} and Eq.~\eqref{eq:GRC_in_terms_of_GCC} into Eq.~\eqref{eq:center_block_equation_raw}:
+\begin{align}
+    &-V^{CL}\paren{g_L^r V^{LC}G_{CC}^r} + \sqbrak{(\omega+\ii\eta)^2I - K^C}G_{CC}^r - V^{CR}\paren{g_R^r V^{RC}G_{CC}^r} = I.
+\end{align}
+Factor out $G_{CC}^r$ on the right:
+\begin{equation}
+    \sqbrak{(\omega+\ii\eta)^2I - K^C - V^{CL}g_L^rV^{LC} - V^{CR}g_R^rV^{RC}}G_{CC}^r = I.
+    \label{eq:center_block_after_elimination}
+\end{equation}
+Define the lead self-energies
+\begin{equation}
+    \Sigma_\alpha^r(\omega) = V^{C\alpha}g_\alpha^r(\omega)V^{\alpha C},
+    \label{eq:lead_self_energy_definition}
+\end{equation}
+where $V^{CL} \equiv V^{C L}$ and $V^{LC} \equiv V^{L C}$, etc. Then Eq.~\eqref{eq:center_block_after_elimination} becomes
+\begin{equation}
+    G_0^r(\omega) \equiv G_{CC}^r(\omega)
+    = \sqbrak{(\omega+\ii\eta)^2I - K^C - \Sigma_L^r(\omega) - \Sigma_R^r(\omega)}^{-1}.
+    \label{eq:G0r}
+\end{equation}
+This is the exact harmonic center Green's function after the leads have been integrated out.
+
+\subsection{Lesser Green's function and Keldysh relation}
+In the harmonic problem, nonequilibrium enters only through the thermal occupations of the leads. The contour Dyson equation for the center is
+\begin{equation}
+    G_0 = g_C + g_C \otimes \Sigma \otimes G_0,
+    \label{eq:contour_dyson_harmonic_center}
+\end{equation}
+where $\Sigma = \Sigma_L + \Sigma_R$ and $\otimes$ denotes contour convolution.
+
+Apply Langreth rules to Eq.~\eqref{eq:contour_dyson_harmonic_center}. The lesser component of a product obeys
+\begin{equation}
+    (AB)^< = A^r B^< + A^< B^a.
+    \label{eq:langreth_product_rule}
+\end{equation}
+Using this repeatedly on the convolution form of Eq.~\eqref{eq:contour_dyson_harmonic_center} and assuming the isolated center carries no initial nonequilibrium population, one arrives at
+\begin{equation}
+    G_0^< = G_0^r \Sigma^< G_0^a.
+    \label{eq:G0lesser}
+\end{equation}
+To express $\Sigma_\alpha^<$ in terms of physical lead quantities, define the level-width matrix
+\begin{equation}
+    \Gamma_\alpha(\omega) = \ii\paren{\Sigma_\alpha^r - \Sigma_\alpha^a}.
+    \label{eq:Gamma_definition}
+\end{equation}
+For a lead in local equilibrium at temperature $T_\alpha$, the lesser self-energy is
+\begin{equation}
+    \Sigma_\alpha^<(\omega) = f_\alpha(\omega)\paren{\Sigma_\alpha^a - \Sigma_\alpha^r}.
+\end{equation}
+Using Eq.~\eqref{eq:Gamma_definition},
+\begin{equation}
+    \Sigma_\alpha^a - \Sigma_\alpha^r = -\paren{\Sigma_\alpha^r - \Sigma_\alpha^a} = -\frac{1}{\ii}\Gamma_\alpha = -\ii\Gamma_\alpha,
+\end{equation}
+so
+\begin{equation}
+    \Sigma_\alpha^<(\omega) = -\ii f_\alpha(\omega)\Gamma_\alpha(\omega).
+    \label{eq:lead_lesser_self_energy_bose}
+\end{equation}
+The Bose distribution is
+\begin{equation}
+    f_\alpha(\omega) = \frac{1}{\exp\sqbrak{\hbar\omega/(k_B T_\alpha)} - 1}.
+    \label{eq:bose_distribution}
+\end{equation}
+Combining Eq.~\eqref{eq:G0lesser} and Eq.~\eqref{eq:lead_lesser_self_energy_bose}, we obtain
+\begin{equation}
+    G_0^< = G_0^r\paren{\Sigma_L^< + \Sigma_R^<}G_0^a.
+    \label{eq:harmonic_lesser_final}
+\end{equation}
+This is the harmonic Keldysh relation used in both ballistic and inelastic calculations.
+
+\subsection{Dyson and Keldysh equations with anharmonicity}
+Once anharmonicity is added, the lead self-energies are supplemented by a nonlinear self-energy $\Sigma_n$. The exact interacting central-region Dyson equation is
+\begin{equation}
+    G^r = G_0^r + G_0^r\Sigma_n^r G^r.
+    \label{eq:dyson_interacting_integral_form}
+\end{equation}
+Bring the second term to the left:
+\begin{equation}
+    G^r - G_0^r\Sigma_n^r G^r = G_0^r.
+\end{equation}
+Factor out $G^r$ on the right:
+\begin{equation}
+    \paren{I - G_0^r\Sigma_n^r}G^r = G_0^r.
+\end{equation}
+Multiply by $(G_0^r)^{-1}$ from the left:
+\begin{equation}
+    \paren{(G_0^r)^{-1} - \Sigma_n^r}G^r = I.
+\end{equation}
+Hence
+\begin{equation}
+    G^r = \sqbrak{(G_0^r)^{-1} - \Sigma_n^r}^{-1}.
+    \label{eq:Dyson_r}
+\end{equation}
+This is Dyson's equation in algebraic form.
+
+For the lesser component, the same Langreth machinery yields
+\begin{equation}
+    G^< = G^r\paren{\Sigma_L^< + \Sigma_R^< + \Sigma_n^<}G^a.
+    \label{eq:Keldysh_less}
+\end{equation}
+Equation~\eqref{eq:Dyson_r} and Eq.~\eqref{eq:Keldysh_less} are exact in structure. Every approximation scheme later in the notes should be understood as a prescription for approximating $\Sigma_n^r$ and $\Sigma_n^<$.
+
+\subsection{Heat-current formula from the lead energy derivative}
+We now derive the current formula in detail. Define the current leaving the left lead by
+\begin{equation}
+    I_L = -\braket{\dot H_L}.
+    \label{eq:current_def_start}
+\end{equation}
+Use the Heisenberg equation of motion,
+\begin{equation}
+    \dot H_L = \frac{\ii}{\hbar}[H,H_L].
+\end{equation}
+Since $H_L$ commutes with itself and with all center or right-lead terms except the coupling $u_L^{\mathsf T}V^{LC}u_C$, only the coupling contributes. Differentiating explicitly from the classical-looking form gives the same result more directly:
+\begin{equation}
+    H_L = \frac{1}{2}\dot u_L^{\mathsf T}\dot u_L + \frac{1}{2}u_L^{\mathsf T}K^L u_L.
+\end{equation}
+Then
+\begin{equation}
+    \dot H_L = \dot u_L^{\mathsf T}\ddot u_L + \dot u_L^{\mathsf T}K^L u_L.
+\end{equation}
+Use the left-lead equation of motion in the full coupled system,
+\begin{equation}
+    \ddot u_L = -K^L u_L - V^{LC}u_C.
+\end{equation}
+Substitute this into $\dot H_L$:
+\begin{align}
+    \dot H_L
+    &= \dot u_L^{\mathsf T}\paren{-K^L u_L - V^{LC}u_C} + \dot u_L^{\mathsf T}K^L u_L \\
+    &= -\dot u_L^{\mathsf T}V^{LC}u_C.
+\end{align}
+Therefore
+\begin{equation}
+    I_L = -\braket{\dot H_L} = \braket{\dot u_L^{\mathsf T}V^{LC}u_C}.
+    \label{eq:current_coordinate_velocity_form}
+\end{equation}
+Now express Eq.~\eqref{eq:current_coordinate_velocity_form} in terms of a mixed lesser Green's function. Define
+\begin{equation}
+    G_{CL}^<(t,t') = -\frac{\ii}{\hbar}\braket{u_L(t')u_C^{\mathsf T}(t)}.
+    \label{eq:mixed_lesser_definition}
+\end{equation}
+Set $t=t'$ after differentiating with respect to the lead time. Since in frequency space $\dot u_L[\omega] = -\ii\omega u_L[\omega]$, Eq.~\eqref{eq:current_coordinate_velocity_form} becomes
+\begin{equation}
+    I_L = -\int_{-\infty}^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\Tr\sqbrak{V^{LC}G_{CL}^<(\omega)}.
+    \label{eq:current_mixed}
+\end{equation}
+We now eliminate $G_{CL}^<$ in favor of center quantities. On the contour, the mixed Green's function obeys
+\begin{equation}
+    G_{CL} = G V^{CL} g_L,
+\end{equation}
+where $G$ is the full center Green's function and $g_L$ is the isolated lead Green's function. Applying Langreth rules to the product gives
+\begin{equation}
+    G_{CL}^< = G^r V^{CL}g_L^< + G^<V^{CL}g_L^a.
+    \label{eq:GCLlesser_langreth}
+\end{equation}
+Insert Eq.~\eqref{eq:GCLlesser_langreth} into Eq.~\eqref{eq:current_mixed}:
+\begin{align}
+    I_L
+    &= -\int_{-\infty}^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,
+    \Tr\sqbrak{V^{LC}G^r V^{CL}g_L^< + V^{LC}G^<V^{CL}g_L^a}.
+\end{align}
+Use cyclicity of the trace and the definitions
+\begin{equation}
+    \Sigma_L^< = V^{CL}g_L^<V^{LC},
+    \qquad
+    \Sigma_L^a = V^{CL}g_L^aV^{LC}.
+\end{equation}
+Then
+\begin{equation}
+    I_L = -\int_{-\infty}^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,
+    \Tr\sqbrak{G^r\Sigma_L^< + G^<\Sigma_L^a}.
+    \label{eq:current_left}
+\end{equation}
+This is the exact interacting phonon current formula used throughout the Wang-family papers.
+
+\subsection{Ballistic Landauer--Caroli formula}
+In the purely harmonic case, $\Sigma_n = 0$, so Eq.~\eqref{eq:Keldysh_less} reduces to Eq.~\eqref{eq:harmonic_lesser_final}:
+\begin{equation}
+    G^< = G_0^r(\Sigma_L^< + \Sigma_R^<)G_0^a.
+    \label{eq:ballistic_lesser_repeat}
+\end{equation}
+Insert Eq.~\eqref{eq:ballistic_lesser_repeat} into Eq.~\eqref{eq:current_left}:
+\begin{align}
+    I_L
+    &= -\int\frac{\dd\omega}{2\pi}\,\hbar\omega\,
+    \Tr\sqbrak{G_0^r\Sigma_L^< + G_0^r(\Sigma_L^< + \Sigma_R^<)G_0^a\Sigma_L^a}.
+    \label{eq:current_after_ballistic_substitution}
+\end{align}
+Using standard identities among retarded, advanced, lesser, and broadening matrices, one can rearrange Eq.~\eqref{eq:current_after_ballistic_substitution} into the two-terminal form
+\begin{equation}
+    I = \int_0^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\mathcal{T}(\omega)\sqbrak{f_L(\omega)-f_R(\omega)},
+    \label{eq:landauer_phonon}
+\end{equation}
+where the transmission is
+\begin{equation}
+    \mathcal{T}(\omega) = \Tr\sqbrak{G_0^r(\omega)\Gamma_L(\omega)G_0^a(\omega)\Gamma_R(\omega)}.
+    \label{eq:caroli}
+\end{equation}
+Equation~\eqref{eq:caroli} is the Caroli formula. It is the exact ballistic limit of the Green's-function formalism.
+
+\subsection{Thermal conductance}
+For a small temperature bias,
+\begin{equation}
+    T_L = T + \frac{\Delta T}{2},
+    \qquad
+    T_R = T - \frac{\Delta T}{2}.
+    \label{eq:small_bias_temperature_split}
+\end{equation}
+The thermal conductance is defined by the linear-response slope
+\begin{equation}
+    \kappa(T) = \lim_{\Delta T \to 0}\frac{I\paren{T+\Delta T/2,\,T-\Delta T/2}}{\Delta T}.
+    \label{eq:kappa_definition_general}
+\end{equation}
+Substitute the ballistic current Eq.~\eqref{eq:landauer_phonon} into Eq.~\eqref{eq:kappa_definition_general}:
+\begin{equation}
+    \kappa(T) = \lim_{\Delta T\to 0}\int_0^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\mathcal T(\omega)
+    \frac{f\paren{\omega,T+\Delta T/2} - f\paren{\omega,T-\Delta T/2}}{\Delta T}.
+\end{equation}
+Take the limit inside the integral. The bracketed quotient becomes a derivative:
+\begin{equation}
+    \lim_{\Delta T\to 0}
+    \frac{f\paren{\omega,T+\Delta T/2} - f\paren{\omega,T-\Delta T/2}}{\Delta T}
+    = \frac{\partial f}{\partial T}.
+\end{equation}
+Hence
+\begin{equation}
+    \kappa_{\rm bal}(T) = \int_0^{+\infty}\frac{\dd\omega}{2\pi}\,\hbar\omega\,\mathcal T(\omega)\frac{\partial f}{\partial T}.
+    \label{eq:kappa_ballistic}
+\end{equation}
+This formula is the linear-response conductance benchmark that every inelastic extension should recover when the nonlinear self-energy is turned off.

@@ -1,0 +1,91 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm,mathtools,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\linespread{1.08}
+
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\sgn}{\operatorname{sgn}}
+\newcommand{\im}{\operatorname{Im}}
+\newcommand{\re}{\operatorname{Re}}
+\newcommand{\const}{\mathrm{const}}
+\newcommand{\G}{\mathcal{G}}
+\newcommand{\K}{\mathcal{K}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\order}[1]{\mathcal{O}\!\left(#1\right)}
+\newcommand{\braket}[1]{\left\langle #1 \right\rangle}
+\newcommand{\paren}[1]{\left( #1 \right)}
+\newcommand{\sqbrak}[1]{\left[ #1 \right]}
+\newcommand{\cbrak}[1]{\left\{ #1 \right\}}
+\newcommand{\abs}[1]{\left| #1 \right|}
+\newcommand{\norm}[1]{\left\| #1 \right\|}
+
+\title{Detailed Theory Notes for Phonon NEGF with Anharmonic Interactions\\\large General \texorpdfstring{$n$}{n}-Phonon Processes, Approximation Hierarchies, and Recovery of the Main Formulas in the Local Literature Set}
+\author{negfpy theory workspace}
+\date{April 24, 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section*{Purpose and Scope}
+These notes are meant to serve two roles at once.
+First, they collect a \emph{generalizable} theoretical foundation for phonon nonequilibrium Green's functions (NEGF), written in a way that can later support material-specific implementations with realistic interatomic force constants (IFCs). Second, they record the \emph{benchmark-facing} derivations needed to reproduce and audit the toy-model literature currently stored in \texttt{theory/literature/}.
+
+The emphasis is therefore deliberately two-layered:
+\begin{enumerate}[label=\arabic*.]
+\item a general derivation of harmonic and anharmonic phonon NEGF, including general $n$-phonon interactions and the practical approximation schemes LO, MF, and SCBA;
+\item an explicit recovery of the main formulas used in the local paper set:
+\begin{itemize}
+\item \texttt{0605028v1.pdf}
+\item \texttt{0701164v1.pdf}
+\item \texttt{0802.2761v1.pdf}
+\item \texttt{0807.3819v1.pdf}
+\item \texttt{1303.7317v1.pdf}
+\item \texttt{transp.pdf} (journal version of the 2008 review)
+\end{itemize}
+\end{enumerate}
+
+A recurring theme in these notes is the distinction between
+\begin{itemize}
+\item \textbf{general theory} that should survive the transition from toy chains to real materials, and
+\item \textbf{paper-specific benchmark conventions} that are useful for reproducing a figure but should not be baked into the reusable solver layer.
+\end{itemize}
+
+\input{sections/01_foundations}
+\input{sections/02_nphonon}
+\input{sections/03_approximations}
+\input{sections/04_paper_recovery}
+
+\section{Concluding Remarks}
+The central theoretical picture that emerges from the literature set is the following.
+
+\begin{enumerate}[label=\arabic*.]
+\item The harmonic phonon transport problem is completely determined by the mass-normalized dynamical matrix, lead self-energies, and the Keldysh current formula.
+\item Anharmonicity enters through nonlinear self-energies. For cubic interactions the lowest nontrivial dynamic scattering appears at second order in the cubic vertex; for quartic interactions the static Hartree renormalization already appears at first order in the quartic vertex.
+\item LO, MF, and SCBA are best viewed as different closures of the Dyson--Keldysh system rather than unrelated methods.
+\item The Wang 2006/2007/2013 family of papers provides a continuous hierarchy: current formula, contour formalism, perturbation theory, and self-consistent mean-field closures all live inside one common framework.
+\item The Xu \emph{et al.} 2008 momentum-space formulation connects the same NEGF machinery to phonon lifetime, frequency shift, and mean-free-path extraction. That link is important when bridging from toy chains to materials.
+\end{enumerate}
+
+For future code development, the clean separation should remain:
+\begin{itemize}
+\item general solver abstractions should be written in terms of tensors $K$, $\Phi^{(3)}$, $\Phi^{(4)}$, and lead self-energies;
+\item benchmark-specific papers should live in thin wrappers that enforce the paper's units, toy-model Hamiltonian, and plotting conventions.
+\end{itemize}
+
+\end{document}
