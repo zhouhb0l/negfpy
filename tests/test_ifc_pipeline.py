@@ -145,6 +145,57 @@ def test_read_phonopy_force_constants_from_path(tmp_path) -> None:
     assert np.isclose(float(ifc.masses[0]), 28.085 * mass_scale)
 
 
+def test_phonopy_reader_uses_pair_shortest_vectors(tmp_path) -> None:
+    poscar = tmp_path / "POSCAR"
+    force_constants = tmp_path / "FORCE_CONSTANTS"
+    poscar.write_text(
+        "\n".join(
+            [
+                "shifted basis 2x supercell",
+                "1.0",
+                "2.0 0.0 0.0",
+                "0.0 1.0 0.0",
+                "0.0 0.0 1.0",
+                "Si Ge",
+                "2 2",
+                "Direct",
+                "0.20 0.0 0.0",
+                "0.70 0.0 0.0",
+                "0.05 0.0 0.0",
+                "0.55 0.0 0.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lines = ["4 4"]
+    for i in range(4):
+        for j in range(4):
+            lines.append(f"{i + 1} {j + 1}")
+            block = np.zeros((3, 3))
+            if i == 0 and j == 3:
+                block[0, 0] = 5.0
+            for a in range(3):
+                lines.append(f"{block[a,0]: .16f} {block[a,1]: .16f} {block[a,2]: .16f}")
+    force_constants.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ifc = read_ifc(
+        {
+            "force_constants_path": str(force_constants),
+            "poscar_path": str(poscar),
+            "supercell": [2, 1, 1],
+        },
+        reader="phonopy",
+    )
+    terms = {(int(t.dx), int(t.dy), int(t.dz)): np.asarray(t.block) for t in ifc.terms}
+    fc_scale = float(ifc.metadata["force_constant_scale_to_qe"])
+
+    assert ifc.atom_symbols == ("Ge", "Si")
+    assert np.isclose(terms[(1, 0, 0)][3, 0].real, 5.0 * fc_scale)
+    assert np.isclose(terms.get((-1, 0, 0), np.zeros((6, 6)))[3, 0].real, 0.0)
+
+
 def test_read_phonopy_force_constants_from_dict_source(tmp_path) -> None:
     poscar, fc = _write_phonopy_fc_and_poscar(tmp_path)
     ifc = read_ifc(

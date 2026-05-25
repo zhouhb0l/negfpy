@@ -47,6 +47,47 @@ def _signed_fft_index(raw_idx: int, n: int) -> int:
     return raw_idx
 
 
+def _shortest_lattice_translations(
+    cell_delta: np.ndarray,
+    basis_delta: np.ndarray,
+    primitive_lattice: np.ndarray,
+    repeats: np.ndarray,
+    *,
+    search_radius: int = 2,
+    distance_tolerance: float = 1e-8,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return phonopy-style shortest image translations for one atom pair.
+
+    Phonopy phases each supercell force-constant pair by the shortest vectors
+    between the two atoms, not by the raw supercell index difference. In the
+    periodic gauge used by NEGFPy, the fractional basis displacement is removed
+    and the remaining integer lattice translations are accumulated as terms.
+    """
+
+    cell_delta = np.asarray(cell_delta, dtype=int)
+    basis_delta = np.asarray(basis_delta, dtype=float)
+    primitive_lattice = np.asarray(primitive_lattice, dtype=float)
+    repeats = np.asarray(repeats, dtype=int)
+
+    ranges = [range(-search_radius, search_radius + 1) if int(n) > 1 else range(0, 1) for n in repeats]
+    best_dist2: float | None = None
+    out: list[tuple[int, int, int]] = []
+    for ix in ranges[0]:
+        for iy in ranges[1]:
+            for iz in ranges[2]:
+                image = np.array([ix, iy, iz], dtype=int)
+                rvec = cell_delta + repeats * image
+                cart = (rvec.astype(float) + basis_delta) @ primitive_lattice
+                dist2 = float(np.dot(cart, cart))
+                if best_dist2 is None or dist2 < best_dist2 - distance_tolerance:
+                    best_dist2 = dist2
+                    out = [tuple(int(v) for v in rvec)]
+                elif abs(dist2 - best_dist2) <= distance_tolerance:
+                    out.append(tuple(int(v) for v in rvec))
+
+    return tuple(sorted(set(out)))
+
+
 def _phonopy_fc_to_qe_factor() -> float:
     """Scale eV/Angstrom^2 -> Ry/bohr^2."""
 
@@ -303,41 +344,37 @@ def _build_ifc_from_phonopy_force_constants(
 
     ndof = 3 * nat_prim
     block_sum: dict[tuple[int, int, int], np.ndarray] = {}
-    block_count: dict[tuple[int, int, int], np.ndarray] = {}
+    multiplicity_count: dict[int, int] = {}
+    repeats = np.asarray([n1, n2, n3], dtype=int)
+    primitive_lattice = np.asarray(pos["lattice_vectors"], dtype=float) / nvec[:, None]
 
-    for i in range(nat_super):
-        bi = int(atom_basis[i])
-        ti = t[i]
-        for j in range(nat_super):
-            bj = int(atom_basis[j])
-            tj = t[j]
-            raw = np.array(
-                [
-                    (int(tj[0]) - int(ti[0])) % n1,
-                    (int(tj[1]) - int(ti[1])) % n2,
-                    (int(tj[2]) - int(ti[2])) % n3,
-                ],
-                dtype=int,
+    for i, s_i in enumerate(home_sorted):
+        ti = t[int(s_i)]
+        for k in range(nat_super):
+            j = int(atom_basis[k])
+            cell_delta = t[k] - ti
+            basis_delta = basis_frac[j, :] - basis_frac[i, :]
+            translations = _shortest_lattice_translations(
+                cell_delta=cell_delta,
+                basis_delta=basis_delta,
+                primitive_lattice=primitive_lattice,
+                repeats=repeats,
             )
-            key = (
-                _signed_fft_index(int(raw[0]), n1),
-                _signed_fft_index(int(raw[1]), n2),
-                _signed_fft_index(int(raw[2]), n3),
-            )
-            if key not in block_sum:
-                block_sum[key] = np.zeros((ndof, ndof), dtype=np.complex128)
-                block_count[key] = np.zeros((ndof, ndof), dtype=float)
-            rs = 3 * bi
-            cs = 3 * bj
-            block_sum[key][rs : rs + 3, cs : cs + 3] += np.asarray(fc[i, j], dtype=np.complex128)
-            block_count[key][rs : rs + 3, cs : cs + 3] += 1.0
+            if len(translations) == 0:
+                raise ValueError("Failed to determine shortest lattice translations for a phonopy atom pair.")
+            multiplicity_count[len(translations)] = multiplicity_count.get(len(translations), 0) + 1
+            rs = 3 * i
+            cs = 3 * j
+            fc_block = np.asarray(fc[int(s_i), k], dtype=np.complex128) / float(len(translations))
+            for key in translations:
+                if key not in block_sum:
+                    block_sum[key] = np.zeros((ndof, ndof), dtype=np.complex128)
+                block_sum[key][rs : rs + 3, cs : cs + 3] += fc_block
 
-    terms: list[IFCTerm] = []
-    for key in sorted(block_sum):
-        cnt = block_count[key]
-        val = np.zeros_like(block_sum[key])
-        np.divide(block_sum[key], cnt, out=val, where=cnt > 0.0)
-        terms.append(IFCTerm(dx=int(key[0]), dy=int(key[1]), dz=int(key[2]), block=val))
+    terms = [
+        IFCTerm(dx=int(key[0]), dy=int(key[1]), dz=int(key[2]), block=np.asarray(block_sum[key]))
+        for key in sorted(block_sum)
+    ]
 
     fc_scale = _phonopy_fc_to_qe_factor()
     ifc = IFCData(
@@ -356,6 +393,8 @@ def _build_ifc_from_phonopy_force_constants(
             "nat_primitive_inferred": nat_prim,
             "nr": (n1, n2, n3),
             "supercell_repeats": (n1, n2, n3),
+            "term_generation": "phonopy_shortest_vectors",
+            "shortest_vector_multiplicity_counts": dict(sorted(multiplicity_count.items())),
             "force_constant_unit_source": "eV/Angstrom^2 (phonopy default)",
             "mass_unit_source": "amu",
             "force_constant_unit_converted": "Ry/bohr^2",
@@ -364,10 +403,10 @@ def _build_ifc_from_phonopy_force_constants(
             "mass_scale_to_qe": mass_scale,
             "omega_internal_unit": "sqrt(Ry/(2*me*bohr^2))",
         },
-        lattice_vectors=np.asarray(pos["lattice_vectors"], dtype=float) / nvec[:, None],
+        lattice_vectors=primitive_lattice,
         atom_positions=basis_frac,
         atom_symbols=tuple(basis_symbols),
-        index_convention="phonopy_fft_signed",
+        index_convention="phonopy_shortest_vectors_periodic_gauge",
     )
     validate_ifc_data(ifc)
     return ifc
