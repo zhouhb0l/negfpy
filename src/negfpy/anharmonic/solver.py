@@ -630,17 +630,38 @@ def solve_scba(
             ),
         )
         full_abs = abs(currents.full_balance)
-        bond_error = 0.0
-        if (
-            currents.bond_currents is not None
-            and np.asarray(currents.bond_currents).size
-        ):
-            bonds = np.asarray(currents.bond_currents, dtype=float)
-            bond_error = max(
-                float(np.max(np.abs(bonds - currents.left))),
-                float(np.max(np.abs(bonds + currents.right))),
-                float(np.max(bonds) - np.min(bonds)),
+        layer_collision_abs = 0.0
+        spatial_identity_abs = 0.0
+        corrected_cut_error = 0.0
+        block_local_bond_error = 0.0
+        if currents.spatial is not None:
+            layer_collision_abs = float(
+                np.max(np.abs(currents.spatial.layer_collision_power))
             )
+            spatial_identity_abs = float(
+                np.max(np.abs(currents.spatial.continuity_residual))
+            )
+            corrected = np.asarray(
+                currents.spatial.corrected_cut_currents,
+                dtype=float,
+            )
+            if corrected.size:
+                corrected_cut_error = max(
+                    float(np.max(np.abs(corrected - currents.left))),
+                    float(np.max(np.abs(corrected + currents.right))),
+                    float(np.max(corrected) - np.min(corrected)),
+                )
+            if (
+                currents.spatial.sigma_pp_is_block_local
+                and currents.bond_currents is not None
+                and np.asarray(currents.bond_currents).size
+            ):
+                bonds = np.asarray(currents.bond_currents, dtype=float)
+                block_local_bond_error = max(
+                    float(np.max(np.abs(bonds - currents.left))),
+                    float(np.max(np.abs(bonds + currents.right))),
+                    float(np.max(bonds) - np.min(bonds)),
+                )
         direction_valid = True
         if problem.left.temperature > problem.right.temperature:
             direction_valid = bool(
@@ -661,7 +682,10 @@ def solve_scba(
             and current_abs <= current_allowed
             and abs(currents.collision_power) <= collision_allowed
             and full_abs <= current_allowed
-            and bond_error <= current_allowed
+            and layer_collision_abs <= collision_allowed
+            and spatial_identity_abs <= current_allowed
+            and corrected_cut_error <= current_allowed
+            and block_local_bond_error <= current_allowed
             and direction_valid
         )
         consecutive = consecutive + 1 if passed else 0

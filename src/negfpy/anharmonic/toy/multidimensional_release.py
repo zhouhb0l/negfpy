@@ -48,6 +48,7 @@ from ..types import (
     HarmonicReservoir,
     KeldyshSpectrum,
     SCBAConfig,
+    SIGMA_PP_BLOCK_LOCAL_RTOL,
 )
 from .cubic_chain import pinned_three_polarization_chain
 
@@ -59,6 +60,7 @@ RunStatus = Literal[
     "failed",
     "blocked_by_parent",
 ]
+ExecutionBackend = Literal["serial", "threaded", "fft"]
 Initialization = Literal[
     "zero",
     "born_seed",
@@ -218,9 +220,17 @@ class MultidimensionalLadderSpec:
     g_values: tuple[float, ...] = (0.0, 0.025, 0.05)
     mean_temperature: float = 0.7
     bias_values: tuple[float, ...] = (0.0, 0.1, 0.2)
-    spacings: tuple[float, ...] = (0.05, 0.025, 0.0125)
+    spacings: tuple[float, ...] = (
+        0.0015625,
+        0.00078125,
+        0.000390625,
+    )
     cutoffs: tuple[float, ...] = (5.0, 6.0)
-    etas: tuple[float, ...] = (0.025, 0.0125, 0.00625)
+    etas: tuple[float, ...] = (
+        0.003125,
+        0.0015625,
+        0.00078125,
+    )
     mixings: tuple[float, ...] = (0.2, 0.1)
 
     def __post_init__(self) -> None:
@@ -440,11 +450,41 @@ class MultidimensionalReleaseConfig:
     shift_atol: float = 1.0e-8
     run_preregistered_refinements: bool = False
     certification_eligible: bool = False
+    production_backend: ExecutionBackend = "serial"
+    production_hilbert_backend: Literal["direct", "fft"] = "direct"
+    surface_gf_method: Literal[
+        "sancho_rubio",
+        "analytic_diagonal",
+    ] = "sancho_rubio"
+    run_bounded_backend_validation: bool = False
 
     def __post_init__(self) -> None:
         if self.profile not in {"pr_coarse", "full_preregistered"}:
             raise ValueError(
                 "profile must be 'pr_coarse' or 'full_preregistered'."
+            )
+        if self.production_backend not in {"serial", "threaded", "fft"}:
+            raise ValueError(
+                "production_backend must be serial, threaded, or fft."
+            )
+        if self.production_hilbert_backend not in {"direct", "fft"}:
+            raise ValueError(
+                "production_hilbert_backend must be direct or fft."
+            )
+        if self.surface_gf_method not in {
+            "sancho_rubio",
+            "analytic_diagonal",
+        }:
+            raise ValueError(
+                "surface_gf_method must be sancho_rubio or "
+                "analytic_diagonal."
+            )
+        if not isinstance(
+            self.run_bounded_backend_validation,
+            (bool, np.bool_),
+        ):
+            raise TypeError(
+                "run_bounded_backend_validation must be boolean."
             )
         if not isinstance(self.spec, MultidimensionalLadderSpec):
             raise TypeError("spec must be a MultidimensionalLadderSpec.")
@@ -542,6 +582,31 @@ class MultidimensionalReleaseConfig:
                     "certification eligibility requires numerical "
                     "refinements."
                 )
+            if self.production_backend != "fft":
+                raise ValueError(
+                    "certification eligibility requires the exact "
+                    "zero-padded FFT cubic backend."
+                )
+            if self.production_hilbert_backend != "fft":
+                raise ValueError(
+                    "certification eligibility requires the exact FFT "
+                    "principal-value Hilbert backend."
+                )
+            if self.surface_gf_method != "analytic_diagonal":
+                raise ValueError(
+                    "certification eligibility requires analytic_diagonal "
+                    "contacts for this diagonal toy lead."
+                )
+            if not self.run_bounded_backend_validation:
+                raise ValueError(
+                    "certification eligibility requires the bounded "
+                    "serial/threaded/FFT backend-validation subgate."
+                )
+        object.__setattr__(
+            self,
+            "run_bounded_backend_validation",
+            bool(self.run_bounded_backend_validation),
+        )
         object.__setattr__(self, "executed_g_values", executed_g)
         object.__setattr__(self, "executed_bias_values", executed_bias)
         object.__setattr__(
@@ -568,6 +633,8 @@ class MultidimensionalReleaseConfig:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "protocol": "multidimensional_toy_gate_v2",
+            "protocol_version": 2,
             "profile": self.profile,
             "coarse": self.coarse,
             "certification_eligible": self.certification_eligible,
@@ -604,6 +671,11 @@ class MultidimensionalReleaseConfig:
                 "tail_rtol": self.tail_rtol,
                 "mixing_floor": self.mixing_floor,
                 "retarded_strategy": "causal_hilbert",
+                "production_backend": self.production_backend,
+                "production_hilbert_backend": (
+                    self.production_hilbert_backend
+                ),
+                "surface_gf_method": self.surface_gf_method,
                 "eta_device": 0.0,
             },
             "comparison": {
@@ -638,6 +710,9 @@ class MultidimensionalReleaseConfig:
             "max_workers": self.max_workers,
             "run_preregistered_refinements": (
                 self.run_preregistered_refinements
+            ),
+            "run_bounded_backend_validation": (
+                self.run_bounded_backend_validation
             ),
         }
 
@@ -692,9 +767,9 @@ def full_multidimensional_release_config() -> MultidimensionalReleaseConfig:
         executed_g_values=spec.g_values,
         executed_bias_values=spec.bias_values,
         numerical=MultidimensionalNumericalPoint(
-            spacing=0.025,
+            spacing=0.00078125,
             cutoff=5.0,
-            eta_lead=0.0125,
+            eta_lead=0.0015625,
             mixing=0.2,
         ),
         max_iterations=200,
@@ -722,6 +797,10 @@ def full_multidimensional_release_config() -> MultidimensionalReleaseConfig:
         shift_atol=1.0e-8,
         run_preregistered_refinements=True,
         certification_eligible=True,
+        production_backend="fft",
+        production_hilbert_backend="fft",
+        surface_gf_method="analytic_diagonal",
+        run_bounded_backend_validation=True,
     )
 
 
@@ -813,7 +892,7 @@ class MultidimensionalRunOutcome:
     run_id: str
     point: MultidimensionalRunPoint
     initialization: Initialization
-    backend: Literal["serial", "threaded"]
+    backend: ExecutionBackend
     continuation_parent_id: str | None
     elapsed_seconds: float
     seed_elapsed_seconds: float
@@ -839,7 +918,7 @@ class MultidimensionalRunOutcome:
             "refinement_zero",
         }:
             raise ValueError("unknown initialization.")
-        if self.backend not in {"serial", "threaded"}:
+        if self.backend not in {"serial", "threaded", "fft"}:
             raise ValueError("backend must be serial or threaded.")
         if self.continuation_parent_id is not None and (
             not isinstance(self.continuation_parent_id, str)
@@ -1017,6 +1096,43 @@ class MultidimensionalRunOutcome:
             for item in result.history
         ]
         currents = result.currents
+        spatial = currents.spatial
+        spatial_current = (
+            None
+            if spatial is None
+            else {
+                "applicability": (
+                    "corrected_eom_cut_current"
+                    if not spatial.sigma_pp_is_block_local
+                    else "raw_harmonic_bond_current"
+                ),
+                "applicability_threshold": SIGMA_PP_BLOCK_LOCAL_RTOL,
+                "sigma_pp_is_block_local": spatial.sigma_pp_is_block_local,
+                "sigma_pp_nonlocal_ratio": (
+                    spatial.sigma_pp_nonlocal_ratio
+                ),
+                "eom_layer_exchange": np.asarray(
+                    spatial.eom_layer_exchange,
+                    dtype=float,
+                ).tolist(),
+                "layer_collision_power": np.asarray(
+                    spatial.layer_collision_power,
+                    dtype=float,
+                ).tolist(),
+                "nonlocal_self_energy_eom_cut_correction": np.asarray(
+                    spatial.nonlocal_self_energy_eom_cut_correction,
+                    dtype=float,
+                ).tolist(),
+                "corrected_cut_currents": np.asarray(
+                    spatial.corrected_cut_currents,
+                    dtype=float,
+                ).tolist(),
+                "continuity_residual": np.asarray(
+                    spatial.continuity_residual,
+                    dtype=float,
+                ).tolist(),
+            }
+        )
         bond_currents = (
             None
             if currents.bond_currents is None
@@ -1046,6 +1162,7 @@ class MultidimensionalRunOutcome:
                 "collision_power": currents.collision_power,
                 "full_balance": currents.full_balance,
                 "bond_currents": bond_currents,
+                "spatial": spatial_current,
             },
             "sigma_tail_ratio": _strict_float(
                 keldysh_tail_ratio(result.sigma_pp)
@@ -1466,6 +1583,11 @@ class MultidimensionalConservationCheck:
     bond_current_error: float | None
     passed: bool
     failures: tuple[str, ...]
+    raw_bond_current_error: float | None = None
+    corrected_cut_current_error: float | None = None
+    continuity_residual_error: float | None = None
+    sigma_pp_nonlocal_ratio: float | None = None
+    spatial_current_gate: str = "unavailable"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "equilibrium", bool(self.equilibrium))
@@ -1484,6 +1606,13 @@ class MultidimensionalConservationCheck:
             "current_scale": self.current_scale,
             "allowed_error": self.allowed_error,
             "left_current": self.left_current,
+            "raw_bond_current_error": self.raw_bond_current_error,
+            "corrected_cut_current_error": (
+                self.corrected_cut_current_error
+            ),
+            "continuity_residual_error": self.continuity_residual_error,
+            "sigma_pp_nonlocal_ratio": self.sigma_pp_nonlocal_ratio,
+            "spatial_current_gate": self.spatial_current_gate,
             "right_current": self.right_current,
             "contact_balance": self.contact_balance,
             "collision_power": self.collision_power,
@@ -1507,6 +1636,8 @@ class MultidimensionalReleaseReport:
     total_elapsed_seconds: float
     execution_passed: bool
     release_certified: bool
+    harmonic_preflight: Mapping[str, object] = field(default_factory=dict)
+    backend_validation: Mapping[str, object] = field(default_factory=dict)
     checkpoint_evidence: Mapping[str, object] = field(init=False, repr=False)
     topology_validation: Mapping[str, object] = field(init=False, repr=False)
 
@@ -1533,6 +1664,11 @@ class MultidimensionalReleaseReport:
                 raise TypeError(f"{name} contains an invalid record.")
             object.__setattr__(self, name, normalized)
         run_ids = tuple(item.run_id for item in self.outcomes)
+        for name in ("harmonic_preflight", "backend_validation"):
+            evidence = getattr(self, name)
+            if not isinstance(evidence, Mapping):
+                raise TypeError(f"{name} must be a mapping.")
+            object.__setattr__(self, name, dict(evidence))
         if len(set(run_ids)) != len(run_ids):
             raise ValueError("outcome run_id values must be unique.")
         object.__setattr__(
@@ -1583,6 +1719,12 @@ class MultidimensionalReleaseReport:
             not execution_passed
             or not self.config.certification_eligible
             or self.certification_failures
+            or self.harmonic_preflight.get("passed") is not True
+            or self.backend_validation.get("passed") is not True
+            or not _required_outcome_certification_summary(
+                self.config,
+                self.outcomes,
+            )["passed"]
             or not _multidimensional_provenance_summary(self.outcomes)[
                 "passed"
             ]
@@ -1627,8 +1769,16 @@ class MultidimensionalReleaseReport:
             "schema": (
                 "negfpy.anharmonic.multidimensional_dense_toy_release"
             ),
-            "schema_version": 3,
+            "schema_version": 4,
+            "protocol": "multidimensional_toy_gate_v2",
+            "protocol_version": 2,
             "config": self.config.as_dict(),
+            "harmonic_preflight": dict(self.harmonic_preflight),
+            "backend_validation": dict(self.backend_validation),
+            "outcome_certification": _required_outcome_certification_summary(
+                self.config,
+                self.outcomes,
+            ),
             "outcomes": [
                 item.as_dict(self.config.spec.mean_temperature)
                 for item in self.outcomes
@@ -1722,7 +1872,7 @@ def _solver_config(
     config: MultidimensionalReleaseConfig,
     numerical: MultidimensionalNumericalPoint,
     *,
-    backend: Literal["serial", "threaded"],
+    backend: ExecutionBackend,
 ) -> SCBAConfig:
     return SCBAConfig(
         eta_lead=numerical.eta_lead,
@@ -1740,9 +1890,11 @@ def _solver_config(
         current_atol=config.current_atol,
         tail_rtol=config.tail_rtol,
         retarded_strategy="causal_hilbert",
+        hilbert_backend=config.production_hilbert_backend,
         backend=backend,
         on_nonconvergence="raise",
         eta_device=0.0,
+        surface_gf_method=config.surface_gf_method,
         max_workers=(config.max_workers if backend == "threaded" else None),
     )
 
@@ -1793,7 +1945,7 @@ def _blocked_outcome(
     run_id: str,
     point: MultidimensionalRunPoint,
     initialization: Initialization,
-    backend: Literal["serial", "threaded"],
+    backend: ExecutionBackend,
     parent_id: str | None,
     error_type: str,
     error_message: str,
@@ -1813,12 +1965,38 @@ def _blocked_outcome(
     )
 
 
+
+def _failed_outcome(
+    *,
+    run_id: str,
+    point: MultidimensionalRunPoint,
+    initialization: Initialization,
+    backend: ExecutionBackend,
+    error_type: str,
+    error_message: str,
+) -> MultidimensionalRunOutcome:
+    """Create an explicit failed graph node without entering SCBA."""
+
+    return MultidimensionalRunOutcome(
+        run_id=run_id,
+        point=point,
+        initialization=initialization,
+        backend=backend,
+        continuation_parent_id=None,
+        elapsed_seconds=0.0,
+        seed_elapsed_seconds=0.0,
+        status="failed",
+        result=None,
+        error_type=error_type,
+        error_message=error_message,
+    )
+
 def _completed_outcome(
     *,
     run_id: str,
     point: MultidimensionalRunPoint,
     initialization: Initialization,
-    backend: Literal["serial", "threaded"],
+    backend: ExecutionBackend,
     parent_id: str | None,
     result: AnharmonicResult,
     elapsed_seconds: float,
@@ -1860,7 +2038,7 @@ def _execute(
     run_id: str,
     point: MultidimensionalRunPoint,
     initialization: Initialization,
-    backend: Literal["serial", "threaded"],
+    backend: ExecutionBackend,
     parent: MultidimensionalRunOutcome | None = None,
     checkpoint_dir: Path | None = None,
     environment_sha256: str | None = None,
@@ -1884,6 +2062,10 @@ def _execute(
         )
 
     started = time.perf_counter()
+    if not _is_sha256(environment_sha256):
+        failures = ["harmonic preflight environment SHA256 is invalid"]
+    else:
+        failures = []
     seed_seconds = 0.0
     parent_id = None if parent is None else parent.run_id
     target: Path | None = None
@@ -2246,9 +2428,18 @@ def _line_shape_comparison(
 
 
 def _current_vector(result: AnharmonicResult) -> Array:
+    """Return gated currents, using corrected EOM cuts when available."""
+
     currents = result.currents
     values = [currents.left, currents.right, currents.collision_power]
-    if currents.bond_currents is not None:
+    if currents.spatial is not None:
+        values.extend(
+            np.asarray(
+                currents.spatial.corrected_cut_currents,
+                dtype=float,
+            ).tolist()
+        )
+    elif currents.bond_currents is not None:
         values.extend(
             np.asarray(currents.bond_currents, dtype=float).tolist()
         )
@@ -2372,6 +2563,535 @@ def _compare_outcomes(
     )
 
 
+
+
+def _harmonic_same_grid_preflight(
+    config: MultidimensionalReleaseConfig,
+    environment_sha256: str | None,
+) -> dict[str, object]:
+    """Validate the harmonic limit on the base and six refinement grids."""
+
+    started = time.perf_counter()
+    point_records: list[dict[str, object]] = []
+    failures: list[str] = (
+        []
+        if _is_sha256(environment_sha256)
+        else ["harmonic preflight environment SHA256 is invalid"]
+    )
+    point_specs = (("base", config.numerical),) + _refinement_points(config)
+    required_names = {
+        name
+        for name in _required_refinement_comparison_names(config).values()
+        if name is not None
+    }
+
+    for label, numerical in point_specs:
+        point_started = time.perf_counter()
+        point_failures: list[str] = []
+        record: dict[str, object] = {
+            "label": label,
+            "environment_sha256": environment_sha256,
+            "grid": numerical.as_dict(),
+            "g": 0.0,
+            "bias": config.executed_bias_values[-1],
+            "backend": config.production_backend,
+            "hilbert_backend": config.production_hilbert_backend,
+            "surface_gf_method": config.surface_gf_method,
+        }
+        try:
+            problem = build_multidimensional_problem(
+                config,
+                g=0.0,
+                bias=config.executed_bias_values[-1],
+                numerical=numerical,
+            )
+            solver_config = _solver_config(
+                config,
+                numerical,
+                backend=config.production_backend,
+            )
+            result = solve_one_shot_born(problem, solver_config)
+            metrics = result.diagnostics.metrics
+            moment = float(metrics["green_spectral_moment_residual"])
+            tolerance = float(metrics["current_tolerance"])
+            current_checks = {
+                "contact_balance": float(
+                    metrics["current_contact_abs_error"]
+                ),
+                "collision_power": float(
+                    metrics["current_collision_abs_error"]
+                ),
+                "full_balance": float(metrics["current_full_abs_error"]),
+                "bond_spread": float(
+                    metrics.get("bond_current_abs_spread", 0.0)
+                ),
+                "bond_to_contact": float(
+                    metrics.get("bond_current_contact_abs_error", 0.0)
+                ),
+                "direction": float(
+                    metrics["current_direction_violation"]
+                ),
+            }
+            if moment > 5.0e-3:
+                point_failures.append(
+                    "harmonic spectral moment exceeds 5e-3"
+                )
+            for name, value in current_checks.items():
+                if value > tolerance:
+                    point_failures.append(
+                        f"harmonic {name} exceeds current gate"
+                    )
+            if not result.diagnostics.passed:
+                point_failures.append(
+                    "harmonic essential diagnostics did not pass"
+                )
+            expected_execution = {
+                "effective_backend": config.production_backend,
+                "hilbert_backend": config.production_hilbert_backend,
+                "surface_gf_method": config.surface_gf_method,
+            }
+            for name, expected in expected_execution.items():
+                if result.metadata.get(name) != expected:
+                    point_failures.append(
+                        f"harmonic preflight {name} does not match protocol"
+                    )
+            record.update(
+                {
+                    "spectral_moment_residual": moment,
+                    "spectral_moment_limit": 5.0e-3,
+                    "current_tolerance": tolerance,
+                    "current_checks": current_checks,
+                    "currents": {
+                        "left": result.currents.left,
+                        "right": result.currents.right,
+                        "contact_balance": result.currents.contact_balance,
+                        "collision_power": result.currents.collision_power,
+                        "full_balance": result.currents.full_balance,
+                    },
+                    "transport_current": 0.5
+                    * (result.currents.left - result.currents.right),
+                    "field_sha256": {
+                        **_spectrum_hashes(result.green, prefix="green"),
+                        **_spectrum_hashes(
+                            result.sigma_left,
+                            prefix="sigma_left",
+                        ),
+                        **_spectrum_hashes(
+                            result.sigma_right,
+                            prefix="sigma_right",
+                        ),
+                    },
+                    "provenance": _result_provenance(result),
+                    "input_hashes": dict(
+                        result.metadata.get("input_hashes", {})
+                    ),
+                }
+            )
+        except Exception as error:
+            point_failures.append(f"{type(error).__name__}: {error}")
+        record.update(
+            {
+                "elapsed_seconds": time.perf_counter() - point_started,
+                "passed": not point_failures,
+                "failures": point_failures,
+            }
+        )
+        point_records.append(record)
+        failures.extend(
+            f"{label}: {message}" for message in point_failures
+        )
+
+    by_label = {str(item["label"]): item for item in point_records}
+    base = by_label.get("base")
+    comparisons: list[dict[str, object]] = []
+    for label, _ in _refinement_points(config):
+        candidate = by_label.get(label)
+        production_name = f"numerical_refinement_{label}"
+        critical = production_name in required_names
+        comparison_failures: list[str] = []
+        absolute_error: float | None = None
+        relative_error: float | None = None
+        scale: float | None = None
+        if (
+            base is None
+            or candidate is None
+            or not isinstance(base.get("transport_current"), (float, int))
+            or not isinstance(
+                candidate.get("transport_current"),
+                (float, int),
+            )
+        ):
+            comparison_failures.append(
+                "harmonic transport-current comparison unavailable"
+            )
+        else:
+            base_current = float(base["transport_current"])
+            candidate_current = float(candidate["transport_current"])
+            absolute_error = abs(candidate_current - base_current)
+            scale = max(
+                abs(base_current),
+                abs(candidate_current),
+                config.current_comparison_atol / config.refinement_rtol,
+            )
+            relative_error = absolute_error / scale
+            if (
+                absolute_error
+                > config.current_comparison_atol
+                + config.refinement_rtol * scale
+            ):
+                comparison_failures.append(
+                    "harmonic transport-current change exceeds 0.5%"
+                )
+        comparison = {
+            "name": f"harmonic_current_refinement_{label}",
+            "production_comparison_name": production_name,
+            "left_label": "base",
+            "right_label": label,
+            "absolute_error": absolute_error,
+            "current_scale": scale,
+            "relative_error": relative_error,
+            "relative_tolerance": config.refinement_rtol,
+            "absolute_tolerance": config.current_comparison_atol,
+            "certification_critical": critical,
+            "passed": not comparison_failures,
+            "failures": comparison_failures,
+        }
+        comparisons.append(comparison)
+        if critical:
+            failures.extend(
+                f"{comparison['name']}: {message}"
+                for message in comparison_failures
+            )
+
+    provenance_records = [
+        item.get("provenance") for item in point_records
+    ]
+    provenance_complete = bool(
+        len(provenance_records) == len(point_records)
+        and all(
+            isinstance(item, Mapping)
+            and item.get("complete") is True
+            and item.get("clean") is True
+            for item in provenance_records
+        )
+    )
+    provenance_identities = {
+        json.dumps(
+            item["identity"],
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        for item in provenance_records
+        if isinstance(item, Mapping) and item.get("identity") is not None
+    }
+    provenance_consistent = bool(
+        provenance_records
+        and len(provenance_identities) == 1
+    )
+    if not provenance_complete:
+        failures.append(
+            "harmonic preflight provenance is incomplete or dirty"
+        )
+    if not provenance_consistent:
+        failures.append(
+            "harmonic preflight provenance is not identical across points"
+        )
+    expected_labels = {"base"} | {
+        label for label, _ in _refinement_points(config)
+    }
+    archived_labels = {str(item["label"]) for item in point_records}
+    all_seven_archived = bool(
+        len(point_records) == 7
+        and archived_labels == expected_labels
+        and len(expected_labels) == 7
+    )
+    if not all_seven_archived:
+        failures.append(
+            "base plus all six harmonic refinement points were not archived"
+        )
+    critical_comparisons = tuple(
+        item for item in comparisons if item["certification_critical"]
+    )
+    if len(critical_comparisons) != 4:
+        failures.append(
+            "the four harmonic directional refinement gates are incomplete"
+        )
+
+    return {
+        "schema": "negfpy.anharmonic.harmonic_same_grid_preflight",
+        "schema_version": 2,
+        "protocol": "multidimensional_toy_gate_v2",
+        "environment_sha256": environment_sha256,
+        "scope": "base_plus_six_preregistered_numerical_points",
+        "point_count": len(point_records),
+        "provenance": {
+            "complete_and_clean": provenance_complete,
+            "consistent": provenance_consistent,
+            "identity": (
+                None
+                if not provenance_consistent
+                else next(
+                    item["identity"]
+                    for item in provenance_records
+                    if isinstance(item, Mapping)
+                    and item.get("identity") is not None
+                )
+            ),
+        },
+        "all_seven_archived": all_seven_archived,
+        "points": point_records,
+        "comparisons": comparisons,
+        "required_directional_comparison_count": 4,
+        "critical_comparisons_passed": bool(
+            len(critical_comparisons) == 4
+            and all(item["passed"] for item in critical_comparisons)
+        ),
+        "diagnostic_comparison_names": [
+            str(item["name"])
+            for item in comparisons
+            if not item["certification_critical"]
+        ],
+        "spectral_moment_limit": 5.0e-3,
+        "current_refinement_rtol": config.refinement_rtol,
+        "backend": config.production_backend,
+        "hilbert_backend": config.production_hilbert_backend,
+        "surface_gf_method": config.surface_gf_method,
+        "elapsed_seconds": time.perf_counter() - started,
+        "passed": not failures,
+        "failures": failures,
+    }
+
+
+def _bounded_backend_validation(
+    config: MultidimensionalReleaseConfig,
+    environment_sha256: str | None,
+) -> dict[str, object]:
+    """Compare serial, threaded, and exact FFT kernels on a bounded Born case."""
+
+    started = time.perf_counter()
+    failures: list[str] = (
+        []
+        if _is_sha256(environment_sha256)
+        else ["bounded backend environment SHA256 is invalid"]
+    )
+    try:
+        device, lead, vertex = pinned_three_polarization_chain(
+            1,
+            mass=(1.0, 1.1, 0.9),
+            spring=(0.5, 0.7, 0.9),
+            pinning=(1.0, 1.2, 0.8),
+            g=0.003,
+        )
+        problem = CubicSCBAProblem(
+            device=device,
+            left=HarmonicReservoir(lead, 0.8),
+            right=HarmonicReservoir(lead, 0.6),
+            vertex=vertex,
+            grid=SignedFrequencyGrid(step=0.2, n_positive=20),
+        )
+        results: dict[str, AnharmonicResult] = {}
+        backend_elapsed: dict[str, float] = {}
+        for backend in ("serial", "threaded", "fft"):
+            backend_started = time.perf_counter()
+            results[backend] = solve_scba(
+                problem,
+                SCBAConfig(
+                    eta_lead=0.01,
+                    backend=backend,
+                    hilbert_backend=(
+                        "fft" if backend == "fft" else "direct"
+                    ),
+                    surface_gf_method="analytic_diagonal",
+                    sigma_rtol=1.0e-12,
+                    green_rtol=1.0e-12,
+                    identity_rtol=1.0e-12,
+                    current_rtol=1.0e-10,
+                    current_atol=1.0e-12,
+                    max_iterations=200,
+                    max_workers=(2 if backend == "threaded" else None),
+                ),
+            )
+            backend_elapsed[backend] = (
+                time.perf_counter() - backend_started
+            )
+        reference = results["serial"]
+        comparisons: list[dict[str, object]] = []
+        for backend in ("threaded", "fft"):
+            candidate = results[backend]
+            errors: list[MultidimensionalFieldError] = []
+            for field_name, left_spectrum, right_spectrum in (
+                ("sigma_pp", reference.sigma_pp, candidate.sigma_pp),
+                ("green", reference.green, candidate.green),
+            ):
+                for component in ("retarded", "lesser", "greater"):
+                    errors.append(
+                        _field_error(
+                            field_name,
+                            component,
+                            getattr(left_spectrum, component),
+                            getattr(right_spectrum, component),
+                            rtol=config.backend_field_rtol,
+                            atol=config.backend_field_atol,
+                        )
+                    )
+            current_error = _field_error(
+                "current",
+                "left_right_collision",
+                _current_vector(reference),
+                _current_vector(candidate),
+                rtol=config.backend_field_rtol,
+                atol=config.backend_field_atol,
+            )
+            comparison_passed = bool(
+                all(item.passed for item in errors)
+                and current_error.passed
+            )
+            if not comparison_passed:
+                failures.append(
+                    f"bounded serial/{backend} oracle fields disagree"
+                )
+            comparisons.append(
+                {
+                    "reference_backend": "serial",
+                    "candidate_backend": backend,
+                    "field_errors": [item.as_dict() for item in errors],
+                    "current_error": current_error.as_dict(),
+                    "passed": comparison_passed,
+                }
+            )
+        expected_metadata = {
+            "serial": ("serial", "direct"),
+            "threaded": ("threaded", "direct"),
+            "fft": ("fft", "fft"),
+        }
+        for backend, (effective, hilbert) in expected_metadata.items():
+            result = results[backend]
+            metadata = result.metadata
+            metadata_valid = bool(
+                metadata.get("effective_backend") == effective
+                and metadata.get("hilbert_backend") == hilbert
+                and result.method == "scba"
+                and result.converged
+            )
+            if not metadata_valid:
+                failures.append(
+                    f"bounded {backend} execution metadata is invalid"
+                )
+            field_hashes = {
+                **_spectrum_hashes(result.green, prefix="green"),
+                **_spectrum_hashes(result.sigma_pp, prefix="sigma_pp"),
+            }
+            raw_input_hashes = metadata.get("input_hashes", {})
+            hashes_valid = bool(
+                len(field_hashes) == 6
+                and all(_is_sha256(value) for value in field_hashes.values())
+                and isinstance(raw_input_hashes, Mapping)
+                and _REQUIRED_INPUT_HASHES.issubset(raw_input_hashes)
+                and all(
+                    _is_sha256(raw_input_hashes[name])
+                    for name in _REQUIRED_INPUT_HASHES
+                )
+            )
+            if not hashes_valid:
+                failures.append(
+                    f"bounded {backend} field/input hashes are invalid"
+                )
+        backend_provenance = {
+            backend: _result_provenance(result)
+            for backend, result in results.items()
+        }
+        provenance_complete = all(
+            record["complete"] is True and record["clean"] is True
+            for record in backend_provenance.values()
+        )
+        provenance_identities = {
+            json.dumps(
+                record["identity"],
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            for record in backend_provenance.values()
+        }
+        provenance_consistent = len(provenance_identities) == 1
+        if not provenance_complete:
+            failures.append(
+                "bounded backend provenance is incomplete or dirty"
+            )
+        if not provenance_consistent:
+            failures.append(
+                "bounded backend source/environment identities differ"
+            )
+        return {
+            "schema": "negfpy.anharmonic.bounded_backend_validation",
+            "schema_version": 1,
+            "protocol": "multidimensional_toy_gate_v2",
+            "environment_sha256": environment_sha256,
+            "scope": "bounded_converged_scba_backend_oracle",
+            "full_grid_serial_threaded_comparison_executed": False,
+            "full_grid_claim": (
+                "Production outcomes use exact zero-padded FFT; no "
+                "serial/threaded full-grid equality is claimed."
+            ),
+            "grid": {
+                "step": problem.grid.step,
+                "cutoff": problem.grid.cutoff,
+                "n_frequency": problem.grid.n_points,
+            },
+            "backends_executed": ["serial", "threaded", "fft"],
+            "provenance": {
+                "complete_and_clean": provenance_complete,
+                "consistent": provenance_consistent,
+            },
+            "backend_status": {
+                backend: {
+                    "elapsed_seconds": backend_elapsed[backend],
+                    "environment_sha256": environment_sha256,
+                    "field_sha256": {
+                        **_spectrum_hashes(result.green, prefix="green"),
+                        **_spectrum_hashes(
+                            result.sigma_pp,
+                            prefix="sigma_pp",
+                        ),
+                    },
+                    "input_hashes": dict(
+                        result.metadata.get("input_hashes", {})
+                    ),
+                    "method": result.method,
+                    "converged": result.converged,
+                    "iterations": len(result.history),
+                    "diagnostics_passed": result.diagnostics.passed,
+                    "provenance": _result_provenance(result),
+                    "effective_backend": result.metadata.get(
+                        "effective_backend"
+                    ),
+                    "hilbert_backend": result.metadata.get(
+                        "hilbert_backend"
+                    ),
+                }
+                for backend, result in results.items()
+            },
+            "relative_tolerance": config.backend_field_rtol,
+            "absolute_tolerance": config.backend_field_atol,
+            "comparisons": comparisons,
+            "elapsed_seconds": time.perf_counter() - started,
+            "passed": not failures,
+            "failures": failures,
+        }
+    except Exception as error:
+        return {
+            "schema": "negfpy.anharmonic.bounded_backend_validation",
+            "schema_version": 1,
+            "protocol": "multidimensional_toy_gate_v2",
+            "environment_sha256": environment_sha256,
+            "scope": "bounded_converged_scba_backend_oracle",
+            "full_grid_serial_threaded_comparison_executed": False,
+            "backends_executed": ["serial", "threaded", "fft"],
+            "elapsed_seconds": time.perf_counter() - started,
+            "passed": False,
+            "failures": [f"{type(error).__name__}: {error}"],
+        }
 def _conservation_check(
     name: str,
     outcome: MultidimensionalRunOutcome,
@@ -2410,20 +3130,52 @@ def _conservation_check(
         float(physical_floor),
         config.current_rtol * current_scale,
     )
+
+    def cut_error(values: Array | None) -> float:
+        if values is None or values.size == 0:
+            return 0.0
+        return max(
+            float(np.max(np.abs(values - currents.left))),
+            float(np.max(np.abs(values + currents.right))),
+            float(np.max(values) - np.min(values)),
+        )
+
     bonds = (
         None
         if currents.bond_currents is None
         else np.asarray(currents.bond_currents, dtype=float)
     )
-    bond_error = (
-        0.0
-        if bonds is None or bonds.size == 0
-        else max(
-            float(np.max(np.abs(bonds - currents.left))),
-            float(np.max(np.abs(bonds + currents.right))),
-            float(np.max(bonds) - np.min(bonds)),
+    raw_error = cut_error(bonds)
+    spatial = currents.spatial
+    corrected_error: float | None = None
+    continuity_error: float | None = None
+    nonlocal_ratio: float | None = None
+    if spatial is None:
+        spatial_gate = "unavailable"
+        gated_spatial_error = raw_error
+    else:
+        corrected = np.asarray(
+            spatial.corrected_cut_currents,
+            dtype=float,
         )
-    )
+        corrected_error = cut_error(corrected)
+        continuity = np.asarray(
+            spatial.continuity_residual,
+            dtype=float,
+        )
+        continuity_error = (
+            0.0
+            if continuity.size == 0
+            else float(np.max(np.abs(continuity)))
+        )
+        nonlocal_ratio = float(spatial.sigma_pp_nonlocal_ratio)
+        if not spatial.sigma_pp_is_block_local:
+            spatial_gate = "corrected_eom_cut_current_nonlocal_sigma"
+            gated_spatial_error = corrected_error
+        else:
+            spatial_gate = "raw_harmonic_bond_current_block_local_sigma"
+            gated_spatial_error = raw_error
+
     failures: list[str] = []
     if not outcome.successful:
         failures.append("run did not converge")
@@ -2441,8 +3193,12 @@ def _conservation_check(
         failures.append("collision power exceeds gate")
     if abs(currents.full_balance) > allowed:
         failures.append("full balance exceeds gate")
-    if bond_error > allowed:
-        failures.append("bond-current error exceeds gate")
+    if spatial is None:
+        failures.append("spatial current report is unavailable")
+    if gated_spatial_error > allowed:
+        failures.append(f"{spatial_gate} error exceeds gate")
+    if continuity_error is not None and continuity_error > allowed:
+        failures.append("EOM layer-continuity residual exceeds gate")
     return MultidimensionalConservationCheck(
         name=name,
         run_id=outcome.run_id,
@@ -2454,9 +3210,14 @@ def _conservation_check(
         contact_balance=currents.contact_balance,
         collision_power=currents.collision_power,
         full_balance=currents.full_balance,
-        bond_current_error=bond_error,
+        bond_current_error=gated_spatial_error,
         passed=not failures,
         failures=tuple(failures),
+        raw_bond_current_error=raw_error,
+        corrected_cut_current_error=corrected_error,
+        continuity_residual_error=continuity_error,
+        sigma_pp_nonlocal_ratio=nonlocal_ratio,
+        spatial_current_gate=spatial_gate,
     )
 
 
@@ -2561,7 +3322,10 @@ def _direct_endpoint_unlocks_graph(
         outcome.successful
         and result is not None
         and result.diagnostics.passed
-        and (not config.certification_eligible or result.release_certified)
+        and (
+            not config.certification_eligible
+            or result.release_certified
+        )
     )
 
 
@@ -2573,12 +3337,13 @@ def _expected_outcome_topology(
         bias=config.executed_bias_values[-1],
         numerical=config.numerical,
     )
+    production_backend = config.production_backend
     rows: list[dict[str, object]] = [
         {
             "run_id": _run_id("direct_zero", endpoint),
             "point": endpoint,
             "initialization": "zero",
-            "backend": "serial",
+            "backend": production_backend,
             "continuation_parent_id": None,
         }
     ]
@@ -2597,29 +3362,30 @@ def _expected_outcome_topology(
                 "initialization": (
                     "zero" if index == 0 else "continuation"
                 ),
-                "backend": "serial",
+                "backend": production_backend,
                 "continuation_parent_id": previous_path_id,
             }
         )
         previous_path_id = run_id
-    rows.extend(
-        (
-            {
-                "run_id": _run_id("born_seed", endpoint),
-                "point": endpoint,
-                "initialization": "born_seed",
-                "backend": "serial",
-                "continuation_parent_id": None,
-            },
+    rows.append(
+        {
+            "run_id": _run_id("born_seed", endpoint),
+            "point": endpoint,
+            "initialization": "born_seed",
+            "backend": production_backend,
+            "continuation_parent_id": None,
+        }
+    )
+    if production_backend != "fft":
+        rows.append(
             {
                 "run_id": _run_id("threaded_zero", endpoint),
                 "point": endpoint,
                 "initialization": "zero",
                 "backend": "threaded",
                 "continuation_parent_id": None,
-            },
+            }
         )
-    )
     if config.run_preregistered_refinements:
         for label, numerical in _refinement_points(config):
             point = MultidimensionalRunPoint(
@@ -2636,11 +3402,87 @@ def _expected_outcome_topology(
                     ),
                     "point": point,
                     "initialization": "refinement_zero",
-                    "backend": "serial",
+                    "backend": production_backend,
                     "continuation_parent_id": None,
                 }
             )
     return tuple(rows)
+
+
+def _required_outcome_certification_summary(
+    config: MultidimensionalReleaseConfig,
+    outcomes: tuple[MultidimensionalRunOutcome, ...],
+) -> dict[str, object]:
+    """Separate certifying outcomes from two deliberately diagnostic points."""
+
+    expected_rows = _expected_outcome_topology(config)
+    required_refinements = {
+        name
+        for name in _required_refinement_comparison_names(config).values()
+        if name is not None
+    }
+    diagnostic_ids: set[str] = set()
+    endpoint = MultidimensionalRunPoint(
+        g=config.executed_g_values[-1],
+        bias=config.executed_bias_values[-1],
+        numerical=config.numerical,
+    )
+    for label, numerical in _refinement_points(config):
+        comparison_name = f"numerical_refinement_{label}"
+        if comparison_name not in required_refinements:
+            diagnostic_ids.add(
+                _run_id(
+                    "refinement",
+                    replace(endpoint, numerical=numerical),
+                    suffix=label,
+                )
+            )
+    required_ids = tuple(
+        str(row["run_id"])
+        for row in expected_rows
+        if str(row["run_id"]) not in diagnostic_ids
+    )
+    by_id = {outcome.run_id: outcome for outcome in outcomes}
+    records = []
+    for run_id in required_ids:
+        outcome = by_id.get(run_id)
+        records.append(
+            {
+                "run_id": run_id,
+                "result_available": bool(
+                    outcome is not None and outcome.result is not None
+                ),
+                "converged": bool(
+                    outcome is not None and outcome.successful
+                ),
+                "release_certified": bool(
+                    outcome is not None
+                    and outcome.result is not None
+                    and outcome.result.release_certified
+                ),
+            }
+        )
+    applicable = config.certification_eligible
+    coverage = bool(
+        applicable
+        and len(records) == len(required_ids)
+        and all(item["result_available"] for item in records)
+    )
+    return {
+        "applicable": applicable,
+        "policy": (
+            "All nondiagnostic outcomes and the four directional "
+            "refinements must be individually release-certified; the "
+            "coarse-spacing and doubled-eta points are archived only."
+        ),
+        "required_run_ids": list(required_ids),
+        "diagnostic_only_run_ids": sorted(diagnostic_ids),
+        "records": records,
+        "coverage": coverage,
+        "passed": bool(
+            coverage and all(item["release_certified"] for item in records)
+        ),
+    }
 
 
 def _topology_row_document(
@@ -2687,7 +3529,7 @@ def _multidimensional_topology_summary(
     path_count = len(_physical_path(config))
     continuation_id = str(expected_rows[path_count]["run_id"])
     born_id = str(expected_rows[path_count + 1]["run_id"])
-    threaded_id = str(expected_rows[path_count + 2]["run_id"])
+    include_threaded_endpoint = config.production_backend != "fft"
     required_refinement_names = {
         name
         for name in _required_refinement_comparison_names(config).values()
@@ -2708,15 +3550,20 @@ def _multidimensional_topology_summary(
             continuation_id,
             True,
         ),
-        (
-            "serial_vs_threaded_endpoint",
-            "serial_vs_threaded",
-            direct_id,
-            threaded_id,
-            True,
-        ),
     ]
-    refinement_start = path_count + 3
+    refinement_start = path_count + 2
+    if include_threaded_endpoint:
+        threaded_id = str(expected_rows[path_count + 2]["run_id"])
+        expected_comparisons.append(
+            (
+                "serial_vs_threaded_endpoint",
+                "serial_vs_threaded",
+                direct_id,
+                threaded_id,
+                True,
+            )
+        )
+        refinement_start += 1
     for (label, _), row in zip(
         _refinement_points(config),
         expected_rows[refinement_start:],
@@ -2783,15 +3630,15 @@ def _multidimensional_topology_summary(
             outcome.successful
             and outcome.result is not None
             and outcome.result.diagnostics.passed
-            and (
-                not config.certification_eligible
-                or outcome.result.release_certified
-            )
             for outcome in outcomes
         )
     )
     full_release_count = bool(
-        not config.certification_eligible or len(expected_rows) == 14
+        not config.certification_eligible
+        or (
+            config.production_backend == "fft"
+            and len(expected_rows) == 13
+        )
     )
     passed = bool(
         outcomes_exact
@@ -3057,7 +3904,7 @@ def run_multidimensional_release_benchmark(
         run_id: str,
         point: MultidimensionalRunPoint,
         initialization: Initialization,
-        backend: Literal["serial", "threaded"],
+        backend: ExecutionBackend,
         parent: MultidimensionalRunOutcome | None = None,
     ) -> MultidimensionalRunOutcome:
         return _execute(
@@ -3076,17 +3923,69 @@ def run_multidimensional_release_benchmark(
     outcomes: list[MultidimensionalRunOutcome] = []
     comparisons: list[MultidimensionalComparison] = []
 
+    harmonic_preflight: dict[str, object] = {
+        "schema": "negfpy.anharmonic.harmonic_same_grid_preflight",
+        "schema_version": 2,
+        "protocol": "multidimensional_toy_gate_v2",
+        "applicable": False,
+        "passed": not config.certification_eligible,
+        "failures": [],
+    }
+    if config.certification_eligible:
+        harmonic_preflight = _harmonic_same_grid_preflight(
+            config,
+            environment_sha256,
+        )
+        harmonic_preflight["applicable"] = True
+
+    backend_validation: dict[str, object] = {
+        "schema": "negfpy.anharmonic.bounded_backend_validation",
+        "schema_version": 1,
+        "protocol": "multidimensional_toy_gate_v2",
+        "applicable": False,
+        "passed": not config.certification_eligible,
+        "failures": [],
+    }
+    if config.run_bounded_backend_validation:
+        backend_validation = _bounded_backend_validation(
+            config,
+            environment_sha256,
+        )
+        backend_validation["applicable"] = True
+
+    preflight_ready = bool(
+        harmonic_preflight.get("passed") is True
+        and backend_validation.get("passed") is True
+    )
     endpoint = MultidimensionalRunPoint(
         g=config.executed_g_values[-1],
         bias=config.executed_bias_values[-1],
         numerical=config.numerical,
     )
-    direct_zero = execute(
-        run_id=_run_id("direct_zero", endpoint),
-        point=endpoint,
-        initialization="zero",
-        backend="serial",
-    )
+    if preflight_ready:
+        direct_zero = execute(
+            run_id=_run_id("direct_zero", endpoint),
+            point=endpoint,
+            initialization="zero",
+            backend=config.production_backend,
+        )
+    else:
+        preflight_failures = tuple(
+            str(value)
+            for evidence in (harmonic_preflight, backend_validation)
+            for value in evidence.get("failures", [])
+        )
+        direct_zero = _failed_outcome(
+            run_id=_run_id("direct_zero", endpoint),
+            point=endpoint,
+            initialization="zero",
+            backend=config.production_backend,
+            error_type="ProtocolV2PreflightFailure",
+            error_message=(
+                "protocol-v2 harmonic/backend preflight failed before SCBA: "
+                + "; ".join(preflight_failures)
+            ),
+        )
     outcomes.append(direct_zero)
 
     direct_unlocks_graph = _direct_endpoint_unlocks_graph(
@@ -3095,8 +3994,9 @@ def run_multidimensional_release_benchmark(
     )
     gate_error = (
         "the hardest direct-zero endpoint did not satisfy the locked "
-        "convergence/diagnostic/release gate; every remaining preregistered "
-        "point is archived as blocked without altered controls"
+        "fixed-point, essential-diagnostic, and release-certification gate; "
+        "every remaining preregistered point is archived as blocked without "
+        "altered controls"
     )
 
     def execute_after_gate(
@@ -3104,7 +4004,7 @@ def run_multidimensional_release_benchmark(
         run_id: str,
         point: MultidimensionalRunPoint,
         initialization: Initialization,
-        backend: Literal["serial", "threaded"],
+        backend: ExecutionBackend,
         parent: MultidimensionalRunOutcome | None = None,
     ) -> MultidimensionalRunOutcome:
         if not direct_unlocks_graph:
@@ -3113,7 +4013,7 @@ def run_multidimensional_release_benchmark(
                 point=point,
                 initialization=initialization,
                 backend=backend,
-                parent_id=direct_zero.run_id,
+                parent_id=(None if parent is None else parent.run_id),
                 error_type="HardestEndpointUnavailable",
                 error_message=gate_error,
             )
@@ -3145,7 +4045,7 @@ def run_multidimensional_release_benchmark(
             ),
             point=point,
             initialization=initialization,
-            backend="serial",
+            backend=config.production_backend,
             parent=parent,
         )
         outcomes.append(outcome)
@@ -3162,16 +4062,9 @@ def run_multidimensional_release_benchmark(
         run_id=_run_id("born_seed", endpoint),
         point=endpoint,
         initialization="born_seed",
-        backend="serial",
+        backend=config.production_backend,
     )
     outcomes.append(born_seeded)
-    threaded = execute_after_gate(
-        run_id=_run_id("threaded_zero", endpoint),
-        point=endpoint,
-        initialization="zero",
-        backend="threaded",
-    )
-    outcomes.append(threaded)
 
     comparisons.extend(
         (
@@ -3197,6 +4090,17 @@ def run_multidimensional_release_benchmark(
                 current_atol=config.current_comparison_atol,
                 compare_fields=True,
             ),
+        )
+    )
+    if config.production_backend != "fft":
+        threaded = execute_after_gate(
+            run_id=_run_id("threaded_zero", endpoint),
+            point=endpoint,
+            initialization="zero",
+            backend="threaded",
+        )
+        outcomes.append(threaded)
+        comparisons.append(
             _compare_outcomes(
                 "serial_vs_threaded_endpoint",
                 "serial_vs_threaded",
@@ -3207,9 +4111,8 @@ def run_multidimensional_release_benchmark(
                 current_rtol=config.current_comparison_rtol,
                 current_atol=config.current_comparison_atol,
                 compare_fields=True,
-            ),
+            )
         )
-    )
 
     if config.run_preregistered_refinements:
         critical_refinement_names = frozenset(
@@ -3231,7 +4134,7 @@ def run_multidimensional_release_benchmark(
                 ),
                 point=point,
                 initialization="refinement_zero",
-                backend="serial",
+                backend=config.production_backend,
             )
             outcomes.append(candidate)
             same_grid = (
@@ -3386,8 +4289,8 @@ def run_multidimensional_release_benchmark(
     )
     if config.certification_eligible and not topology_validation["passed"]:
         certification_failures.append(
-            "exact 14-outcome topology or comparison/conservation references "
-            "do not match the locked release graph"
+            "exact 13-outcome FFT topology or comparison/conservation "
+            "references do not match the locked release graph"
         )
     if config.certification_eligible and not checkpoint_evidence["passed"]:
         certification_failures.append(
@@ -3415,11 +4318,23 @@ def run_multidimensional_release_benchmark(
         certification_failures.append(
             "multidimensional source/environment identity is inconsistent"
         )
-    for outcome in outcomes:
-        if outcome.result is None or not outcome.result.release_certified:
-            certification_failures.append(
-                f"{outcome.run_id} is not release-certified"
-            )
+    outcome_certification = _required_outcome_certification_summary(
+        config,
+        tuple(outcomes),
+    )
+    if config.certification_eligible and not outcome_certification["passed"]:
+        certification_failures.append(
+            "required base, path, initialization, and four directional "
+            "outcomes are not individually release-certified"
+        )
+    if config.certification_eligible and not harmonic_preflight["passed"]:
+        certification_failures.append(
+            "seven-point harmonic preflight did not pass"
+        )
+    if config.certification_eligible and not backend_validation["passed"]:
+        certification_failures.append(
+            "bounded serial/threaded/FFT full-field oracle did not pass"
+        )
     if not execution_passed:
         certification_failures.append("benchmark execution did not pass")
     release_certified = bool(
@@ -3438,6 +4353,8 @@ def run_multidimensional_release_benchmark(
         total_elapsed_seconds=time.perf_counter() - started,
         execution_passed=execution_passed,
         release_certified=release_certified,
+        harmonic_preflight=harmonic_preflight,
+        backend_validation=backend_validation,
     )
 
 

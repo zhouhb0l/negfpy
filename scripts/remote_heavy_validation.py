@@ -36,6 +36,12 @@ SSH_ALIAS = "negf-heavy"
 EXPECTED_HOST = "172.20.86.67"
 EXPECTED_USER = "hangbo"
 EXPECTED_IDENTITY_BASENAME = "id_ed25519_aspire2a"
+EXPECTED_IDENTITY_FILE = (
+    pathlib.Path.home() / ".ssh" / EXPECTED_IDENTITY_BASENAME
+).resolve(strict=False)
+EXPECTED_KNOWN_HOSTS_FILE = (
+    pathlib.Path.home() / ".ssh" / "known_hosts_negf_heavy"
+).resolve(strict=False)
 EXPECTED_ED25519_FINGERPRINT = (
     "SHA256:sJide2AQhTe8oH2XWtayraDdUsde/LV2HOfUeMeWd70"
 )
@@ -67,8 +73,18 @@ SSH_OPTIONS = (
     "-oBatchMode=yes",
     "-oStrictHostKeyChecking=yes",
     "-oIdentitiesOnly=yes",
+    f"-oIdentityFile={EXPECTED_IDENTITY_FILE}",
+    f"-oUserKnownHostsFile={EXPECTED_KNOWN_HOSTS_FILE}",
+    "-oGlobalKnownHostsFile=/dev/null",
+    "-oHostKeyAlgorithms=ssh-ed25519",
+    "-oPubkeyAuthentication=yes",
+    "-oPreferredAuthentications=publickey",
     "-oPasswordAuthentication=no",
     "-oKbdInteractiveAuthentication=no",
+    "-oGSSAPIAuthentication=no",
+    "-oHostbasedAuthentication=no",
+    f"-oHostName={EXPECTED_HOST}",
+    f"-oUser={EXPECTED_USER}",
 )
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -133,21 +149,65 @@ def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def _fsync_directory(path: pathlib.Path) -> None:
+    """Make a preceding directory-entry update durable."""
+
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write_text(path: pathlib.Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        temporary = pathlib.Path(handle.name)
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = pathlib.Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _atomic_copy_file(source: pathlib.Path, destination: pathlib.Path) -> None:
+    """Copy a regular file and durably publish it under ``destination``."""
+
+    if not source.is_file() or source.is_symlink():
+        raise RemoteValidationError(
+            f"identity source is not a regular file: {source}"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: pathlib.Path | None = None
+    try:
+        with source.open("rb") as input_stream, tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output_stream:
+            temporary = pathlib.Path(output_stream.name)
+            shutil.copyfileobj(input_stream, output_stream)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _atomic_write_json(path: pathlib.Path, value: Mapping[str, Any]) -> None:
@@ -233,19 +293,42 @@ def validate_ssh_alias_config(output: str) -> dict[str, Any]:
         problems.append(f"User must be {EXPECTED_USER}")
     if first("identitiesonly").lower() not in {"yes", "true"}:
         problems.append("IdentitiesOnly must be yes")
+    if first("batchmode").lower() not in {"yes", "true"}:
+        problems.append("BatchMode must be yes")
     if first("stricthostkeychecking").lower() not in {"yes", "true"}:
         problems.append("StrictHostKeyChecking must be yes")
+    if first("passwordauthentication").lower() not in {"no", "false"}:
+        problems.append("PasswordAuthentication must be no")
+    if first("kbdinteractiveauthentication").lower() not in {"no", "false"}:
+        problems.append("KbdInteractiveAuthentication must be no")
+    if first("pubkeyauthentication").lower() not in {"yes", "true"}:
+        problems.append("PubkeyAuthentication must be yes")
+    preferred = {
+        value.strip().lower()
+        for value in first("preferredauthentications").split(",")
+        if value.strip()
+    }
+    if preferred != {"publickey"}:
+        problems.append("PreferredAuthentications must equal publickey")
     identities = values.get("identityfile", [])
-    expected_identity = (
-        pathlib.Path.home() / ".ssh" / EXPECTED_IDENTITY_BASENAME
-    ).resolve(strict=False)
     resolved_identities = {
         pathlib.Path(item).expanduser().resolve(strict=False)
         for item in identities
     }
-    if resolved_identities != {expected_identity}:
+    if resolved_identities != {EXPECTED_IDENTITY_FILE}:
         problems.append(
-            f"IdentityFile set must equal {{{expected_identity}}}"
+            f"IdentityFile set must equal {{{EXPECTED_IDENTITY_FILE}}}"
+        )
+    known_hosts = {
+        pathlib.Path(item).expanduser().resolve(strict=False)
+        for raw in values.get("userknownhostsfile", [])
+        for item in shlex.split(raw)
+        if item.lower() != "none"
+    }
+    if known_hosts != {EXPECTED_KNOWN_HOSTS_FILE}:
+        problems.append(
+            "UserKnownHostsFile set must equal "
+            f"{{{EXPECTED_KNOWN_HOSTS_FILE}}}"
         )
     try:
         keepalive = int(first("serveraliveinterval"))
@@ -280,6 +363,7 @@ def check_ssh_alias(runner: CommandRunner) -> dict[str, Any]:
         known_hosts = validate_known_hosts_fingerprint(
             result.stdout, expected=EXPECTED_ED25519_FINGERPRINT,
             expected_host=EXPECTED_HOST,
+            expected_path=EXPECTED_KNOWN_HOSTS_FILE,
         )
     except ValueError as error:
         raise RemoteValidationError(str(error)) from error

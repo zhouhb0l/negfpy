@@ -18,6 +18,7 @@ from .grid import SignedFrequencyGrid
 Array = np.ndarray
 Metadata = Mapping[str, Any]
 ContactIndices = tuple[int, ...] | slice | None
+SIGMA_PP_BLOCK_LOCAL_RTOL = 1.0e-12
 
 
 def _readonly_array(values: Any, *, dtype: np.dtype[Any]) -> Array:
@@ -632,6 +633,88 @@ class SCBAIteration:
 
 
 @dataclass(frozen=True, slots=True, eq=False)
+class SpatialCurrentReport:
+    """Layer-resolved energy exchange and corrected one-dimensional cuts.
+
+    ``eom_exchange_spectra`` is the projected Dyson-equation source from the
+    interaction self-energy. ``collision_power_spectra`` is the distinct
+    greater/lesser collision integral. Both have shape
+    ``(n_layers, n_positive)``. The remaining arrays are their integrated
+    layer values and the one-dimensional cut-current closure.
+    ``nonlocal_self_energy_eom_cut_correction`` is an equation-of-motion
+    correction induced by off-layer self-energy blocks; it is not a bare
+    interaction-current operator for a cubic vertex crossing a cut.
+    """
+
+    sigma_pp_nonlocal_ratio: float
+    eom_exchange_spectra: Array
+    collision_power_spectra: Array
+    eom_layer_exchange: Array
+    layer_collision_power: Array
+    nonlocal_self_energy_eom_cut_correction: Array
+    corrected_cut_currents: Array
+    continuity_residual: Array
+
+    def __post_init__(self) -> None:
+        ratio = _finite_real(
+            self.sigma_pp_nonlocal_ratio,
+            name="sigma_pp_nonlocal_ratio",
+        )
+        if ratio < 0.0 or ratio > 1.0 + 1.0e-14:
+            raise ValueError("sigma_pp_nonlocal_ratio must lie in [0, 1].")
+        object.__setattr__(self, "sigma_pp_nonlocal_ratio", min(ratio, 1.0))
+        names = (
+            "eom_exchange_spectra",
+            "collision_power_spectra",
+            "eom_layer_exchange",
+            "layer_collision_power",
+            "nonlocal_self_energy_eom_cut_correction",
+            "corrected_cut_currents",
+            "continuity_residual",
+        )
+        for name in names:
+            object.__setattr__(
+                self,
+                name,
+                _readonly_real(getattr(self, name), name=name),
+            )
+
+        eom_spectra = self.eom_exchange_spectra
+        collision_spectra = self.collision_power_spectra
+        if eom_spectra.ndim != 2 or eom_spectra.shape[0] < 1:
+            raise ValueError(
+                "eom_exchange_spectra must have shape "
+                "(n_layers, n_positive)."
+            )
+        if collision_spectra.shape != eom_spectra.shape:
+            raise ValueError(
+                "collision_power_spectra must match "
+                "eom_exchange_spectra."
+            )
+        n_layers = eom_spectra.shape[0]
+        for name in (
+            "eom_layer_exchange",
+            "layer_collision_power",
+            "continuity_residual",
+        ):
+            if getattr(self, name).shape != (n_layers,):
+                raise ValueError(f"{name} must have shape ({n_layers},).")
+        cut_shape = (max(0, n_layers - 1),)
+        for name in (
+            "nonlocal_self_energy_eom_cut_correction",
+            "corrected_cut_currents",
+        ):
+            if getattr(self, name).shape != cut_shape:
+                raise ValueError(f"{name} must have shape {cut_shape}.")
+
+    @property
+    def sigma_pp_is_block_local(self) -> bool:
+        """Whether off-layer weight is below the fixed structural threshold."""
+
+        return self.sigma_pp_nonlocal_ratio <= SIGMA_PP_BLOCK_LOCAL_RTOL
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class CurrentReport:
     """Integrated and spectral energy-current diagnostics after scale conversion."""
 
@@ -642,6 +725,7 @@ class CurrentReport:
     collision_spectrum: Array | None = None
     bond_currents: Array | None = None
     bond_spectra: Array | None = None
+    spatial: SpatialCurrentReport | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "left", _finite_real(self.left, name="left"))
@@ -660,6 +744,11 @@ class CurrentReport:
             values = getattr(self, name)
             if values is not None:
                 object.__setattr__(self, name, _readonly_real(values, name=name))
+        if self.spatial is not None and not isinstance(
+            self.spatial,
+            SpatialCurrentReport,
+        ):
+            raise TypeError("spatial must be a SpatialCurrentReport or None.")
 
     @property
     def contact_balance(self) -> float:

@@ -19,6 +19,7 @@ from negfpy.anharmonic.types import (
     KeldyshSpectrum,
     SCBAConfig,
     SCBAIteration,
+    SpatialCurrentReport,
     SolverScale,
     estimate_dense_memory_bytes,
 )
@@ -238,6 +239,65 @@ def test_scba_config_defaults_and_validation() -> None:
         SCBAConfig(eta_lead=1e-6, hilbert_backend="periodic")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="backend"):
         SCBAConfig(eta_lead=1e-6, backend="process")  # type: ignore[arg-type]
+
+
+def test_spatial_current_report_validates_shapes_and_is_read_only() -> None:
+    spatial = SpatialCurrentReport(
+        sigma_pp_nonlocal_ratio=0.25,
+        eom_exchange_spectra=np.zeros((2, 3)),
+        collision_power_spectra=np.ones((2, 3)),
+        eom_layer_exchange=np.array([1.0, -1.0]),
+        layer_collision_power=np.array([0.0, 0.0]),
+        nonlocal_self_energy_eom_cut_correction=np.array([-1.0]),
+        corrected_cut_currents=np.array([2.0]),
+        continuity_residual=np.array([0.0, 0.0]),
+    )
+
+    assert not spatial.sigma_pp_is_block_local
+    for name in (
+        "eom_exchange_spectra",
+        "collision_power_spectra",
+        "eom_layer_exchange",
+        "layer_collision_power",
+        "nonlocal_self_energy_eom_cut_correction",
+        "corrected_cut_currents",
+        "continuity_residual",
+    ):
+        assert not getattr(spatial, name).flags.writeable
+
+    with pytest.raises(ValueError, match="collision_power_spectra"):
+        SpatialCurrentReport(
+            sigma_pp_nonlocal_ratio=0.25,
+            eom_exchange_spectra=np.zeros((2, 3)),
+            collision_power_spectra=np.zeros((1, 3)),
+            eom_layer_exchange=np.zeros(2),
+            layer_collision_power=np.zeros(2),
+            nonlocal_self_energy_eom_cut_correction=np.zeros(1),
+            corrected_cut_currents=np.zeros(1),
+            continuity_residual=np.zeros(2),
+        )
+    with pytest.raises(ValueError, match="corrected_cut_currents"):
+        SpatialCurrentReport(
+            sigma_pp_nonlocal_ratio=0.25,
+            eom_exchange_spectra=np.zeros((2, 3)),
+            collision_power_spectra=np.zeros((2, 3)),
+            eom_layer_exchange=np.zeros(2),
+            layer_collision_power=np.zeros(2),
+            nonlocal_self_energy_eom_cut_correction=np.zeros(1),
+            corrected_cut_currents=np.zeros(2),
+            continuity_residual=np.zeros(2),
+        )
+    with pytest.raises(ValueError, match="sigma_pp_nonlocal_ratio"):
+        SpatialCurrentReport(
+            sigma_pp_nonlocal_ratio=1.1,
+            eom_exchange_spectra=np.zeros((2, 3)),
+            collision_power_spectra=np.zeros((2, 3)),
+            eom_layer_exchange=np.zeros(2),
+            layer_collision_power=np.zeros(2),
+            nonlocal_self_energy_eom_cut_correction=np.zeros(1),
+            corrected_cut_currents=np.zeros(1),
+            continuity_residual=np.zeros(2),
+        )
 
 
 def test_result_containers_are_read_only_and_report_balances() -> None:

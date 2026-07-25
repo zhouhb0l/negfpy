@@ -14,9 +14,23 @@ invocation forces:
 BatchMode=yes
 StrictHostKeyChecking=yes
 IdentitiesOnly=yes
+IdentityFile=~/.ssh/id_ed25519_aspire2a
+UserKnownHostsFile=~/.ssh/known_hosts_negf_heavy
+GlobalKnownHostsFile=/dev/null
+HostKeyAlgorithms=ssh-ed25519
+PreferredAuthentications=publickey
 PasswordAuthentication=no
 KbdInteractiveAuthentication=no
+GSSAPIAuthentication=no
+HostbasedAuthentication=no
 ```
+
+The command line also fixes `HostName=172.20.86.67` and `User=hangbo`; a
+change to the alias between preflight and launch therefore cannot redirect a
+job. The effective alias must select only the dedicated known-hosts file. That
+file must be owned by the current user, must not be group/other writable, and
+must contain exactly one entry for the workstation using the pinned ED25519
+key. System-wide and ordinary user known-hosts files are not consulted.
 
 Configure the alias outside the repository:
 
@@ -27,6 +41,8 @@ Host negf-heavy
     User hangbo
     IdentityFile ~/.ssh/id_ed25519_aspire2a
     IdentitiesOnly yes
+    BatchMode yes
+    PreferredAuthentications publickey
     PasswordAuthentication no
     KbdInteractiveAuthentication no
     StrictHostKeyChecking yes
@@ -85,19 +101,72 @@ commit in `~/negfpy-validation/<commit>/worktree`, verifies explicit-lock SHA
 `b2ce515e488757f61781a559985d401575aec9dd73507c0c3b71b68746022839`, and
 creates `~/negfpy-validation/<commit>/environment` from that lock. The worker
 passes the same hash as `NEGFPY_VALIDATION_ENV_SHA256`; no shared scientific
+environment is accepted. Deploy-time and attempt-time identity records must
+agree on the full commit, Git tree, package-source SHA256, lock SHA256,
+interpreter, installed distributions, platform, and thread limits.
 
 `launch` creates `negf-toy-<12-character-commit>` in detached `tmux`. It fixes
 OpenMP, OpenBLAS, MKL, BLIS, NumExpr, and vecLib thread counts to one and runs
-the established nightly pytest release entry point. The report, log,
-environment manifest, job status, and HDF5 checkpoints live below
-`~/negfpy-validation/<commit>/artifacts/`.
+the established nightly pytest release entry point.
+
+The release worker does not accept pytest exit status alone as success. It
+strictly reloads the current-attempt report and requires:
+
+- combined schema v4 with a valid canonical body digest and
+  `release_certified=true`;
+- embedded multidimensional protocol v2/schema v4 evidence;
+- the exact 13-outcome FFT/FFT SCBA graph with analytic diagonal contacts;
+- the passing seven-point harmonic preflight (base plus six preregistered
+  numerical points);
+- the passing bounded converged serial/threaded/FFT full-field oracle;
+- the complete 13-run open-system matrix;
+- 13 valid checkpoint files and one environment-lock identity; and
+- full commit and package-source identity equal to the deployed candidate.
+
+The protocol-v2 numerical ladder is
+`dw=(0.0015625, 0.00078125, 0.000390625)` and
+`eta=(0.003125, 0.0015625, 0.00078125)`. The production graph is FFT-only;
+serial/threaded/FFT equality is established on the bounded oracle, not by an
+additional full-grid threaded outcome. The previous d05b result is provisional
+failed evidence, and `0.1.0` remains unvalidated until a clean workstation
+rerun passes.
+
+For interpretation of the archived conservation diagnostics, the locked
+block-local threshold is `SIGMA_PP_BLOCK_LOCAL_RTOL=1e-12`. Raw harmonic bond
+currents gate only block-local self-energies. Full nonlocal SCBA uses the
+`nonlocal_self_energy_eom_cut_correction`; it is not labeled as a bare FPU
+interaction-current operator. Nonequilibrium `Sigma_pp` broadening may be
+indefinite, so no unsupported NESS positive-semidefiniteness claim is added to
+remote certification.
 
 ## Resume, status, and retrieval
 
-The worker always supplies the checkpoint directory and resume flag to the
-release runner. A later launch of the same committed deployment therefore
-resumes only compatible checkpoint state; scientific checkpoint validation is
-responsible for rejecting any hash mismatch.
+The worker always supplies the persistent checkpoint directory. The release
+runner's existing default is resume-enabled, and scientific checkpoint
+validation rejects any source, environment, grid, input, or initial-state
+hash mismatch. The obsolete, unconsumed resume environment variable is not
+exported.
+
+Each execution writes a new `artifacts/attempts/attempt-NNN/` directory with
+its own report, log, status, execution identity, report facts, and relative
+checkpoint index. Compatible HDF5 checkpoints remain in
+`artifacts/checkpoints/`. A root `current-attempt.json` points to the sole
+current terminal attempt. A runner failure sidecar is moved into that attempt;
+it cannot survive at the artifact root and masquerade as current evidence.
+
+Before a retry, the old `SHA256SUMS` and current-attempt pointer are archived,
+so a stale successful report cannot satisfy a later failed attempt. The final
+checksum manifest is the publication barrier and the job lock is removed only
+after that manifest is durably written. A checksum/finalization error leaves
+the lock in place and records `finalization_failed`; it is never labeled
+completed. `status` reports a lock with no live tmux session as `stale_lock`.
+
+`artifacts/identity/` contains verified copies of the deployment manifest,
+environment manifest, explicit lock, incoming checksum manifest, remote
+environment record, and a lock/source identity manifest. The scientific JSON
+is preserved byte-for-byte; because it records absolute runtime checkpoint
+paths, the attempt's `checkpoint-index.json` supplies checksum-verified paths
+relative to the fetched artifact root.
 
 Inspect state without changing the job:
 

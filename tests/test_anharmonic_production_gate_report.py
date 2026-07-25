@@ -158,7 +158,7 @@ def test_explicit_environment_lock_is_validated_and_serialized(
         _unexecuted_pr_report(),
     ).as_dict()
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["open_three_mode"]["runs"][0][
         "environment_lock_sha256"
     ] == lock_sha256

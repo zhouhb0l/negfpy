@@ -1,7 +1,8 @@
 # Anharmonic phonon NEGF: research, architecture, and validation plan
 
 Status: locked release roadmap with an executable dense `0.1.x` candidate,
-2026-07-24. Exact conventions and current validation gaps are normative in
+2026-07-25. Protocol v2 is implemented, but its clean remote release rerun is
+still pending. Exact conventions and current validation gaps are normative in
 `anharmonic_theory.md` and `anharmonic_validation.md`.
 
 ## 1. Decision
@@ -49,8 +50,9 @@ The reference implementation will treat:
 - harmonic semi-infinite contacts;
 - a finite interacting device;
 - mass-normalized second- and third-order IFCs;
-- cubic (three-phonon) scattering in the self-consistent Born approximation
-  (SCBA);
+- cubic (three-phonon) scattering in full nonlocal self-consistent Born
+  approximation (SCBA), retaining every output block and internal
+  contraction permitted by the supplied cubic vertex;
 - retarded, advanced, lesser, and greater Green functions;
 - a symmetric signed-frequency grid;
 - heat current from the interacting Meir-Wingreen-like expression;
@@ -71,6 +73,11 @@ The first version will not silently include:
 
 Those are separate, named models. They must never be selected by an ambiguous
 flag such as `fast=True`.
+
+Paper-specific slab/block-local and atom-diagonal SCBA are also separate,
+named approximation levels. They may reproduce a historical calculation or
+provide a diagnostic, but neither is silently substituted for the full
+nonlocal reference.
 
 ## 3. Conventions that must be frozen before coding
 
@@ -165,6 +172,30 @@ G_{df}^{\gtrless}(\omega-\omega').
 Indices above are schematic; the implementation must retain the exact atom,
 Cartesian, layer, and transverse-cell mappings.
 
+This equation defines NEGFPy's **full nonlocal SCBA** reference. A restriction
+of the output self-energy to diagonal layer/slab blocks, or to diagonal
+\(3\times3\) atom blocks, changes the approximation and must be recorded in
+the method name and result provenance.
+
+That distinction is required for a faithful reading of the attached papers.
+The production silicon calculation in
+[Guo et al., Phys. Rev. B 102, 195412
+(2020)](https://doi.org/10.1103/PhysRevB.102.195412) retained diagonal slab
+blocks of the anharmonic self-energy and selected dominant terms within each
+retained block. It separately tested the more restrictive atom-diagonal
+approximation, which overestimated low-frequency scattering and lowered
+conductance. A paper reproduction must therefore reproduce the slab/block
+and retained-FC3 choices by name before comparing that approximation with the
+full nonlocal reference.
+
+[Guo et al., Phys. Rev. B 103, 174306
+(2021)](https://doi.org/10.1103/PhysRevB.103.174306) explicitly decomposed
+spectral exchange into local diagonal and nonlocal off-diagonal scattering-
+matrix contributions and found both important at low frequencies. This
+supports retaining off-layer blocks and diagnosing their exchange. It does
+not derive the bare Hamiltonian interaction-current operator required when an
+FPU-\(\alpha\) cubic vertex itself crosses a device cut.
+
 The retarded self-energy is reconstructed as
 
 \[
@@ -233,11 +264,19 @@ All of the following should pass:
 - relative change of \(G^{r,<,>}\);
 - \(G^a=(G^r)^\dagger\);
 - Keldysh spectral identity;
-- nonnegative contact broadenings at positive frequency within tolerance;
-- causality of \(G^r\) and \(\Sigma^r\);
+- positive semidefiniteness of every Hermitian-projected
+  \(iC^{</>}\) correlation matrix for Green functions and self-energies;
+- positive-frequency stability/passivity of the Green spectral function,
+  each harmonic contact broadening, and the total embedded self-energy;
+- interaction-only \(\Gamma_{pp}\) passivity at equilibrium. In a
+  nonequilibrium steady state, \(\Gamma_{pp}=i(\Sigma_{pp}^>-\Sigma_{pp}^<)\)
+  may be indefinite and is recorded rather than rejected;
+- causality of \(G^r\) and stability of the total embedded retarded problem;
 - \(J_L+J_R=0\);
-- spatial harmonic bond current is constant when the cubic vertices are
-  onsite or strictly intralayer;
+- raw harmonic bond current is constant only when the converged
+  \(\Sigma_{pp}\) is layer-block-local at the fixed structural threshold
+  \(r_{\rm nl}\le10^{-12}\); full-nonlocal \(\Sigma_{pp}\) instead gates the
+  projected EOM continuity and corrected cut currents;
 - at equilibrium, \(J_L=J_R=0\);
 - the integrated collision power is zero:
   \[
@@ -249,6 +288,13 @@ All of the following should pass:
 
 Use both an absolute current tolerance and a relative tolerance. Relative
 error alone is ill-defined near equilibrium.
+
+The projected EOM-exchange sum and the independently layer-projected
+greater/lesser collision-power sum must each recover global \(P_{pp}\).
+Individual layer contributions may be nonzero and sign-changing because
+anharmonic scattering redistributes energy spatially. Only their global sum
+and the continuity identities are gated; independent layerwise zeros are not
+required.
 
 ### 4.3 Current
 
@@ -265,11 +311,21 @@ J_\alpha=
 
 with a sign convention fixed by a harmonic-limit test. Also implement the
 harmonic bond-current expression using the first off-diagonal lesser
-Green-function blocks. It must agree with the contact current after
-convergence only for onsite or strictly intralayer cubic vertices.
-FPU-alpha bond interactions require an additional interaction-current
-operator; until that operator is derived, validate those fixtures with
-contact currents and collision power.
+Green-function blocks. For an onsite or intralayer bare vertex, the raw
+harmonic bond current is a certification gate only if the converged
+self-energy is layer-block-local. Full nonlocal SCBA can generate off-layer
+self-energy blocks even from such a bare vertex. In that case the spatial
+gate adds the explicitly named
+`nonlocal_self_energy_eom_cut_correction`, obtained from the layer-projected
+equation of motion, to the raw harmonic current and compares the corrected
+cut currents with the contacts.
+
+This correction accounts for exchange carried by a nonlocal self-energy; it
+is not a derived bare anharmonic current operator. FPU-\(\alpha\) bond
+interactions have a cubic vertex that itself crosses the cut and still
+require a separate Hamiltonian interaction-current operator. Until that
+operator is derived, those fixtures are validated with contact currents and
+global collision power only and have no spatial-current certification gate.
 
 ## 5. Approximation hierarchy
 
@@ -277,16 +333,17 @@ contact currents and collision power.
 |---|---|---|---|
 | Full dense cubic SCBA | Reference implementation | Conserving when implemented consistently; handles nonequilibrium broadening | Highest cost |
 | Block-sparse SCBA from FC3 support | Production target | Preserves nonlocal terms that actually exist | More complex data movement |
+| Guo-2020 slab/block-local SCBA | Named paper-reproduction level | Reproduces the production truncation when its retained blocks and FC3 support are matched | Omits off-slab self-energy exchange; cannot certify the full nonlocal method |
+| Atom-diagonal SCBA | Diagnostic paper approximation | Lowest memory among SCBA variants | Can overestimate low-frequency scattering and lower conductance |
 | One-shot Born | Debugging and weak-coupling baseline | Simple; self-energy scales as \(\Psi^2\) | Generally not current conserving |
 | Lowest-order approximation / Padé rescaling | Later acceleration | Published speedup relative to SCBA | Must be calibrated against SCBA |
 | Quasiparticle/on-shell self-energy | Bulk validation and large systems | Direct comparison to BTE/phono3py | Loses device coherence and strong nonequilibrium |
 | Self-consistent phonon/effective harmonic model | Frequency renormalization | Useful for strong quartic anharmonicity | Does not by itself describe inelastic current |
 | Büttiker probes | Optional engineering model | Very cheap | Phenomenological unless independently calibrated |
-| Local or atomic-diagonal SCBA | Diagnostic only | Reduced memory | The attached 2020 paper shows appreciable over-scattering |
 
 The production sequence should be full dense SCBA, then block sparsity, then
-optional acceleration. It should not begin with a local-diagonal
-approximation.
+optional acceleration. The slab/block-local and atom-diagonal branches remain
+explicit comparison methods; neither becomes a silent performance switch.
 
 ## 6. Third-order IFC data model
 
@@ -373,7 +430,10 @@ FC3 tensor contractions. Optimize only after the dense solver is validated.
 6. Parallelize independent external \((\omega,\mathbf q_\perp)\) points while
    explicitly accounting for the data exchange required by internal
    \((\omega',\mathbf q'_\perp)\) sums.
-7. Add checkpoint/restart at each converged SCBA iteration.
+7. Use the private atomic HDF5 checkpoint path after each completed campaign
+   outcome. Store the mixed \(\Sigma_{pp}^{</>}\), histories, timings, and
+   hashes, then recompute \(G\), currents, and diagnostics after resume. Reject
+   source, environment, grid, or input mismatches.
 8. Measure memory and FLOPs from actual FC3 sparsity before selecting CPU,
    GPU, or distributed layouts.
 
@@ -413,6 +473,11 @@ not a validation result.
 - self-energy scales as the square of the cubic coupling;
 - permutation of identical FC3 legs leaves the answer unchanged;
 - equilibrium KMS/fluctuation-dissipation identities;
+- positive semidefiniteness of Hermitian-projected \(iC^{</>}\) for the
+  lesser/greater correlation matrices;
+- Green/contact/total embedded stability, plus interaction-only
+  \(\Gamma_{pp}\) passivity at equilibrium. NESS \(\Gamma_{pp}\) may be
+  indefinite and is not itself a passivity gate;
 - exactly zero equilibrium current within the integration tolerance;
 - harmonic limit recovered as \(\Psi\to0\).
 
@@ -428,11 +493,54 @@ not a validation result.
   with genuinely mixed polarizations and identical zero-start and
   Born-seeded SCBA fixed points;
 - current from both contacts agrees;
-- harmonic bond current is spatially constant for onsite or strictly
-  intralayer cubic vertices;
+- raw harmonic bond current is spatially constant when \(\Sigma_{pp}\) is
+  block-local; full-nonlocal onsite/intralayer cases instead require the
+  projected EOM continuity and
+  `nonlocal_self_energy_eom_cut_correction` gates;
 - convergence under frequency spacing, cutoff, eta, mixing, and device size;
 - weak-coupling comparison to an independently implemented master-equation
   or exact-diagonalization calculation where their assumptions overlap.
+
+The resolved protocol-v2 base point is exactly
+
+\[
+\Delta\omega=0.00078125,\quad \omega_{\rm cut}=5,\quad
+\eta_{\rm lead}=0.0015625,\quad m=0.2.
+\]
+
+Its locked ladders are
+
+\[
+\Delta\omega=(0.0015625,0.00078125,0.000390625),
+\qquad
+\eta_{\rm lead}=(0.003125,0.0015625,0.00078125),
+\]
+
+with cutoffs \((5,6)\) and mixings \((0.2,0.1)\). The seven-point harmonic
+preflight is the base plus six one-control-at-a-time points: coarse spacing,
+half spacing, larger cutoff, doubled eta, half eta, and changed mixing. All
+six are executed and archived. The four certification directions are half
+spacing \(0.000390625\), cutoff 6, half eta \(0.00078125\), and mixing 0.1;
+coarse spacing \(0.0015625\) and doubled eta \(0.003125\) are diagnostic only.
+
+After preflight, the production graph has exactly 13 outcomes:
+
+1. one independently launched zero-start hardest endpoint
+   \((g,\Delta T)=(0.05,0.2)\);
+2. the five-point L-shaped continuation
+   \((0,0)\rightarrow(0.025,0)\rightarrow(0.05,0)
+   \rightarrow(0.05,0.1)\rightarrow(0.05,0.2)\);
+3. one independently Born-seeded endpoint; and
+4. six independent zero-start refinement outcomes.
+
+Every full production outcome uses exact zero-padded FFT convolution, the FFT
+implementation of the same finite-grid principal-value Hilbert sum, and
+analytic diagonal contacts. Zero/Born starts and continuation endpoints use
+the \(10^{-8}\) full-field tolerance. Backend equivalence is a separate,
+bounded, converged SCBA oracle comparing serial/direct, threaded/direct, and
+FFT/FFT full \(G^{r,<,>}\) and \(\Sigma_{pp}^{r,<,>}\) fields and currents at
+`rtol=1e-10`, `atol=1e-12`. The protocol makes no claim that direct or
+threaded SCBA was run on every resolved production grid.
 
 One-shot Born may screen these cases and seed continuation, but it is not a
 fixed point and is generally not conserving. Only converged SCBA can certify
@@ -477,7 +585,8 @@ long-wavelength convergence are under control.
 
 ### Gate E: attached-paper device benchmarks
 
-Use Guo et al., Phys. Rev. B 102, 195412 (2020):
+Use [Guo et al., Phys. Rev. B 102, 195412
+(2020)](https://doi.org/10.1103/PhysRevB.102.195412):
 
 - cross-plane silicon film;
 - 300 K;
@@ -491,11 +600,22 @@ specific first-neighbor FC3 input, 7.4489 and 8.4025 W/m K for 10.8 and
 13 nm films. These numbers are regression targets only when the DFT IFCs,
 geometry, meshes, and approximations are matched.
 
-Then use Guo et al., Phys. Rev. B 103, 174306 (2021):
+The first reproduction uses the paper's named production level: retained
+diagonal slab self-energy blocks and its selected dominant within-block/FC3
+terms. The more restrictive atom-diagonal test is reported separately. Only
+after that paper-specific benchmark is reproduced is full FC3 support and
+full nonlocal SCBA compared. A match obtained at one approximation level is
+not evidence that the other levels are equivalent.
+
+Then use [Guo et al., Phys. Rev. B 103, 174306
+(2021)](https://doi.org/10.1103/PhysRevB.103.174306):
 
 - idealized Si/Ge mass-mismatch interface;
 - scattering only in the interface device region;
 - spectral generation/annihilation integrates to zero;
+- local diagonal and nonlocal off-diagonal spectral exchange are archived
+  separately, and their sum reproduces the full result;
+- both contributions are retained when testing low-frequency redistribution;
 - interfacial mode decay and inelastic spectral redistribution;
 - finite-device and contact-resistance sensitivity.
 
@@ -542,13 +662,51 @@ Then use Guo et al., Phys. Rev. B 103, 174306 (2021):
 
 ## 10. Locked release sequence and current state
 
+### Protocol-v2 checkpoint and first-attempt evidence
+
+Protocol v2 now encodes the resolved seven-point harmonic preflight, bounded
+converged backend oracle, 13-outcome FFT graph, equilibrium-only interaction
+passivity, full-nonlocal spatial-current bookkeeping, weak-coupling gates,
+clean common
+provenance, and private atomic HDF5 outcome resume. It has not yet completed a
+clean remote run.
+
+The first remote attempt instead used commit
+`d05b4404af98e650e712b4ed7afd68705c1014f2`, the superseded protocol/schema,
+and a serial 401-point grid with \(\Delta\omega=0.025\), cutoff 5, and
+\(\eta_{\rm lead}=0.0125\). On 2026-07-25 it reached 200 iterations in
+2481.593 s. The terminal self-energy and Green residuals were
+\(4.616316\times10^{-16}\) and \(1.44047\times10^{-17}\); the contact
+imbalance was \(3.46945\times10^{-18}\), and
+\(P_{pp}=7.05099\times10^{-19}\). Its currents were
+\(J_L=0.01757079082964086\) and \(J_R=-0.017570790829640855\).
+
+That result is a provisional failure. The raw harmonic bond currents
+\([0.017558902896426334,0.017559378234576487]\) had spread
+\(4.75338\times10^{-7}\) and maximum contact mismatch
+\(1.188793\times10^{-5}\), exceeding the \(1.757079\times10^{-7}\)
+tolerance. Its Green spectral-moment error 0.0704865 also genuinely exceeded
+0.005. The old report additionally rejected a nonequilibrium
+\(\Gamma_{pp}\) passivity metric of \(5.992684\times10^{-6}\) against
+\(10^{-10}\); that NESS-only gate is scientifically invalid and removed in
+protocol v2. A postmortem found \(r_{\rm nl}\simeq0.46\), and the projected
+EOM exchange closes the archived raw bond/contact mismatch exactly. This
+supports the diagnosis, but cannot substitute for a clean rerun. All other
+old-graph outcomes were archived as blocked, so there is no old-protocol
+continuation, backend, or refinement result to promote.
+
+Accordingly, `0.1.0` remains **unvalidated** until one clean candidate commit
+passes the seven-point harmonic preflight, bounded full-field
+serial/direct--threaded/direct--FFT/FFT oracle, all 13 FFT outcomes, complete
+open-system matrix, restart comparison, and strict combined report.
+
 | Release | Required outcome | Current state |
 |---|---|---|
-| `0.1.0` | Python-only dense cubic SCBA for validated toy models | The eta-free open three-mode oracle, three-layer/nine-DOF SCBA harness, continuation graph, full preregistered numerical ladders, and combined strict-JSON report are implemented. The initial under-resolved open calculation failed, but the actual production API now passes the eta-free pole gate on a 143,143-frequency base grid and its independent half-spacing, half-eta, and larger-cutoff refinements; the largest observable refinement change is 0.162%. Exact padded FFT convolution/Hilbert paths and analytic diagonal contacts are cross-tested against the direct/Sancho references. The bounded nine-DOF PR graph passes but is non-certifying; the full nine-DOF ladder and final combined archive remain before release. Mingo and Wang \(O(T^4)\) are nonblocking historical extensions. |
+| `0.1.0` | Python-only dense cubic SCBA for validated toy models | Protocol-v2 machinery and prior fine open-system evidence exist, but the only full remote attempt used the old contract and failed as documented above. Clean protocol-v2 rerun pending; not validated. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions. |
 | `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | Full/compact reading, schema/permutation checks, unit conversion, mass normalization, hashes, and provenance are implemented. Translational device mapping and the pinned phono3py matrix-element/linewidth oracle remain. |
 | `0.3.0` | Sparse real-space SCBA for quasi-1D material devices | Not implemented. It must first reproduce the dense contractions exactly and retain complete FC3-implied support. |
 | `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Not implemented. It requires explicit coupled \(q'\) sums, momentum folding, and validated \(1/N_q\) normalization. |
-| `1.0.0` | Silicon/interface paper benchmarks, restart, convergence archive, production CPU performance | Not implemented. The attached Guo papers define later benchmark targets; they are not evidence for the current dense toy candidate. |
+| `1.0.0` | Silicon/interface paper benchmarks, restart, convergence archive, production CPU performance | The private atomic HDF5 mechanism is implemented, but release restart equivalence and the material/performance benchmarks are not. The attached Guo papers define later targets; they are not evidence for the dense toy candidate. |
 
 Optional LOA/Padé, local self-energy approximations, quartic
 renormalization, four-phonon scattering, thermal expansion, and anharmonic

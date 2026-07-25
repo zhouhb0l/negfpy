@@ -378,5 +378,23 @@ def test_checkpoint_restore_recomputes_fields_without_moving_fixed_point(
     assert restored.history == original.history
     assert restored.currents.left == pytest.approx(original.currents.left)
     assert restored.currents.right == pytest.approx(original.currents.right)
+    assert original.currents.spatial is not None
+    assert restored.currents.spatial is not None
+    for name in (
+        "sigma_pp_nonlocal_ratio",
+        "eom_exchange_spectra",
+        "collision_power_spectra",
+        "eom_layer_exchange",
+        "layer_collision_power",
+        "nonlocal_self_energy_eom_cut_correction",
+        "corrected_cut_currents",
+        "continuity_residual",
+    ):
+        np.testing.assert_allclose(
+            getattr(restored.currents.spatial, name),
+            getattr(original.currents.spatial, name),
+            rtol=0.0,
+            atol=0.0,
+        )
     assert restored.diagnostics.passed
     assert restored.release_certified == original.release_certified

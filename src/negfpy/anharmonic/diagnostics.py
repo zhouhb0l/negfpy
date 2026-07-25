@@ -18,7 +18,10 @@ from ._harmonic import (
 )
 from .contacts import bose_occupation_signed, build_contact_spectra
 from .cubic import cubic_lesser_greater
-from .current import _evaluate_current_report
+from .current import (
+    _evaluate_current_report,
+    self_energy_nonlocal_ratio,
+)
 from .grid import SignedFrequencyGrid
 from .retarded import retarded_from_keldysh
 from .types import (
@@ -27,6 +30,7 @@ from .types import (
     DiagnosticReport,
     KeldyshSpectrum,
     SCBAConfig,
+    SIGMA_PP_BLOCK_LOCAL_RTOL,
 )
 
 
@@ -233,6 +237,40 @@ def passivity_residual(
     """Alias for :func:`passivity_violation`."""
 
     return passivity_violation(retarded, grid)
+
+
+def correlation_positivity_violation(values: Array) -> float:
+    """Return the normalized PSD violation of ``i * C``.
+
+    In the displacement convention used here, each lesser or greater
+    correlation spectrum is ``-i`` times a positive-semidefinite matrix at
+    every signed frequency. This property applies separately to ``C^<`` and
+    ``C^>`` even when their difference, and hence an interaction broadening,
+    is indefinite in a nonequilibrium steady state.
+
+    The Hermitian part is diagonalized so harmless floating-point
+    anti-Hermiticity noise is not mistaken for a negative eigenvalue.
+    Anti-Hermiticity itself is checked independently.
+    """
+
+    matrices = _matrix_spectrum(values, name="values")
+    worst_negative = 0.0
+    correlation_scale = 0.0
+    for matrix in matrices:
+        correlation = 1j * matrix
+        hermitian = 0.5 * (correlation + correlation.conj().T)
+        eigenvalues = np.linalg.eigvalsh(hermitian)
+        correlation_scale = max(
+            correlation_scale,
+            float(np.max(np.abs(eigenvalues))),
+        )
+        worst_negative = max(
+            worst_negative,
+            max(0.0, -float(np.min(eigenvalues))),
+        )
+    if correlation_scale == 0.0:
+        return 0.0
+    return worst_negative / correlation_scale
 
 
 def spectral_moment_residual(
@@ -669,6 +707,51 @@ def _record_optional_current_field(
     )
 
 
+def _record_optional_spatial_current(
+    metrics: dict[str, float],
+    failures: list[str],
+    *,
+    actual: object | None,
+    expected: object | None,
+    rtol: float,
+    atol: float,
+) -> None:
+    if (actual is None) != (expected is None):
+        failures.append(
+            "stored spatial-current availability does not match recomputation"
+        )
+        metrics["recomputed_spatial_current_residual"] = float("inf")
+        return
+    if actual is None:
+        metrics["recomputed_spatial_current_residual"] = 0.0
+        return
+    field_names = (
+        "sigma_pp_nonlocal_ratio",
+        "eom_exchange_spectra",
+        "collision_power_spectra",
+        "eom_layer_exchange",
+        "layer_collision_power",
+        "nonlocal_self_energy_eom_cut_correction",
+        "corrected_cut_currents",
+        "continuity_residual",
+    )
+    residuals: list[float] = []
+    for name in field_names:
+        metric_name = f"recomputed_spatial_{name}_residual"
+        _record_field_check(
+            metrics,
+            failures,
+            metric_name=metric_name,
+            display_name=f"stored spatial current {name}",
+            actual=np.asarray(getattr(actual, name)),
+            expected=np.asarray(getattr(expected, name)),
+            rtol=rtol,
+            atol=atol,
+        )
+        residuals.append(metrics[metric_name])
+    metrics["recomputed_spatial_current_residual"] = max(residuals)
+
+
 def check_solution(
     problem: CubicSCBAProblem,
     result: AnharmonicResult,
@@ -702,6 +785,16 @@ def check_solution(
     essential_failures: list[str] = []
     release_failures: list[str] = []
     method = result.method.strip().lower()
+    temperature_scale = max(
+        1.0,
+        abs(problem.left.temperature),
+        abs(problem.right.temperature),
+    )
+    equal_temperature = (
+        abs(problem.left.temperature - problem.right.temperature)
+        <= 1.0e-14 * temperature_scale
+    )
+    metrics["equilibrium_fdt_applicable"] = float(equal_temperature)
 
     # Certification never trusts cached contacts, a supplied retarded
     # interaction self-energy, convergence history, or summarized currents.
@@ -779,6 +872,13 @@ def check_solution(
         + rebuilt_right.greater
         + result.sigma_pp.greater
     )
+    total_self_energy = KeldyshSpectrum(
+        rebuilt_left.retarded
+        + rebuilt_right.retarded
+        + rebuilt_sigma_pp_retarded,
+        total_lesser,
+        total_greater,
+    )
     expected_green_lesser = (
         result.green.retarded @ total_lesser @ advanced
     )
@@ -849,6 +949,14 @@ def check_solution(
             rtol=config.current_rtol,
             atol=physical_current_atol,
         )
+    _record_optional_spatial_current(
+        metrics,
+        essential_failures,
+        actual=result.currents.spatial,
+        expected=rebuilt_currents.spatial,
+        rtol=config.current_rtol,
+        atol=physical_current_atol,
+    )
 
     if method == "scba":
         recomputation_backend = (
@@ -897,6 +1005,12 @@ def check_solution(
             spectrum.retarded,
             result.grid,
         )
+        lesser_positivity = correlation_positivity_violation(
+            spectrum.lesser
+        )
+        greater_positivity = correlation_positivity_violation(
+            spectrum.greater
+        )
         tails = keldysh_tail_ratio(spectrum)
 
         metrics[f"{label}_keldysh_residual"] = keldysh
@@ -906,6 +1020,16 @@ def check_solution(
         metrics[f"{label}_negative_frequency_residual"] = negative
         metrics[f"{label}_retarded_reality_residual"] = reality
         metrics[f"{label}_passivity_violation"] = passivity
+        metrics[
+            f"{label}_lesser_correlation_positivity_violation"
+        ] = lesser_positivity
+        metrics[
+            f"{label}_greater_correlation_positivity_violation"
+        ] = greater_positivity
+        metrics[f"{label}_correlation_positivity_violation"] = max(
+            lesser_positivity,
+            greater_positivity,
+        )
         metrics[f"{label}_tail_ratio"] = tails
 
         for name, value in (
@@ -933,8 +1057,13 @@ def check_solution(
                 config.identity_rtol,
             ),
             (
-                f"{label} passivity",
-                passivity,
+                f"{label} lesser correlation positivity",
+                lesser_positivity,
+                _PASSIVITY_RTOL,
+            ),
+            (
+                f"{label} greater correlation positivity",
+                greater_positivity,
                 _PASSIVITY_RTOL,
             ),
         ):
@@ -946,6 +1075,59 @@ def check_solution(
                 release_only=True,
             )
 
+        passivity_applicable = label != "sigma_pp" or equal_temperature
+        metrics[f"{label}_passivity_applicable"] = float(
+            passivity_applicable
+        )
+        if passivity_applicable:
+            _append_threshold_failure(
+                release_failures,
+                name=f"{label} passivity",
+                value=passivity,
+                limit=_PASSIVITY_RTOL,
+                release_only=True,
+            )
+
+    total_passivity = passivity_violation(
+        total_self_energy.retarded,
+        result.grid,
+    )
+    total_lesser_positivity = correlation_positivity_violation(
+        total_self_energy.lesser
+    )
+    total_greater_positivity = correlation_positivity_violation(
+        total_self_energy.greater
+    )
+    metrics["sigma_total_passivity_violation"] = total_passivity
+    metrics["sigma_total_passivity_applicable"] = 1.0
+    metrics[
+        "sigma_total_lesser_correlation_positivity_violation"
+    ] = total_lesser_positivity
+    metrics[
+        "sigma_total_greater_correlation_positivity_violation"
+    ] = total_greater_positivity
+    metrics["sigma_total_correlation_positivity_violation"] = max(
+        total_lesser_positivity,
+        total_greater_positivity,
+    )
+    for name, value in (
+        ("sigma_total passivity", total_passivity),
+        (
+            "sigma_total lesser correlation positivity",
+            total_lesser_positivity,
+        ),
+        (
+            "sigma_total greater correlation positivity",
+            total_greater_positivity,
+        ),
+    ):
+        _append_threshold_failure(
+            release_failures,
+            name=name,
+            value=value,
+            limit=_PASSIVITY_RTOL,
+            release_only=True,
+        )
     moment = spectral_moment_residual(result.green.retarded, result.grid)
     metrics["green_spectral_moment_residual"] = moment
     _append_threshold_failure(
@@ -1043,17 +1225,18 @@ def check_solution(
     metrics["current_full_rel_error"] = full_abs / current_denominator
     metrics["current_tolerance"] = current_tolerance
     metrics["current_atol_physical"] = current_absolute_floor
+    sigma_pp_nonlocal_ratio = self_energy_nonlocal_ratio(
+        problem,
+        rebuilt_sigma_pp,
+    )
+    metrics["sigma_pp_nonlocal_ratio"] = sigma_pp_nonlocal_ratio
+    metrics["sigma_pp_block_local_threshold"] = (
+        SIGMA_PP_BLOCK_LOCAL_RTOL
+    )
+    metrics["sigma_pp_is_block_local"] = float(
+        sigma_pp_nonlocal_ratio <= SIGMA_PP_BLOCK_LOCAL_RTOL
+    )
 
-    temperature_scale = max(
-        1.0,
-        abs(problem.left.temperature),
-        abs(problem.right.temperature),
-    )
-    equal_temperature = (
-        abs(problem.left.temperature - problem.right.temperature)
-        <= 1.0e-14 * temperature_scale
-    )
-    metrics["equilibrium_fdt_applicable"] = float(equal_temperature)
 
     # Each ideal contact is internally equilibrated even when the two
     # reservoirs have different temperatures.
@@ -1251,33 +1434,138 @@ def check_solution(
                 config.current_rtol * bond_scale,
             )
             bond_denominator = max(bond_scale, current_absolute_floor)
+            raw_bond_gate_applicable = (
+                sigma_pp_nonlocal_ratio <= SIGMA_PP_BLOCK_LOCAL_RTOL
+            )
+            metrics["harmonic_bond_current_gate_applicable"] = float(
+                raw_bond_gate_applicable
+            )
             metrics["bond_current_abs_spread"] = bond_spread
             metrics["bond_current_rel_spread"] = (
                 bond_spread / bond_denominator
             )
             metrics["bond_current_tolerance"] = bond_tolerance
-            _append_threshold_failure(
-                essential_failures,
-                name="bond-current spread",
-                value=bond_spread,
-                limit=bond_tolerance,
-                release_only=False,
-            )
+            metrics["harmonic_bond_current_abs_spread"] = bond_spread
             if bonds.size:
                 bond_contact_error = max(
                     float(np.max(np.abs(bonds - current.left))),
                     float(np.max(np.abs(bonds + current.right))),
                 )
                 metrics["bond_current_contact_abs_error"] = bond_contact_error
+                metrics[
+                    "harmonic_bond_current_contact_abs_error"
+                ] = bond_contact_error
+            else:
+                bond_contact_error = 0.0
+                metrics["bond_current_contact_abs_error"] = 0.0
+                metrics["harmonic_bond_current_contact_abs_error"] = 0.0
+            if raw_bond_gate_applicable:
                 _append_threshold_failure(
                     essential_failures,
-                    name="bond-to-contact current mismatch",
+                    name="block-local harmonic bond-current spread",
+                    value=bond_spread,
+                    limit=bond_tolerance,
+                    release_only=False,
+                )
+                _append_threshold_failure(
+                    essential_failures,
+                    name="block-local harmonic bond-to-contact mismatch",
                     value=bond_contact_error,
                     limit=bond_tolerance,
                     release_only=False,
                 )
-            else:
-                metrics["bond_current_contact_abs_error"] = 0.0
+
+        spatial = current.spatial
+        if spatial is not None:
+            metrics["spatial_sigma_pp_nonlocal_ratio"] = (
+                spatial.sigma_pp_nonlocal_ratio
+            )
+            layer_collision = np.asarray(
+                spatial.layer_collision_power,
+                dtype=np.float64,
+            )
+            layer_collision_abs = _max_abs(layer_collision)
+            eom_continuity_abs = _max_abs(spatial.continuity_residual)
+            eom_global_error = abs(
+                float(np.sum(spatial.eom_layer_exchange))
+                - current.collision_power
+            )
+            collision_global_error = abs(
+                float(np.sum(layer_collision))
+                - current.collision_power
+            )
+            corrected = np.asarray(
+                spatial.corrected_cut_currents,
+                dtype=np.float64,
+            )
+            corrected_spread = (
+                float(np.max(corrected) - np.min(corrected))
+                if corrected.size > 1
+                else 0.0
+            )
+            corrected_contact_error = (
+                max(
+                    float(np.max(np.abs(corrected - current.left))),
+                    float(np.max(np.abs(corrected + current.right))),
+                )
+                if corrected.size
+                else 0.0
+            )
+            metrics["spatial_layer_collision_abs_error"] = (
+                layer_collision_abs
+            )
+            metrics["spatial_eom_continuity_abs_error"] = (
+                eom_continuity_abs
+            )
+            metrics["spatial_eom_global_collision_abs_error"] = (
+                eom_global_error
+            )
+            metrics["spatial_projected_collision_global_abs_error"] = (
+                collision_global_error
+            )
+            metrics["spatial_corrected_cut_abs_spread"] = corrected_spread
+            metrics["spatial_corrected_cut_contact_abs_error"] = (
+                corrected_contact_error
+            )
+            nonlocal_cut_gate_applicable = (
+                sigma_pp_nonlocal_ratio > SIGMA_PP_BLOCK_LOCAL_RTOL
+            )
+            metrics["spatial_nonlocal_eom_cut_gate_applicable"] = float(
+                nonlocal_cut_gate_applicable
+            )
+            for name, value in (
+                ("projected EOM continuity", eom_continuity_abs),
+                ("projected EOM global collision identity", eom_global_error),
+                (
+                    "projected greater/lesser global collision identity",
+                    collision_global_error,
+                ),
+            ):
+                _append_threshold_failure(
+                    essential_failures,
+                    name=name,
+                    value=value,
+                    limit=current_tolerance,
+                    release_only=False,
+                )
+            if nonlocal_cut_gate_applicable:
+                for name, value in (
+                    (
+                        "nonlocal-self-energy EOM corrected cut spread",
+                        corrected_spread,
+                    ),
+                    (
+                        "nonlocal-self-energy EOM corrected cut-to-contact mismatch",
+                        corrected_contact_error,
+                    ),
+                ):
+                    _append_threshold_failure(
+                        essential_failures,
+                        name=name,
+                        value=value,
+                        limit=current_tolerance,
+                        release_only=False,
+                    )
 
         direction_violation = 0.0
         if problem.left.temperature > problem.right.temperature:
@@ -1369,6 +1657,7 @@ __all__ = [
     "anti_hermitian_residual",
     "antihermitian_residual",
     "check_solution",
+    "correlation_positivity_violation",
     "equilibrium_fdt_residual",
     "high_frequency_extrapolation_residual",
     "high_frequency_residual",

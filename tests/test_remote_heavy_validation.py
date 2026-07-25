@@ -25,6 +25,8 @@ identity = importlib.import_module("remote_heavy_identity")
 security = importlib.import_module("remote_heavy_security")
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+GIT_TREE = "a" * 40
+SOURCE_SHA256 = "b" * 64
 
 
 def _valid_ssh_config() -> str:
@@ -34,7 +36,13 @@ def _valid_ssh_config() -> str:
             "hostname 172.20.86.67",
             "user hangbo",
             "identityfile ~/.ssh/id_ed25519_aspire2a",
+            f"userknownhostsfile {core.EXPECTED_KNOWN_HOSTS_FILE}",
             "identitiesonly yes",
+            "batchmode yes",
+            "preferredauthentications publickey",
+            "pubkeyauthentication yes",
+            "passwordauthentication no",
+            "kbdinteractiveauthentication no",
             "stricthostkeychecking yes",
             "serveraliveinterval 30",
             "serveralivecountmax 3",
@@ -51,8 +59,19 @@ def test_all_network_commands_force_key_only_batch_mode() -> None:
         assert "-oBatchMode=yes" in argv
         assert "-oStrictHostKeyChecking=yes" in argv
         assert "-oIdentitiesOnly=yes" in argv
+        assert f"-oIdentityFile={core.EXPECTED_IDENTITY_FILE}" in argv
+        assert (
+            f"-oUserKnownHostsFile={core.EXPECTED_KNOWN_HOSTS_FILE}" in argv
+        )
+        assert "-oGlobalKnownHostsFile=/dev/null" in argv
+        assert "-oHostKeyAlgorithms=ssh-ed25519" in argv
+        assert "-oPreferredAuthentications=publickey" in argv
         assert "-oPasswordAuthentication=no" in argv
         assert "-oKbdInteractiveAuthentication=no" in argv
+        assert "-oGSSAPIAuthentication=no" in argv
+        assert "-oHostbasedAuthentication=no" in argv
+        assert f"-oHostName={core.EXPECTED_HOST}" in argv
+        assert f"-oUser={core.EXPECTED_USER}" in argv
         assert core.SSH_ALIAS in joined
         assert "sshpass" not in joined.lower()
 
@@ -76,6 +95,17 @@ def test_alias_validation_locks_host_user_identity_and_keepalive() -> None:
         core.validate_ssh_alias_config(
             _valid_ssh_config().replace("identitiesonly yes", "identitiesonly no")
         )
+    with pytest.raises(core.RemoteValidationError, match="BatchMode"):
+        core.validate_ssh_alias_config(
+            _valid_ssh_config().replace("batchmode yes", "batchmode no")
+        )
+    with pytest.raises(core.RemoteValidationError, match="PreferredAuthentications"):
+        core.validate_ssh_alias_config(
+            _valid_ssh_config().replace(
+                "preferredauthentications publickey",
+                "preferredauthentications publickey,password",
+            )
+        )
 
 
 def test_alias_rejects_same_identity_basename_at_another_path() -> None:
@@ -98,15 +128,20 @@ def test_dedicated_known_hosts_file_must_contain_exact_ed25519_fingerprint(
     known_hosts.write_text(
         f"172.20.86.67 ssh-ed25519 {encoded}\n", encoding="utf-8"
     )
-    config = _valid_ssh_config() + f"\nuserknownhostsfile {known_hosts}\n"
+    known_hosts.chmod(0o644)
+    config = _valid_ssh_config().replace(
+        str(core.EXPECTED_KNOWN_HOSTS_FILE), str(known_hosts)
+    )
     assert security.validate_known_hosts_fingerprint(
         config, expected=expected,
         expected_host="172.20.86.67",
+        expected_path=known_hosts,
     ) == known_hosts
-    with pytest.raises(ValueError, match="fingerprint set"):
+    with pytest.raises(ValueError, match="exactly one pinned"):
         security.validate_known_hosts_fingerprint(
             config, expected=core.EXPECTED_ED25519_FINGERPRINT,
             expected_host="172.20.86.67",
+            expected_path=known_hosts,
         )
 
     second = base64.b64encode(b"second-ed25519-key").decode("ascii")
@@ -115,9 +150,39 @@ def test_dedicated_known_hosts_file_must_contain_exact_ed25519_fingerprint(
         + f"172.20.86.67 ssh-ed25519 {second}\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="fingerprint set"):
+    with pytest.raises(ValueError, match="exactly one pinned"):
         security.validate_known_hosts_fingerprint(
-            config, expected=expected, expected_host="172.20.86.67"
+            config, expected=expected, expected_host="172.20.86.67",
+            expected_path=known_hosts,
+        )
+
+
+def test_dedicated_known_hosts_rejects_other_algorithms_and_writable_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    blob = base64.b64encode(b"synthetic-key").decode("ascii")
+    known_hosts = tmp_path / "known_hosts_negf_heavy"
+    config = _valid_ssh_config().replace(
+        str(core.EXPECTED_KNOWN_HOSTS_FILE), str(known_hosts)
+    )
+    known_hosts.write_text(
+        f"172.20.86.67 ssh-rsa {blob}\n", encoding="utf-8"
+    )
+    known_hosts.chmod(0o644)
+    with pytest.raises(ValueError, match="ssh-ed25519 exclusively"):
+        security.validate_known_hosts_fingerprint(
+            config,
+            expected="SHA256:" + "a" * 43,
+            expected_host=core.EXPECTED_HOST,
+            expected_path=known_hosts,
+        )
+    known_hosts.chmod(0o666)
+    with pytest.raises(ValueError, match="group/other writable"):
+        security.validate_known_hosts_fingerprint(
+            config,
+            expected="SHA256:" + "a" * 43,
+            expected_host=core.EXPECTED_HOST,
+            expected_path=known_hosts,
         )
 
 
@@ -209,10 +274,11 @@ def test_deploy_launch_status_and_fetch_dry_runs_use_only_alias(
     for argv in network:
         joined = " ".join(argv)
         assert core.SSH_ALIAS in joined
-        assert core.EXPECTED_HOST not in joined
         if argv[:2] == ("ssh", "-G"):
             continue
         assert "-oBatchMode=yes" in argv
+        assert f"-oHostName={core.EXPECTED_HOST}" in argv
+        assert f"-oUser={core.EXPECTED_USER}" in argv
     launch_command = "\n".join(" ".join(argv) for argv in network)
     for name in core.THREAD_LIMIT_ENV:
         assert f"{name}=1" in launch_command
@@ -225,8 +291,9 @@ def _worker_identity(lock_sha: str) -> dict[str, object]:
     return {
         "schema": "negfpy.remote_validation.remote_environment.v1",
         "commit": COMMIT,
+        "source_tree_sha256": SOURCE_SHA256,
         "explicit_lock_sha256": lock_sha,
-        "tree": "a" * 40,
+        "tree": GIT_TREE,
         "hostname": "validation-host",
         "platform": "Linux-test",
         "machine": "x86_64",
@@ -246,19 +313,241 @@ def _prepare_worker_root(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     lock = incoming / "environment-explicit.lock"
     lock.write_text("@EXPLICIT\nsynthetic\n", encoding="utf-8")
     lock_sha = core._sha256(lock)
+    core._atomic_write_json(
+        incoming / "deployment-manifest.json",
+        {
+            "schema": "negfpy.remote_validation.deployment.v2",
+            "source": {"commit": COMMIT, "tree": GIT_TREE, "dirty": False},
+            "environment": {"explicit_lock_sha256": lock_sha},
+        },
+    )
+    core._atomic_write_json(
+        incoming / "environment-manifest.json",
+        {
+            "schema": "negfpy.remote_validation.environment.v2",
+            "explicit_lock_sha256": lock_sha,
+        },
+    )
+    (incoming / "negfpy.bundle").write_bytes(b"synthetic git bundle\n")
+    core._write_sha256sums(
+        incoming,
+        tuple(
+            pathlib.PurePath(name)
+            for name in (
+                "deployment-manifest.json",
+                "environment-explicit.lock",
+                "environment-manifest.json",
+                "negfpy.bundle",
+            )
+        ),
+    )
     artifacts = root / "artifacts"
     (artifacts / "job.lock").mkdir(parents=True)
     (artifacts / "job.lock" / "session").write_text(
         "test-session\n", encoding="utf-8"
     )
     core._atomic_write_json(
-        artifacts / "remote-environment.json",
+        artifacts / "identity" / "remote-environment.json",
         _worker_identity(lock_sha),
     )
     return root, lock_sha
 
 
-def test_worker_sets_resume_paths_and_archives_checksums(
+def _report_digest(document: dict[str, object], *, ensure_ascii: bool) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            document,
+            allow_nan=False,
+            ensure_ascii=ensure_ascii,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_valid_worker_report(
+    *,
+    report_path: pathlib.Path,
+    root: pathlib.Path,
+    lock_sha: str,
+) -> dict[str, object]:
+    artifacts = root / "artifacts"
+    identity = {
+        "git_revision": COMMIT,
+        "source_tree_sha256": SOURCE_SHA256,
+    }
+    provenance = {"identity": identity, "complete": True, "clean": True}
+    outcomes: list[dict[str, object]] = []
+    checkpoint_records: list[dict[str, object]] = []
+    for index in range(13):
+        run_id = f"run-{index:02d}"
+        checkpoint = artifacts / "checkpoints" / f"{run_id}.h5"
+        checkpoint.write_bytes(f"checkpoint {run_id}\n".encode("ascii"))
+        checkpoint_sha = core._sha256(checkpoint)
+        checkpoint_records.append(
+            {
+                "run_id": run_id,
+                "path": str(checkpoint.resolve()),
+                "file_sha256": checkpoint_sha,
+                "actual_file_sha256": checkpoint_sha,
+                "environment_sha256": lock_sha,
+                "valid": True,
+            }
+        )
+        outcomes.append(
+            {
+                "run_id": run_id,
+                "backend": "fft",
+                "status": "converged",
+                "result": {
+                    "method": "scba",
+                    "converged": True,
+                    "diagnostics_passed": True,
+                    "provenance": provenance,
+                },
+            }
+        )
+
+    harmonic_points = [
+        {
+            "label": "base" if index == 0 else f"refinement-{index}",
+            "provenance": provenance,
+        }
+        for index in range(7)
+    ]
+    backend_status = {
+        "serial": {
+            "method": "scba",
+            "converged": True,
+            "diagnostics_passed": True,
+            "effective_backend": "serial",
+            "hilbert_backend": "direct",
+            "environment_sha256": lock_sha,
+            "provenance": provenance,
+        },
+        "threaded": {
+            "method": "scba",
+            "converged": True,
+            "diagnostics_passed": True,
+            "effective_backend": "threaded",
+            "hilbert_backend": "direct",
+            "environment_sha256": lock_sha,
+            "provenance": provenance,
+        },
+        "fft": {
+            "method": "scba",
+            "converged": True,
+            "diagnostics_passed": True,
+            "effective_backend": "fft",
+            "hilbert_backend": "fft",
+            "environment_sha256": lock_sha,
+            "provenance": provenance,
+        },
+    }
+    multidimensional: dict[str, object] = {
+        "schema": "negfpy.anharmonic.multidimensional_dense_toy_release",
+        "schema_version": 4,
+        "protocol": "multidimensional_toy_gate_v2",
+        "protocol_version": 2,
+        "config": {
+            "protocol": "multidimensional_toy_gate_v2",
+            "protocol_version": 2,
+            "profile": "full_preregistered",
+            "certification_eligible": True,
+            "full_physical_ladder_selected": True,
+            "run_preregistered_refinements": True,
+            "run_bounded_backend_validation": True,
+            "solver": {
+                "production_backend": "fft",
+                "production_hilbert_backend": "fft",
+                "surface_gf_method": "analytic_diagonal",
+            },
+        },
+        "release_certified": True,
+        "execution_passed": True,
+        "coarse": False,
+        "topology_validation": {
+            "passed": True,
+            "full_release_count": True,
+            "expected_outcome_count": 13,
+            "observed_outcome_count": 13,
+            "outcomes_exact": True,
+        },
+        "outcomes": outcomes,
+        "harmonic_preflight": {
+            "schema": "negfpy.anharmonic.harmonic_same_grid_preflight",
+            "schema_version": 2,
+            "protocol": "multidimensional_toy_gate_v2",
+            "passed": True,
+            "point_count": 7,
+            "all_seven_archived": True,
+            "required_directional_comparison_count": 4,
+            "critical_comparisons_passed": True,
+            "backend": "fft",
+            "hilbert_backend": "fft",
+            "surface_gf_method": "analytic_diagonal",
+            "environment_sha256": lock_sha,
+            "points": harmonic_points,
+        },
+        "backend_validation": {
+            "schema": "negfpy.anharmonic.bounded_backend_validation",
+            "schema_version": 1,
+            "protocol": "multidimensional_toy_gate_v2",
+            "scope": "bounded_converged_scba_backend_oracle",
+            "passed": True,
+            "full_grid_serial_threaded_comparison_executed": False,
+            "backends_executed": ["serial", "threaded", "fft"],
+            "environment_sha256": lock_sha,
+            "backend_status": backend_status,
+        },
+        "provenance": {**provenance, "passed": True},
+        "checkpoint_evidence": {
+            "passed": True,
+            "completed_outcome_count": 13,
+            "total_outcome_count": 13,
+            "environment_sha256": lock_sha,
+            "records": checkpoint_records,
+        },
+    }
+    multidimensional["report_sha256"] = _report_digest(
+        multidimensional, ensure_ascii=True
+    )
+    report: dict[str, object] = {
+        "schema": "negfpy.anharmonic.production_toy_gate",
+        "schema_version": 4,
+        "summary": {
+            "release_certified": True,
+            "oracle_gate_passed": True,
+            "multidimensional_release_certified": True,
+            "multidimensional_contract_passed": True,
+            "multidimensional_underlying_evidence_complete": True,
+            "cross_platform_identity_consistent": True,
+            "environment_lock_consistent": True,
+            "validation_tier": "release",
+        },
+        "environment_lock": {
+            "passed": True,
+            "open_environment_sha256": lock_sha,
+            "multidimensional_environment_sha256": lock_sha,
+        },
+        "multidimensional_scba": multidimensional,
+        "open_three_mode": {
+            "runs": [
+                {
+                    "name": f"open-{index:02d}",
+                    "environment_lock_sha256": lock_sha,
+                    "provenance": provenance,
+                }
+                for index in range(13)
+            ]
+        },
+    }
+    report["report_sha256"] = _report_digest(report, ensure_ascii=False)
+    core._atomic_write_json(report_path, report)
+    return report
+
+
+def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -275,6 +564,11 @@ def test_worker_sets_resume_paths_and_archives_checksums(
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
         captured["env"] = kwargs["env"]
+        _write_valid_worker_report(
+            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
+            root=root,
+            lock_sha=lock_sha,
+        )
         kwargs["stdout"].write("synthetic success\n")
         return SimpleNamespace(returncode=0)
 
@@ -285,7 +579,7 @@ def test_worker_sets_resume_paths_and_archives_checksums(
     for name in core.THREAD_LIMIT_ENV:
         assert environment[name] == "1"
     assert environment["PATH"].split(os.pathsep)[0] == core.REMOTE_TOOLS_BIN
-    assert environment["NEGFPY_TOY_GATE_RESUME"] == "1"
+    assert "NEGFPY_TOY_GATE_RESUME" not in environment
     assert environment["NEGFPY_VALIDATION_ENV_SHA256"] == lock_sha
     assert pathlib.Path(
         environment["NEGFPY_TOY_GATE_CHECKPOINT_DIR"]
@@ -295,12 +589,35 @@ def test_worker_sets_resume_paths_and_archives_checksums(
     )
     assert status["state"] == "completed"
     assert status["commit"] == COMMIT
+    assert status["report_facts"]["schema_version"] == 4
+    assert status["report_facts"]["protocol_version"] == 2
+    assert status["report_facts"]["multidimensional_outcome_count"] == 13
+    assert status["report_facts"]["checkpoint_count"] == 13
+    assert status["report_facts"]["source_tree_sha256"] == SOURCE_SHA256
     assert not (root / "artifacts" / "job.lock").exists()
     verified = core.verify_sha256sums(root / "artifacts")
     assert "job-status.json" in verified
-    assert "production_toy_gate.log" in verified
-    assert "attempts/attempt-001-status.json" in verified
+    assert "current-attempt.json" in verified
+    assert "attempts/attempt-001/status.json" in verified
+    assert "attempts/attempt-001/production_toy_gate.log" in verified
+    assert "attempts/attempt-001/production_toy_gate.json" in verified
+    assert "attempts/attempt-001/report-facts.json" in verified
+    assert "attempts/attempt-001/checkpoint-index.json" in verified
+    assert "identity/deployment-manifest.json" in verified
+    assert "identity/environment-manifest.json" in verified
+    assert "identity/environment-explicit.lock" in verified
+    assert "identity/identity-manifest.json" in verified
     assert all(not name.startswith("job.lock/") for name in verified)
+    checkpoint_index = json.loads(
+        (root / "artifacts" / "attempts" / "attempt-001" / "checkpoint-index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint_index["count"] == 13
+    assert all(
+        item["artifact_relative_path"].startswith("checkpoints/")
+        for item in checkpoint_index["records"]
+    )
 
 
 def test_worker_identity_drift_is_terminal_and_releases_lock(
@@ -329,10 +646,200 @@ def test_worker_identity_drift_is_terminal_and_releases_lock(
     assert status["returncode"] == 1
     assert not (artifacts / "job.lock").exists()
     assert "attempt environment differs" in (
-        artifacts / "production_toy_gate.log"
+        artifacts / "attempts" / "attempt-001" / "production_toy_gate.log"
     ).read_text(encoding="utf-8")
     verified = core.verify_sha256sums(artifacts)
-    assert "attempts/attempt-001-status.json" in verified
+    assert "attempts/attempt-001/status.json" in verified
+
+
+def test_worker_rejects_hash_valid_but_uncertified_current_report(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+
+    def fake_run(_argv, **kwargs):
+        path = pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"])
+        report = _write_valid_worker_report(
+            report_path=path, root=root, lock_sha=lock_sha
+        )
+        report["summary"]["release_certified"] = False
+        report["report_sha256"] = _report_digest(
+            {key: value for key, value in report.items() if key != "report_sha256"},
+            ensure_ascii=False,
+        )
+        core._atomic_write_json(path, report)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 2
+    artifacts = root / "artifacts"
+    status = json.loads(
+        (artifacts / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["state"] == "failed"
+    assert status["report_facts"] is None
+    assert not (artifacts / "job.lock").exists()
+    assert "report summary gate failed: release_certified" in (
+        artifacts / "attempts" / "attempt-001" / "production_toy_gate.log"
+    ).read_text(encoding="utf-8")
+    core.verify_sha256sums(artifacts)
+
+
+def test_worker_invalidates_stale_root_report_and_checksum_before_attempt(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    artifacts = root / "artifacts"
+    (artifacts / "production_toy_gate.json").write_text(
+        '{"stale":true}\n', encoding="utf-8"
+    )
+    (artifacts / "production_toy_gate.log").write_text(
+        "stale success\n", encoding="utf-8"
+    )
+    (artifacts / "multidimensional_toy_gate_failure.json").write_text(
+        '{"stale_failure":true}\n', encoding="utf-8"
+    )
+    core._write_sha256sums(
+        artifacts,
+        (
+            pathlib.PurePath("production_toy_gate.json"),
+            pathlib.PurePath("production_toy_gate.log"),
+            pathlib.PurePath("multidimensional_toy_gate_failure.json"),
+        ),
+    )
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+
+    def fake_run(_argv, **kwargs):
+        _write_valid_worker_report(
+            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
+            root=root,
+            lock_sha=lock_sha,
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
+    attempt = artifacts / "attempts" / "attempt-001"
+    assert (attempt / "previous-SHA256SUMS").is_file()
+    assert (attempt / "legacy-production_toy_gate.json").is_file()
+    assert (attempt / "legacy-production_toy_gate.log").is_file()
+    assert (
+        attempt / "previous-multidimensional_toy_gate_failure.json"
+    ).is_file()
+    assert not (artifacts / "production_toy_gate.json").exists()
+    current = json.loads(
+        (artifacts / "current-attempt.json").read_text(encoding="utf-8")
+    )
+    assert current["report"] == (
+        "attempts/attempt-001/production_toy_gate.json"
+    )
+
+
+def test_worker_moves_current_runner_failure_sidecar_into_attempt(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+
+    def fake_run(_argv, **kwargs):
+        (root / "artifacts" / "multidimensional_toy_gate_failure.json").write_text(
+            '{"current_failure":true}\n', encoding="utf-8"
+        )
+        kwargs["stdout"].write("synthetic failure\n")
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 1
+    artifacts = root / "artifacts"
+    assert not (artifacts / "multidimensional_toy_gate_failure.json").exists()
+    assert (
+        artifacts
+        / "attempts"
+        / "attempt-001"
+        / "multidimensional_toy_gate_failure.json"
+    ).is_file()
+
+
+def test_worker_keeps_lock_and_never_completes_when_checksum_publication_fails(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+
+    def fake_run(_argv, **kwargs):
+        _write_valid_worker_report(
+            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
+            root=root,
+            lock_sha=lock_sha,
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        core,
+        "_write_sha256sums",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 1
+    artifacts = root / "artifacts"
+    assert (artifacts / "job.lock").is_dir()
+    assert not (artifacts / "SHA256SUMS").exists()
+    status = json.loads(
+        (artifacts / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["state"] == "finalization_failed"
+    assert "disk full" in status["finalization_error"]
+
+
+def test_status_reports_dead_tmux_lock_as_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "check_ssh_alias", lambda _runner: {})
+
+    class Runner:
+        dry_run = False
+
+        def __init__(self) -> None:
+            self.command = ""
+
+        def run(self, argv, **_kwargs):
+            self.command = argv[-1]
+            return core.Completed(tuple(argv), 0, '{"state":"stale_lock"}\n', "")
+
+    runner = Runner()
+    result = operations.status(commit=COMMIT, session=None, runner=runner)
+    assert result["state"] == "stale_lock"
+    assert "has-session" in runner.command
+    assert "elif test -d" in runner.command
 
 
 

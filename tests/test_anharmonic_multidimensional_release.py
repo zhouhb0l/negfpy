@@ -68,14 +68,14 @@ def test_preregistration_preserves_exact_release_ladders_and_directions() -> Non
     assert spec.g_values == (0.0, 0.025, 0.05)
     assert spec.mean_temperature == 0.7
     assert spec.bias_values == (0.0, 0.1, 0.2)
-    assert spec.spacings == (0.05, 0.025, 0.0125)
+    assert spec.spacings == (0.0015625, 0.00078125, 0.000390625)
     assert spec.cutoffs == (5.0, 6.0)
-    assert spec.etas == (0.025, 0.0125, 0.00625)
+    assert spec.etas == (0.003125, 0.0015625, 0.00078125)
     assert spec.mixings == (0.2, 0.1)
 
-    assert full.numerical.spacing == 0.025
+    assert full.numerical.spacing == 0.00078125
     assert full.numerical.cutoff == 5.0
-    assert full.numerical.eta_lead == 0.0125
+    assert full.numerical.eta_lead == 0.0015625
     assert full.numerical.mixing == 0.2
     assert full.field_rtol == 1.0e-8
     assert full.field_atol == 1.0e-12
@@ -91,17 +91,17 @@ def test_preregistration_preserves_exact_release_ladders_and_directions() -> Non
         for label, _ in multidimensional._refinement_points(full)
     }
     assert refinement_labels == {
-        "spacing_0p05",
-        "spacing_0p0125",
+        "spacing_0p0015625",
+        "spacing_0p000390625",
         "cutoff_6",
-        "eta_lead_0p025",
-        "eta_lead_0p00625",
+        "eta_lead_0p003125",
+        "eta_lead_0p00078125",
         "mixing_0p1",
     }
     assert multidimensional._required_refinement_comparison_names(full) == {
-        "half_spacing": "numerical_refinement_spacing_0p0125",
+        "half_spacing": "numerical_refinement_spacing_0p000390625",
         "larger_cutoff": "numerical_refinement_cutoff_6",
-        "half_eta": "numerical_refinement_eta_lead_0p00625",
+        "half_eta": "numerical_refinement_eta_lead_0p00078125",
         "changed_mixing": "numerical_refinement_mixing_0p1",
     }
 
@@ -292,7 +292,7 @@ def test_report_is_strict_json_and_has_a_verified_digest(
     assert document["schema"] == (
         "negfpy.anharmonic.multidimensional_dense_toy_release"
     )
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == 4
     assert not document["config"]["physical_execution_path"][
         "cartesian_sweep"
     ]
@@ -421,14 +421,14 @@ def test_release_refinement_roles_archive_six_but_certify_only_four() -> None:
 
     assert len(all_names) == 6
     assert required_names == {
-        "numerical_refinement_spacing_0p0125",
+        "numerical_refinement_spacing_0p000390625",
         "numerical_refinement_cutoff_6",
-        "numerical_refinement_eta_lead_0p00625",
+        "numerical_refinement_eta_lead_0p00078125",
         "numerical_refinement_mixing_0p1",
     }
     assert all_names - required_names == {
-        "numerical_refinement_spacing_0p05",
-        "numerical_refinement_eta_lead_0p025",
+        "numerical_refinement_spacing_0p0015625",
+        "numerical_refinement_eta_lead_0p003125",
     }
 
 
@@ -526,6 +526,78 @@ def test_certifying_full_run_requires_checkpoint_before_any_solver_call(
     assert calls == 0
 
 
+def test_certifying_preflight_failure_blocks_exact_graph_before_scba(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    solver_calls: list[str] = []
+    environment_sha256 = "a" * 64
+
+    def forbidden_scba(*args: object, **kwargs: object) -> object:
+        solver_calls.append("scba")
+        raise AssertionError("SCBA must not start after preflight failure")
+
+    def forbidden_born(*args: object, **kwargs: object) -> object:
+        solver_calls.append("born")
+        raise AssertionError("Born must not start after preflight failure")
+
+    monkeypatch.setattr(multidimensional, "solve_scba", forbidden_scba)
+    monkeypatch.setattr(
+        multidimensional,
+        "solve_one_shot_born",
+        forbidden_born,
+    )
+    monkeypatch.setattr(
+        multidimensional,
+        "_harmonic_same_grid_preflight",
+        lambda config, environment: {
+            "schema": "negfpy.anharmonic.harmonic_same_grid_preflight",
+            "schema_version": 2,
+            "protocol": "multidimensional_toy_gate_v2",
+            "environment_sha256": environment,
+            "passed": False,
+            "failures": ["planned harmonic preflight failure"],
+        },
+    )
+    monkeypatch.setattr(
+        multidimensional,
+        "_bounded_backend_validation",
+        lambda config, environment: {
+            "schema": "negfpy.anharmonic.bounded_backend_validation",
+            "schema_version": 1,
+            "protocol": "multidimensional_toy_gate_v2",
+            "environment_sha256": environment,
+            "passed": True,
+            "failures": [],
+        },
+    )
+
+    report = run_multidimensional_release_benchmark(
+        full_multidimensional_release_config(),
+        checkpoint_dir=tmp_path / "checkpoints",
+        environment_sha256=environment_sha256,
+    )
+
+    assert solver_calls == []
+    assert len(report.outcomes) == 13
+    assert report.outcomes[0].status == "failed"
+    assert report.outcomes[0].error_type == "ProtocolV2PreflightFailure"
+    assert all(
+        outcome.status == "blocked_by_parent"
+        for outcome in report.outcomes[1:]
+    )
+    assert all(outcome.backend == "fft" for outcome in report.outcomes)
+    assert report.topology_validation["outcomes_exact"]
+    assert report.topology_validation["expected_outcome_count"] == 13
+    assert report.harmonic_preflight["passed"] is False
+    assert report.backend_validation["passed"] is True
+    assert report.harmonic_preflight["failures"] == [
+        "planned harmonic preflight failure"
+    ]
+    assert not report.execution_passed
+    assert not report.release_certified
+
+
 def test_direct_gate_is_strict_for_full_but_preserves_coarse_smoke(
     coarse_report: MultidimensionalReleaseReport,
 ) -> None:
@@ -581,6 +653,31 @@ def test_full_graph_topology_and_references_are_exact_and_tamper_evident(
     original = coarse_report.outcomes[0].result
     assert original is not None
     bonds = original.currents.bond_currents
+    spatial = original.currents.spatial
+    zero_spatial = (
+        None
+        if spatial is None
+        else replace(
+            spatial,
+            eom_exchange_spectra=np.zeros_like(
+                spatial.eom_exchange_spectra
+            ),
+            collision_power_spectra=np.zeros_like(
+                spatial.collision_power_spectra
+            ),
+            eom_layer_exchange=np.zeros_like(spatial.eom_layer_exchange),
+            layer_collision_power=np.zeros_like(
+                spatial.layer_collision_power
+            ),
+            nonlocal_self_energy_eom_cut_correction=np.zeros_like(
+                spatial.nonlocal_self_energy_eom_cut_correction
+            ),
+            corrected_cut_currents=np.zeros_like(
+                spatial.corrected_cut_currents
+            ),
+            continuity_residual=np.zeros_like(spatial.continuity_residual),
+        )
+    )
     zero_currents = replace(
         original.currents,
         left=0.0,
@@ -589,6 +686,7 @@ def test_full_graph_topology_and_references_are_exact_and_tamper_evident(
         bond_currents=(
             None if bonds is None else np.zeros_like(bonds)
         ),
+        spatial=zero_spatial,
     )
     certified_diagnostics = replace(
         original.diagnostics,
@@ -612,30 +710,33 @@ def test_full_graph_topology_and_references_are_exact_and_tamper_evident(
     )
 
     full = full_multidimensional_release_config()
-    noncertifying_full = replace(full, certification_eligible=False)
+    noncertifying_full = replace(
+        full,
+        certification_eligible=False,
+        run_bounded_backend_validation=False,
+    )
     report = run_multidimensional_release_benchmark(noncertifying_full)
-    assert len(report.outcomes) == 14
+    assert len(report.outcomes) == 13
     assert report.outcomes[0].run_id.startswith("direct_zero_")
     assert all(
         outcome.run_id.startswith("path_")
         for outcome in report.outcomes[1:6]
     )
     assert report.outcomes[6].run_id.startswith("born_seed_")
-    assert report.outcomes[7].run_id.startswith("threaded_zero_")
     assert [
         outcome.run_id.rsplit("_", 1)[-1]
-        for outcome in report.outcomes[8:]
+        for outcome in report.outcomes[7:]
     ] == [
-        "0p05",
-        "0p0125",
+        "0p0015625",
+        "0p000390625",
         "6",
-        "0p025",
-        "0p00625",
+        "0p003125",
+        "0p00078125",
         "0p1",
     ]
     assert report.topology_validation["passed"]
     assert not report.checkpoint_evidence["passed"]
-    assert report.topology_validation["expected_outcome_count"] == 14
+    assert report.topology_validation["expected_outcome_count"] == 13
     endpoint_document = report.topology_validation["expected_outcomes"][0]
     assert endpoint_document["point"]["mean_temperature"] == 0.7
     assert endpoint_document["point"]["left_temperature"] == pytest.approx(0.8)

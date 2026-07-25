@@ -7,6 +7,7 @@ import pytest
 from negfpy.anharmonic.diagnostics import (
     antihermitian_residual,
     check_solution,
+    correlation_positivity_violation,
     equilibrium_fdt_residual,
     high_frequency_extrapolation_residual,
     high_frequency_residual,
@@ -35,6 +36,7 @@ from negfpy.anharmonic.types import (
     SolverScale,
 )
 from negfpy.anharmonic.solver import solve_one_shot_born, solve_scba
+from negfpy.anharmonic.toy import pinned_three_polarization_chain
 from negfpy.core.types import Device1D, LeadBlocks
 
 
@@ -307,6 +309,8 @@ def test_check_solution_separates_essential_and_release_only_failures() -> None:
     assert not report.release_certified
     assert any("release:" in failure for failure in report.failures)
     assert report.metrics["recomputed_dyson_residual"] < config.identity_rtol
+    assert report.metrics["sigma_pp_passivity_applicable"] == 1.0
+    assert report.metrics["sigma_total_passivity_applicable"] == 1.0
 
 
 def test_check_solution_fails_essential_scba_current_balance() -> None:
@@ -393,7 +397,7 @@ def test_check_solution_requires_final_scba_history_passes() -> None:
     assert any("history is empty" in value for value in empty.failures)
 
 
-def test_check_solution_gates_available_bond_current_spread() -> None:
+def test_check_solution_gates_harmonic_bonds_for_block_local_sigma() -> None:
     grid = SignedFrequencyGrid(step=1.0, n_positive=1)
     problem = _problem(grid)
     config = SCBAConfig(eta_lead=1.0e-8)
@@ -424,7 +428,15 @@ def test_check_solution_gates_available_bond_current_spread() -> None:
     assert not wrong_shape.passed
     assert any("bond_currents" in value for value in wrong_shape.failures)
     assert not bad.passed
+    assert bad.metrics["sigma_pp_nonlocal_ratio"] == 0.0
+    assert bad.metrics["sigma_pp_block_local_threshold"] == pytest.approx(
+        1.0e-12
+    )
+    assert bad.metrics["harmonic_bond_current_gate_applicable"] == 1.0
     assert bad.metrics["bond_current_abs_spread"] == pytest.approx(2.0e-3)
+    assert bad.metrics["harmonic_bond_current_abs_spread"] == pytest.approx(
+        2.0e-3
+    )
     assert any("bond-current spread" in value for value in bad.failures)
 
 
@@ -495,4 +507,81 @@ def test_undeclared_physical_scale_cannot_be_release_certified() -> None:
     assert any(
         "physical scale source units" in value
         for value in result.diagnostics.failures
+    )
+
+
+def test_correlation_positivity_checks_i_correlation_psd() -> None:
+    grid = SignedFrequencyGrid(step=1.0, n_positive=1)
+    spectrum = _sum_rule_spectrum(grid)
+
+    assert correlation_positivity_violation(spectrum.lesser) == 0.0
+    assert correlation_positivity_violation(spectrum.greater) == 0.0
+
+    indefinite = np.zeros(
+        (grid.n_points, 2, 2),
+        dtype=np.complex128,
+    )
+    indefinite[grid.zero_index, 0, 0] = 1j
+    indefinite[grid.zero_index, 1, 1] = -2j
+    assert correlation_positivity_violation(indefinite) == pytest.approx(0.5)
+
+
+def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
+    device, lead, vertex = pinned_three_polarization_chain(
+        3,
+        spring=(0.1, 0.1, 0.1),
+        pinning=(2.05, 0.61, 0.16),
+        g=0.05,
+    )
+    problem = CubicSCBAProblem(
+        device=device,
+        left=HarmonicReservoir(lead=lead, temperature=0.8),
+        right=HarmonicReservoir(lead=lead, temperature=0.6),
+        vertex=vertex,
+        grid=SignedFrequencyGrid(step=0.00625, n_positive=800),
+    )
+    config = SCBAConfig(
+        eta_lead=0.025,
+        backend="fft",
+        hilbert_backend="fft",
+        surface_gf_method="analytic_diagonal",
+    )
+
+    result = solve_one_shot_born(problem, config)
+    metrics = result.diagnostics.metrics
+
+    assert metrics["equilibrium_fdt_applicable"] == 0.0
+    assert metrics["sigma_pp_passivity_applicable"] == 0.0
+    assert metrics["sigma_pp_passivity_violation"] > 1.0e-10
+
+    off_diagonal_lesser = np.array(result.sigma_pp.lesser, copy=True)
+    diagonal = np.arange(problem.ndof)
+    off_diagonal_lesser[:, diagonal, diagonal] = 0.0
+    assert np.max(np.abs(off_diagonal_lesser)) > 1.0e-6
+
+    for label in ("green", "sigma_pp", "sigma_left", "sigma_right"):
+        assert (
+            metrics[f"{label}_lesser_correlation_positivity_violation"]
+            <= 1.0e-10
+        )
+        assert (
+            metrics[f"{label}_greater_correlation_positivity_violation"]
+            <= 1.0e-10
+        )
+
+    for label in ("green", "sigma_left", "sigma_right"):
+        assert metrics[f"{label}_passivity_applicable"] == 1.0
+        assert metrics[f"{label}_passivity_violation"] <= 1.0e-10
+    assert metrics["sigma_total_passivity_violation"] <= 1.0e-10
+    assert (
+        metrics["sigma_total_lesser_correlation_positivity_violation"]
+        <= 1.0e-10
+    )
+    assert (
+        metrics["sigma_total_greater_correlation_positivity_violation"]
+        <= 1.0e-10
+    )
+    assert not any(
+        "sigma_pp passivity" in failure
+        for failure in result.diagnostics.failures
     )

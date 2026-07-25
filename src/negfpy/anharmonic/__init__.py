@@ -20,6 +20,9 @@ from .current import (
     collision_power,
     contact_heat_current,
     energy_exchange_spectrum,
+    projected_collision_power_spectra,
+    projected_eom_exchange_spectra,
+    self_energy_nonlocal_ratio,
 )
 from .diagnostics import (
     antihermitian_residual,
@@ -65,7 +68,9 @@ from .types import (
     KeldyshSpectrum,
     SCBAConfig,
     SCBAIteration,
+    SIGMA_PP_BLOCK_LOCAL_RTOL,
     SolverScale,
+    SpatialCurrentReport,
     estimate_dense_memory_bytes,
 )
 
@@ -84,8 +89,10 @@ __all__ = [
     "SCBAConfig",
     "SCBAConvergenceError",
     "SCBAIteration",
+    "SIGMA_PP_BLOCK_LOCAL_RTOL",
     "SignedFrequencyGrid",
     "SolverScale",
+    "SpatialCurrentReport",
     "bond_heat_current_spectra",
     "bond_heat_currents",
     "antihermitian_residual",
@@ -98,6 +105,9 @@ __all__ = [
     "cubic_lesser_greater",
     "convert_fc3_values_to_si",
     "energy_exchange_spectrum",
+    "projected_collision_power_spectra",
+    "projected_eom_exchange_spectra",
+    "self_energy_nonlocal_ratio",
     "equilibrium_fdt_residual",
     "estimate_dense_memory_bytes",
     "high_frequency_extrapolation_residual",

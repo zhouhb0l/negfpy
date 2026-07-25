@@ -9,6 +9,7 @@ from typing import Any
 IMMUTABLE_FIELDS = (
     "schema",
     "commit",
+    "source_tree_sha256",
     "explicit_lock_sha256",
     "tree",
     "hostname",

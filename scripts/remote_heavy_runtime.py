@@ -24,9 +24,10 @@ def status(
     selected = core._validate_session(session or _default_session(commit))
     remote = core._remote_shell_dir(commit)
     command = (
-        f"if test -d {remote}/artifacts/job.lock || "
-        f"{core.REMOTE_TMUX} has-session -t {selected} 2>/dev/null; "
+        f"if {core.REMOTE_TMUX} has-session -t {selected} 2>/dev/null; "
         "then printf '{\"state\":\"running\"}\\n'; "
+        f"elif test -d {remote}/artifacts/job.lock; "
+        "then printf '{\"state\":\"stale_lock\"}\\n'; "
         f"elif test -f {remote}/artifacts/job-status.json && "
         f"test -f {remote}/artifacts/SHA256SUMS; "
         f"then cat {remote}/artifacts/job-status.json; "

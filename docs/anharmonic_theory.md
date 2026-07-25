@@ -1,12 +1,13 @@
 # Dense cubic phonon NEGF: conventions and numerical contract
 
 Status: frozen convention specification for the dense `0.1.x` reference
-implementation, 2026-07-24.
+implementation and protocol-v2 toy gate, 2026-07-25.
 
 This document is normative for `negfpy.anharmonic`. It fixes the signs,
 normalizations, units, quadrature, and approximation boundaries used by the
 dense solver. A later optimized backend is correct only if it reproduces this
-reference on overlapping problems.
+reference on overlapping problems. Validation status and remote-run evidence
+are deliberately kept separate in `anharmonic_validation.md`.
 
 ## 1. Coordinates, Hamiltonian, and Green functions
 
@@ -153,6 +154,36 @@ above. It is fixed, not fitted. Reversing the sign of every cubic IFC leaves
 the bubble unchanged, while \(\Psi\mapsto c\Psi\) gives
 \(\Sigma_{pp}^{</>}\mapsto c^2\Sigma_{pp}^{</>}\).
 
+This equation defines the **full nonlocal SCBA** reference: all output blocks
+\((a,b)\) and all internal contractions permitted by the supplied cubic
+vertex are retained. A layer-block-diagonal or atom-diagonal scattering
+self-energy is a different, explicitly named approximation; it is never
+silently substituted for the dense reference.
+
+This distinction is important when comparing with the two Guo papers. The
+production silicon calculation of
+[Guo et al., Phys. Rev. B 102, 195412
+(2020)](https://doi.org/10.1103/PhysRevB.102.195412) retained the diagonal
+slab blocks of the anharmonic scattering self-energy and selected dominant
+terms within each retained block. That is a slab-block-local production
+approximation, not the full dense matrix and not the still more restrictive
+\(3\times3\) atom-diagonal approximation that the paper separately tested.
+The latter was reported to overestimate low-frequency scattering and lower
+the calculated conductance. A future reproduction must therefore first name
+and reproduce the paper's precise slab/block and FC3-support choices, then
+compare them with full support; agreement with the paper-specific calculation
+does not by itself certify the full nonlocal solver.
+
+[Guo et al., Phys. Rev. B 103, 174306
+(2021)](https://doi.org/10.1103/PhysRevB.103.174306) instead made the
+real-space local/nonlocal decomposition explicit: diagonal scattering-matrix
+blocks contribute local spectral exchange, while off-diagonal blocks
+contribute nonlocal exchange. Their interface calculation found that both
+parts matter for low-frequency phonons. This motivates retaining and
+diagnosing off-layer self-energy blocks in the NEGFPy reference. It does not,
+by itself, supply the missing Hamiltonian current operator for a bare cubic
+vertex that crosses a device cut.
+
 Let
 
 \[
@@ -261,12 +292,78 @@ independently, as well as full balance \(J_L+J_R+P_{pp}=0\). The
 frequency-resolved collision spectrum may be nonzero and sign-changing.
 Three-phonon scattering need not conserve phonon number.
 
-The harmonic bond-current expression is a spatial conservation check only
-for onsite or strictly intralayer cubic vertices. An FPU-\(\alpha\)
-bond-cubic vertex transfers energy through an interaction-current operator
-that has not yet been derived in this package. Such calculations are checked
-with contact currents and collision power, and the harmonic bond-current
-field is deliberately omitted.
+For a bare cubic vertex that is onsite or strictly intralayer, NEGFPy also
+records the **harmonic contribution** \(J_c^{h}\) across every layer cut
+\(c\). Whether that contribution is itself conserved depends on the spatial
+support of the *self-consistent self-energy*, not only on the support of the
+bare vertex. The normalized off-layer measure is
+
+\[
+r_{\rm nl}=\left[
+\frac{\sum_{X\in\{r,<,>\}}
+\lVert(\Sigma_{pp}^{X})_{\rm off\mbox{-}layer}\rVert_F^2}
+{\sum_{X\in\{r,<,>\}}\lVert\Sigma_{pp}^{X}\rVert_F^2}
+\right]^{1/2},
+\]
+
+with \(r_{\rm nl}=0\) for a zero self-energy. The structural criterion is
+fixed at `SIGMA_PP_BLOCK_LOCAL_RTOL = 1e-12`; it is independent of a user's
+SCBA residual tolerance. When \(r_{\rm nl}\) is at or below this threshold,
+the raw harmonic bond-current spread and its mismatch with both contact
+currents remain mandatory conservation gates.
+
+Full nonlocal SCBA generally produces off-layer self-energy blocks even from
+an intralayer bare vertex. In that case the raw harmonic bond current is a
+useful diagnostic but is not the complete spatial flux bookkeeping. Define
+the interaction contribution to the projected equation of motion by
+
+\[
+X_{pp}=\Sigma_{pp}^{r}G^<+\Sigma_{pp}^<G^a
+-G^r\Sigma_{pp}^<-G^<\Sigma_{pp}^{a},
+\]
+
+\[
+C_I^{\rm EOM}=\operatorname{Re}\int_0^\infty
+\frac{d\omega}{2\pi}\hbar\omega\,
+\operatorname{Tr}\!\left[P_I X_{pp}\right],
+\]
+
+where \(P_I\) projects onto layer \(I\). For the oriented boundary sequence
+
+\[
+B=(J_L,J_1^h,\ldots,J_{N_L-1}^h,-J_R),
+\]
+
+the discrete equation of motion is
+
+\[
+B_I-B_{I-1}=C_I^{\rm EOM}.
+\]
+
+NEGFPy therefore records the explicitly named
+`nonlocal_self_energy_eom_cut_correction`
+
+\[
+\Delta J_c^{\rm EOM}=-\sum_{I=1}^{c}C_I^{\rm EOM},
+\qquad
+J_c^{\rm corrected}=J_c^h+\Delta J_c^{\rm EOM}.
+\]
+
+For nonlocal \(\Sigma_{pp}\), continuity and the corrected cut currents are
+the spatial gates. The sum of the projected EOM exchange and the independent
+sum of the layer-projected greater/lesser collision powers must each recover
+the global \(P_{pp}\). Individual layer collision powers may be nonzero and
+sign-changing: they describe spatial redistribution, just as the
+frequency-resolved collision spectrum does. Certification gates their global
+sum and the EOM continuity identities, not independent layerwise zeros.
+
+This EOM correction is a decomposition of the nonlocal self-energy's spatial
+exchange. It is **not** a newly derived bare anharmonic current operator. An
+FPU-\(\alpha\) bond-cubic vertex crosses a device cut and requires an
+additional Hamiltonian interaction-current operator that has not been
+derived in this package. Such fixtures continue to use contact currents and
+global collision power only, and their harmonic bond-current field is
+deliberately omitted.
 
 ## 7. One-shot Born and SCBA algorithms
 
@@ -317,6 +414,16 @@ serial exact convolution even if a threaded backend was requested).
 Predicted use above 70% of available memory is rejected unless the caller
 explicitly overrides the guard.
 
+The exact zero-padded FFT convolution and finite-grid Hilbert transform are
+optimized implementations of the same discrete equations. Protocol v2 uses
+FFT/FFT and analytic diagonal contacts for its resolved full-grid production
+graph. Backend equivalence is established by a separate, bounded,
+**converged SCBA** oracle that compares all \(G^{r,<,>}\) and
+\(\Sigma_{pp}^{r,<,>}\) fields and currents from serial/direct,
+threaded/direct, and FFT/FFT calculations. This bounded oracle does not imply,
+and the release report does not claim, that direct or threaded SCBA was run
+on every full production grid.
+
 ## 8. Required identities and certification meaning
 
 The diagnostic layer checks, as applicable,
@@ -335,9 +442,30 @@ G^{</>\dagger}=-G^{</>},\qquad
 G^r(-\omega)=G^r(\omega)^*
 \]
 
-for real real-space IFCs. It also checks passivity of
-\(\operatorname{sgn}(\omega)A(\omega)\) and
-\(\operatorname{sgn}(\omega)\Gamma(\omega)\), the high-frequency limit
+for real real-space IFCs. For every stored lesser and greater correlation
+matrix \(C^{</>}\), it separately checks positive semidefiniteness of
+\(iC^{</>}\) after Hermitian projection. This is the primitive positivity
+condition in the present \(-i\)-times-correlation convention.
+
+Passivity is then applied only where it is mathematically justified:
+
+- \(\operatorname{sgn}(\omega)A_G(\omega)\) for the device Green function;
+- \(\operatorname{sgn}(\omega)\Gamma_\alpha(\omega)\) for each equilibrium
+  harmonic contact;
+- the broadening of the **total** embedded self-energy
+  \(\Sigma_L+\Sigma_R+\Sigma_{pp}\), which is required for stability of the
+  open steady-state solution; and
+- \(\operatorname{sgn}(\omega)\Gamma_{pp}(\omega)\) for the interaction
+  self-energy at equilibrium.
+
+Away from equilibrium,
+\(\Gamma_{pp}=i(\Sigma_{pp}^>-\Sigma_{pp}^<)\) is the difference of two
+positive correlation matrices and need not itself be positive semidefinite.
+Its indefinite eigenvalues are therefore recorded but are not a failure.
+Applying an equilibrium interaction-passivity gate to a nonequilibrium
+steady state would reject physically admissible in/out-scattering balance.
+
+The diagnostic layer also checks the high-frequency limit
 
 \[
 \omega^2G^r(\omega)\longrightarrow I,
@@ -364,11 +492,13 @@ relations without directly evaluating unstable large exponentials.
 `DiagnosticReport.passed` means the essential algebraic and conservation
 checks for that calculated state passed. `release_certified` is stricter: it
 also requires a converged SCBA result, `causal_hilbert`, signed-frequency
-symmetries, passivity, high-frequency and moment quality, and a sufficiently
-small interaction-self-energy tail. Certification refuses solver tolerances
-looser than the locked dense-v0.1 ceilings, fewer than three minimum or
-consecutive iterations, undeclared physical source units, or a mismatch
-between the installed and source-declared package versions. Provenance hashes
+symmetries, correlation positivity, the applicable Green/contact/total and
+equilibrium-interaction passivity gates, high-frequency and moment quality,
+and a sufficiently small interaction-self-energy tail. Certification refuses
+solver tolerances looser than the locked dense-v0.1 ceilings, fewer than three
+minimum or consecutive iterations, undeclared physical source units, or a
+mismatch between the installed and source-declared package versions.
+Provenance hashes
 the exact lesser/greater continuation state actually consumed (the retarded
 component is rebuilt), method, problem, configuration, and source tree.
 Per-run certification does not replace

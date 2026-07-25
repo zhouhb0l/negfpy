@@ -1,7 +1,8 @@
 # Anharmonic NEGF validation and release checklist
 
 Status: executable `0.1.0.dev0` validation contract and implementation snapshot,
-2026-07-24.
+2026-07-25. Protocol v2 is implemented but has not yet completed its clean
+remote release rerun.
 
 This document distinguishes three things that should not be conflated:
 
@@ -102,12 +103,15 @@ Run on every change:
 - direct principal-value reconstruction;
 - an independently enumerated exact-bin mode-space Born/FGR oracle, including
   the dynamic bubble shift and the spectral HWHM/FWHM convention;
-- algebraic symmetry, passivity, FDT, high-frequency, and moment fixtures;
+- algebraic symmetry, lesser/greater correlation positivity, conditional
+  passivity, FDT, high-frequency, and moment fixtures;
 - zero-vertex, weak-cubic, and alternate-initial-state SCBA;
 - serial/threaded equality;
-- contact balance, collision power, and supported bond-current checks;
+- contact balance, collision power, block-local raw harmonic-bond checks, and
+  full-nonlocal EOM-corrected cut-current checks;
 - independent recomputation of contacts, Dyson/Keldysh fields, the unmixed
-  cubic fixed point, currents, and terminal convergence history before a
+  cubic fixed point, currents, projected collision/EOM spectra, normalized
+  off-layer self-energy weight, and terminal convergence history before a
   result can be certified;
 - complete partial result on nonconvergence;
 - dense memory preflight.
@@ -123,8 +127,11 @@ Run on pinned hardware and environments:
 - the eta-free continuum/open-system linewidth and shift oracle against the
   contact-dressed production Born calculation;
 - the full preregistered three-layer, three-polarization SCBA release case,
-  including zero/Born starts, continuation, serial/threaded equality,
-  conservation, and all four independent refinement controls;
+  including the exact 13-outcome FFT graph, zero/Born starts, continuation,
+  conservation, all six archived numerical points, and the four directional
+  refinement gates;
+- the seven-point harmonic preflight and the bounded converged
+  serial/direct, threaded/direct, and FFT/FFT SCBA backend oracle;
 - three-mode decay and combination spectra, including spontaneous decay at
   zero temperature;
 - mode-space Fermi-golden-rule linewidth and frequency-shift comparisons;
@@ -142,12 +149,61 @@ dependency versions, and input hashes for:
 - the pinned phono3py Si-PBEsol dataset and bulk linewidth oracle;
 - silicon-film and Si/Ge interface benchmarks once those solvers exist;
 - interrupted/restarted and uninterrupted production calculations;
-- representative serial/threaded, dense/sparse, and direct/FFT comparisons
-  as those backends are added.
+- the bounded full-field serial/threaded/FFT SCBA oracle and, later,
+  dense/sparse and dense/selected-GF comparisons. Protocol v2 makes no claim
+  that direct or threaded SCBA was executed on every full production grid.
 
 Wall-time regressions above 15% and peak-memory regressions above 10% on the
 pinned benchmark host are flagged. Performance changes may not change
 physical support, convergence thresholds, or conservation tolerances.
+
+### Locked protocol-v2 production graph
+
+The resolved three-layer/nine-DOF base point is
+
+\[
+\Delta\omega=0.00078125,\quad
+\omega_{\rm cut}=5,\quad
+\eta_{\rm lead}=0.0015625,\quad
+m=0.2.
+\]
+
+The preregistered ladders are exactly
+
+\[
+\Delta\omega=(0.0015625,0.00078125,0.000390625),
+\]
+
+\[
+\eta_{\rm lead}=(0.003125,0.0015625,0.00078125),
+\]
+
+with cutoffs \((5,6)\) and mixings \((0.2,0.1)\). The base plus the six
+independently varied numerical points form a seven-point harmonic preflight.
+All seven points and all six comparisons must be archived. Four directions
+are certification-critical: half spacing \(0.000390625\), larger cutoff 6,
+half eta \(0.00078125\), and changed mixing 0.1. The coarser spacing
+\(0.0015625\) and doubled eta \(0.003125\) are archived diagnostic points;
+they are not silently dropped or promoted to directional gates.
+
+After the harmonic preflight and bounded backend oracle pass, the heavy SCBA
+graph contains exactly 13 FFT outcomes:
+
+1. the hardest \((g,\Delta T)=(0.05,0.2)\) independently launched
+   zero-start endpoint (the graph's `direct-zero` label describes its
+   initialization path, not the convolution backend);
+2. five L-shaped continuation outcomes,
+   \((0,0)\rightarrow(0.025,0)\rightarrow(0.05,0)
+   \rightarrow(0.05,0.1)\rightarrow(0.05,0.2)\);
+3. one independent Born-seeded endpoint; and
+4. six independently zero-started numerical-refinement outcomes.
+
+Every full-grid production outcome uses exact zero-padded FFT convolution,
+the FFT implementation of the same finite-grid principal-value sum, and
+analytic diagonal contacts. Serial/direct, threaded/direct, and FFT/FFT are
+compared separately on a bounded, converged SCBA oracle at the unchanged
+\(10^{-10}\) field tolerance. This design provides backend evidence without
+claiming an infeasible full-grid direct or threaded campaign.
 
 ## 3. Numeric acceptance gates
 
@@ -160,17 +216,18 @@ physical support, convergence thresholds, or conservation tolerances.
 | Retarded reconstruction | Analytic Hilbert pair, spectral identity, Kramers--Kronig real part | Direct principal-value fixture below \(10^{-11}\) |
 | Equilibrium | Gapped contact-only and interacting chains, at zero and finite temperature | KMS/FDT/Keldysh residuals below \(10^{-8}\); \(|J_\alpha|<10^{-10}J_0\) |
 | SCBA fixed point | One-site and three-to-five-layer chains, two initial states | Unmixed \(\Sigma^{r,<,>}\) and \(G\) residuals below \(10^{-8}\) for three consecutive iterations; same fixed point |
-| Conservation | Local/intralayer and bond-cubic fixtures | \(|J_L+J_R|\), \(|P_{pp}|\le\max(10^{-10}J_0,10^{-5}\max(|J_L|,|J_R|))\) |
-| Spectral quality | Passivity, signed-frequency symmetry, high-frequency limit, first moment | Eigenvalue floor no worse than \(-10^{-10}\) of the spectral scale; moment error below \(5\times10^{-3}\) |
+| Conservation | Block-local and full-nonlocal intralayer fixtures; cross-cut FPU fixture | \(|J_L+J_R|\) and \(|P_{pp}|\) obey the locked current tolerance. Projected EOM and layer-collision sums recover global power; individual layers may redistribute energy. Raw harmonic bonds gate only when \(r_{\rm nl}\le10^{-12}\); otherwise EOM-corrected cuts gate. Cross-cut FPU has no spatial gate yet. |
+| Spectral quality | Correlation positivity; Green/contact/total stability; equilibrium interaction passivity; signed-frequency symmetry, high-frequency limit, first moment | \(iC^{</>}\) PSD floor no worse than \(-10^{-10}\) of scale; NESS \(\Gamma_{pp}\) may be indefinite; moment error below \(5\times10^{-3}\) |
 | Refinement | Independent half-spacing, larger-cutoff, eta-at-most-half, and changed-mixing runs | Current and internally derived selected-peak changes below \(5\times10^{-3}\); outer interaction-self-energy tail below \(10^{-6}\) |
 | Weak coupling | Every released cubic toy point | Linewidth and shift each below 10% of the associated mode frequency |
-| Optimized backends | Serial/threaded and later dense/sparse, direct/FFT, dense/selected GF | Field relative error below \(10^{-10}\), scale-aware absolute error below \(10^{-12}\); unchanged conservation gate |
+| Optimized backends | Bounded converged serial/direct, threaded/direct, and FFT/FFT SCBA; later dense/sparse and dense/selected GF | Field relative error below \(10^{-10}\), scale-aware absolute error below \(10^{-12}\); unchanged conservation gate; no full-grid direct/threaded claim |
 | Restart | Continuous/interrupted runs and backend/worker change | Near-bitwise serial result and cross-backend error below \(10^{-10}\) |
 
 For FPU-\(\alpha\) bond interactions, the conservation gate uses contact
-currents and collision power. Spatial constancy of the harmonic bond-current
-formula is required only for onsite or strictly intralayer cubic vertices,
-until an interaction-current operator is derived.
+currents and collision power. Its bare cubic vertex crosses a layer cut, so
+the missing Hamiltonian interaction-current operator is still required. The
+`nonlocal_self_energy_eom_cut_correction` applies only when the bare vertex is
+onsite/intralayer; it is not a substitute for that FPU operator.
 
 ## 4. Real-material gates
 
@@ -209,15 +266,21 @@ Every archived result must identify:
 - method (`born` or `scba`) and retarded strategy;
 - all Green-function, Fourier, vertex, current-sign, and frequency
   conventions;
+- self-energy support (`full_nonlocal`, slab/block-local, or atom-diagonal),
+  the normalized off-layer \(\Sigma_{pp}\) ratio, the fixed \(10^{-12}\)
+  structural threshold, and which raw/corrected spatial-current gate applied;
 - frequency grid, cutoff, rectangle weight, temperatures, and `eta_lead`;
 - explicit zero `eta_device`;
 - \(\omega_0\), \(\hbar\), source units, conversion factors, and current
   scale;
 - dtype, backend, worker count, memory estimate, and host information;
+- protocol and schema versions, exact graph topology, harmonic-preflight
+  scope, and whether backend equality was bounded or full-grid;
 - source revision and dependency versions;
 - complete hashes for IFCs, geometry, mappings, and configuration;
 - mixed interaction self-energy used for continuation/restart;
-- complete convergence history and named diagnostic metrics;
+- complete convergence history, projected EOM/collision spectra, and named
+  diagnostic metrics;
 - whether the result and the enclosing release passed their distinct gates.
 
 Changing \(\omega_0\), mixing, or worker count must not change the converted
@@ -253,8 +316,10 @@ Implemented and covered by automated tests:
 - zero and Born-seeded SCBA starts for both one- and three-layer interacting
   chains, agreeing in every \(\Sigma_{pp}^{r,<,>}\) and \(G^{r,<,>}\) field
   at \(10^{-8}\)-level tolerances after three passing iterations;
-- contact current, collision power, and harmonic bond current where its
-  topology is valid;
+- contact current and collision power; raw harmonic bond current for
+  block-local \(\Sigma_{pp}\); and the explicitly named EOM nonlocal-
+  self-energy cut correction for full-nonlocal \(\Sigma_{pp}\) generated by
+  onsite or intralayer bare vertices;
 - pinned scalar, three-polarization intralayer, and FPU-\(\alpha\) toy
   builders;
 - exact-bin three-mode decay/combination fixtures with hand-derived Bose
@@ -285,6 +350,11 @@ Implemented and covered by automated tests:
   hashes, Git and package-version checks, internally derived spectral-peak
   measurements, directional coverage of all four required controls, and
   separate numerical-refinement and release-certification outcomes;
+- private atomic HDF5 outcome checkpoints containing the mixed
+  \(\Sigma_{pp}^{</>}\), histories, timings, status, and source/environment/
+  problem/configuration hashes. Resume rejects mismatched hashes and
+  recomputes \(G\), currents, and diagnostics instead of trusting cached
+  derived fields;
 - a nightly nonzero-cubic four-control matrix with independent fixed-eta
   spacing refinement and fixed-grid eta refinement. On its 513-point
   reference grid, \(\eta_{\rm lead}=0.015\to0.0075\) changes the interacting
@@ -293,8 +363,10 @@ Implemented and covered by automated tests:
   \(3.12\times10^{-4}\). Every run passes its spectral moment and per-result
   gates, and the fitted interaction-broadening peak frequency changes by
   less than \(5\times10^{-3}\);
-- algebraic, symmetry, passivity, FDT, spectral-moment, high-frequency,
-  conservation, memory, and deterministic-backend tests;
+- algebraic and symmetry identities; separate \(iC^{</>}\) correlation
+  positivity; Green/contact/total stability; equilibrium-only interaction
+  passivity; FDT, spectral-moment, high-frequency, conservation, memory, and
+  deterministic-backend tests;
 - a harmonic IFC audit for reciprocity, acoustic and rotational sum-rule
   residuals, q-space Hermiticity, mapping consistency, and sampled stability;
 - full and compact phono3py `fc3.hdf5` ingestion foundations, including
@@ -309,28 +381,77 @@ Implemented and covered by automated tests:
   bubble-plus-tadpole agreement within 1% at 100/300/500 K, and selective
   mean-field agreement within 1% at 300/400 K;
 
+### First remote attempt: provisional failure evidence
+
+The first workstation attempt is retained as a diagnostic failure, not as
+toy-model validation. It used commit
+`d05b4404af98e650e712b4ed7afd68705c1014f2`, the superseded protocol and
+report schema, and the old serial grid
+\(\Delta\omega=0.025\), \(\eta_{\rm lead}=0.0125\), cutoff 5
+(401 signed-frequency points). The attempt began on 2026-07-25 and stopped
+after 200 iterations and 2481.593 s.
+
+The terminal fixed-point and global-conservation numbers were already small:
+
+- self-energy residual: \(4.616316\times10^{-16}\);
+- Green-function residual: \(1.44047\times10^{-17}\);
+- contact imbalance: \(3.46945\times10^{-18}\);
+- \(P_{pp}=7.05099\times10^{-19}\);
+- \(J_L=0.01757079082964086\) and
+  \(J_R=-0.017570790829640855\).
+
+It nevertheless failed two substantive gates. The raw harmonic bond currents
+were
+\([0.017558902896426334,0.017559378234576487]\), with spread
+\(4.75338\times10^{-7}\) and maximum contact mismatch
+\(1.188793\times10^{-5}\), both above the locked current tolerance
+\(1.757079\times10^{-7}\). The old report also had a genuine coarse-grid
+Green spectral-moment error of 0.0704865, above 0.005. Separately, it reported
+a \(5.992684\times10^{-6}\) nonequilibrium \(\Gamma_{pp}\) passivity failure
+against \(10^{-10}\); protocol v2 removes that invalid NESS-only gate while
+retaining correlation positivity and the Green/contact/total stability gates.
+
+The postmortem measured a full-self-energy nonlocal ratio of approximately
+0.46. On this archived field, the projected equation-of-motion exchange
+exactly closes the raw bond/contact mismatch. This is evidence for the
+diagnosis and for the revised spatial-current contract, not a validation
+result; the result must be reproduced by the clean protocol-v2 rerun. Every
+remaining outcome in the superseded graph was archived as blocked, so no
+continuation, backend comparison, or numerical-refinement claim was obtained
+from this attempt.
+
 Still required before declaring the complete `0.1.0` research release
 validated:
 
-- archive the already passing fine open-system ladder in one combined report.
-  The initial \(\Delta\omega=0.015,\eta_{\rm lead}=0.001\) diagnostic failed
-  by 42.6% in shift and 10.5% in linewidth because the regulator was much
-  narrower than the grid. With the prefactor unchanged, the production API
-  at \(\Delta\omega=7.0\times10^{-5}\),
+- archive the already passing fine open-system ladder in the combined strict
+  report. The initial \(\Delta\omega=0.015,\eta_{\rm lead}=0.001\) diagnostic
+  failed by 42.6% in shift and 10.5% in linewidth because the regulator was
+  much narrower than the grid. With the prefactor unchanged, the production
+  API at \(\Delta\omega=7.0\times10^{-5}\),
   \(\eta_{\rm lead}=4.5\times10^{-5}\), and cutoff \(5.00997\) agrees with
   the eta-free oracle at \(T=0.7\) to 0.0776% in shift and 0.0278% in
   linewidth. Half spacing, half eta, and cutoff 6 were varied independently;
   the largest observable change was 0.162%, below the 0.5% gate. At \(T=0\),
   the base errors are 0.318% and 0.0269%, and spontaneous decay remains
-  nonzero. Every executed fine point passed the production diagnostics;
+  nonzero. These local results remain useful evidence, but they do not certify
+  the combined campaign;
 - execute the remaining signed-coupling matrix in the strict combined
   archive. Sign invariance and exact \(g^2\) scaling already pass both direct
   and FFT primitive tests, but the release report deliberately requires the
   full run-object coverage;
-- execute and archive the expensive full nine-DOF SCBA profile. Its complete
-  continuation and refinement graph is implemented, but only the
-  non-certifying PR profile has been run in this snapshot;
-- archive the combined strict-JSON release report on a pinned environment.
+- on one clean candidate revision and pinned environment, run and archive the
+  seven-point harmonic preflight, bounded converged serial/direct--threaded/
+  direct--FFT/FFT oracle, and all 13 FFT production outcomes without dropping
+  or retuning failures;
+- demonstrate interrupted/resumed equivalence with the atomic HDF5
+  checkpoint path and mirror all checkpoints, logs, manifests, and final
+  artifacts with verified checksums;
+- produce one strict combined report with clean identical provenance and
+  `release_certified=true`.
+
+Until those items pass, `0.1.0` remains **unvalidated**. Neither the prior
+fine open-system evidence nor the postmortem closure of the failed remote
+field changes that release status.
 
 Historical extensions are deliberately absent from this blocker list.
 Mingo is frozen as an unresolved historical reproduction after at most four
@@ -349,8 +470,10 @@ Not yet claimed by this snapshot:
   linewidths (`0.2.0`);
 - sparse quasi-1D real-material SCBA (`0.3.0`);
 - transverse-momentum-coupled SCBA (`0.4.0`);
-- silicon-film or Si/Ge paper reproduction, HDF5 restart, or production
-  performance certification (`1.0.0`).
+- silicon-film or Si/Ge paper reproduction, release-certified restart
+  equivalence, or production performance certification (`1.0.0`). The
+  private atomic HDF5 mechanism exists, but the required remote interruption
+  campaign has not passed.
 
 Passing the current unit suite is therefore evidence for the dense numerical
 foundation, not evidence that the later real-material milestones are

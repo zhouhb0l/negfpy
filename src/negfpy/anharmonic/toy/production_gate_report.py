@@ -47,7 +47,7 @@ Array = np.ndarray
 ValidationTier = Literal["pull_request", "release"]
 
 _SCHEMA = "negfpy.anharmonic.production_toy_gate"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _LOCKED_TEMPERATURES = (0.0, 0.7)
 _LOCKED_ABSOLUTE_COUPLINGS = (0.01, 0.02)
 _LOCKED_SIGNED_COUPLINGS = (-0.02, -0.01, 0.0, 0.01, 0.02)
@@ -1130,11 +1130,272 @@ def _multidimensional_contract_passed(
         and archive.get("expected_comparison_names")
         == archive.get("observed_comparison_names")
     )
+    config_document = document.get("config")
+    checkpoint_evidence = document.get("checkpoint_evidence", {})
+    checkpoint_environment_sha256 = (
+        checkpoint_evidence.get("environment_sha256")
+        if isinstance(checkpoint_evidence, Mapping)
+        else None
+    )
+    multidimensional_provenance_document = document.get("provenance", {})
+    multidimensional_identity = (
+        multidimensional_provenance_document.get("identity")
+        if isinstance(multidimensional_provenance_document, Mapping)
+        else None
+    )
+    multidimensional_revision = (
+        multidimensional_identity.get("git_revision")
+        if isinstance(multidimensional_identity, Mapping)
+        else None
+    )
+    exact_release_revision = bool(
+        isinstance(multidimensional_revision, str)
+        and len(multidimensional_revision) == 40
+        and all(
+            character in "0123456789abcdef"
+            for character in multidimensional_revision
+        )
+    )
+    environment_evidence_valid = bool(
+        _is_sha256(checkpoint_environment_sha256)
+        and isinstance(checkpoint_evidence, Mapping)
+        and checkpoint_evidence.get("passed") is True
+    )
+    harmonic_preflight = document.get("harmonic_preflight")
+    harmonic_points = (
+        harmonic_preflight.get("points", ())
+        if isinstance(harmonic_preflight, Mapping)
+        else ()
+    )
+    harmonic_comparisons = (
+        harmonic_preflight.get("comparisons", ())
+        if isinstance(harmonic_preflight, Mapping)
+        else ()
+    )
+    harmonic_preflight_passed = bool(
+        isinstance(harmonic_preflight, Mapping)
+        and harmonic_preflight.get("schema_version") == 2
+        and harmonic_preflight.get("environment_sha256")
+        == checkpoint_environment_sha256
+        and harmonic_preflight.get("protocol")
+        == "multidimensional_toy_gate_v2"
+        and harmonic_preflight.get("scope")
+        == "base_plus_six_preregistered_numerical_points"
+        and harmonic_preflight.get("point_count") == 7
+        and harmonic_preflight.get("all_seven_archived") is True
+        and len(harmonic_points) == 7
+        and all(
+            isinstance(point, Mapping)
+            and point.get("passed") is True
+            and point.get("environment_sha256")
+            == checkpoint_environment_sha256
+            and isinstance(point.get("field_sha256"), Mapping)
+            and len(point["field_sha256"]) == 9
+            and all(
+                _is_sha256(value)
+                for value in point["field_sha256"].values()
+            )
+            and isinstance(point.get("input_hashes"), Mapping)
+            and _REQUIRED_INPUT_HASHES.issubset(point["input_hashes"])
+            and all(
+                _is_sha256(point["input_hashes"][name])
+                for name in _REQUIRED_INPUT_HASHES
+            )
+            and isinstance(point.get("provenance"), Mapping)
+            and point["provenance"].get("complete") is True
+            and point["provenance"].get("clean") is True
+            and point["provenance"].get("identity")
+            == multidimensional_identity
+            for point in harmonic_points
+        )
+        and len(harmonic_comparisons) == 6
+        and sum(
+            isinstance(item, Mapping)
+            and item.get("certification_critical") is True
+            for item in harmonic_comparisons
+        )
+        == 4
+        and all(
+            item.get("passed") is True
+            for item in harmonic_comparisons
+            if isinstance(item, Mapping)
+            and item.get("certification_critical") is True
+        )
+        and isinstance(harmonic_preflight.get("provenance"), Mapping)
+        and harmonic_preflight["provenance"].get("complete_and_clean")
+        is True
+        and harmonic_preflight["provenance"].get("consistent") is True
+        and harmonic_preflight["provenance"].get("identity")
+        == multidimensional_identity
+        and harmonic_preflight.get("passed") is True
+    )
+    backend_validation = document.get("backend_validation")
+    backend_status = (
+        backend_validation.get("backend_status", {})
+        if isinstance(backend_validation, Mapping)
+        else {}
+    )
+    backend_comparisons = (
+        backend_validation.get("comparisons", ())
+        if isinstance(backend_validation, Mapping)
+        else ()
+    )
+    backend_validation_passed = bool(
+        isinstance(backend_validation, Mapping)
+        and backend_validation.get("environment_sha256")
+        == checkpoint_environment_sha256
+        and backend_validation.get("protocol")
+        == "multidimensional_toy_gate_v2"
+        and backend_validation.get("scope")
+        == "bounded_converged_scba_backend_oracle"
+        and backend_validation.get(
+            "full_grid_serial_threaded_comparison_executed"
+        )
+        is False
+        and backend_validation.get("backends_executed")
+        == ["serial", "threaded", "fft"]
+        and isinstance(backend_status, Mapping)
+        and set(backend_status) == {"serial", "threaded", "fft"}
+        and all(
+            isinstance(status, Mapping)
+            and isinstance(status.get("provenance"), Mapping)
+            and status.get("method") == "scba"
+            and status.get("converged") is True
+            and isinstance(status.get("iterations"), int)
+            and status.get("iterations", 0) >= 3
+            and isinstance(status.get("elapsed_seconds"), (float, int))
+            and math.isfinite(float(status["elapsed_seconds"]))
+            and float(status["elapsed_seconds"]) >= 0.0
+            and status.get("environment_sha256")
+            == checkpoint_environment_sha256
+            and isinstance(status.get("field_sha256"), Mapping)
+            and len(status["field_sha256"]) == 6
+            and all(
+                _is_sha256(value)
+                for value in status["field_sha256"].values()
+            )
+            and isinstance(status.get("input_hashes"), Mapping)
+            and _REQUIRED_INPUT_HASHES.issubset(status["input_hashes"])
+            and all(
+                _is_sha256(status["input_hashes"][name])
+                for name in _REQUIRED_INPUT_HASHES
+            )
+            for status in backend_status.values()
+        )
+        and len(backend_comparisons) == 2
+        and all(
+            isinstance(item, Mapping) and item.get("passed") is True
+            for item in backend_comparisons
+        )
+        and isinstance(backend_validation.get("provenance"), Mapping)
+        and backend_validation["provenance"].get("complete_and_clean")
+        is True
+        and backend_validation["provenance"].get("consistent") is True
+        and all(
+            status["provenance"].get("identity")
+            == multidimensional_identity
+            for status in backend_status.values()
+        )
+        and backend_validation.get("passed") is True
+    )
+    topology = document.get("topology_validation")
+    observed_topology_rows = (
+        topology.get("observed_outcomes", ())
+        if isinstance(topology, Mapping)
+        else ()
+    )
+    observed_topology_rows_valid = bool(
+        isinstance(observed_topology_rows, Sequence)
+        and not isinstance(observed_topology_rows, (str, bytes))
+        and len(observed_topology_rows) == 13
+        and all(isinstance(row, Mapping) for row in observed_topology_rows)
+    )
+    observed_topology_ids = (
+        {str(row.get("run_id")) for row in observed_topology_rows}
+        if observed_topology_rows_valid
+        else set()
+    )
+    outcome_certification = document.get("outcome_certification")
+    required_outcome_ids = outcome_certification.get(
+        "required_run_ids",
+        (),
+    ) if isinstance(outcome_certification, Mapping) else ()
+    diagnostic_outcome_ids = outcome_certification.get(
+        "diagnostic_only_run_ids",
+        (),
+    ) if isinstance(outcome_certification, Mapping) else ()
+    outcome_records = outcome_certification.get(
+        "records",
+        (),
+    ) if isinstance(outcome_certification, Mapping) else ()
+    outcome_certification_passed = bool(
+        isinstance(outcome_certification, Mapping)
+        and outcome_certification.get("applicable") is True
+        and outcome_certification.get("coverage") is True
+        and outcome_certification.get("passed") is True
+        and isinstance(required_outcome_ids, Sequence)
+        and not isinstance(required_outcome_ids, (str, bytes))
+        and len(required_outcome_ids) == 11
+        and len(set(required_outcome_ids)) == 11
+        and isinstance(diagnostic_outcome_ids, Sequence)
+        and not isinstance(diagnostic_outcome_ids, (str, bytes))
+        and len(diagnostic_outcome_ids) == 2
+        and len(set(diagnostic_outcome_ids)) == 2
+        and set(required_outcome_ids).isdisjoint(diagnostic_outcome_ids)
+        and set(required_outcome_ids) | set(diagnostic_outcome_ids)
+        == observed_topology_ids
+        and isinstance(outcome_records, Sequence)
+        and not isinstance(outcome_records, (str, bytes))
+        and len(outcome_records) == 11
+        and all(isinstance(record, Mapping) for record in outcome_records)
+        and {record.get("run_id") for record in outcome_records}
+        == set(required_outcome_ids)
+        and all(
+            record.get("result_available") is True
+            and record.get("converged") is True
+            and record.get("release_certified") is True
+            for record in outcome_records
+        )
+    )
+    fft_topology_passed = bool(
+        isinstance(topology, Mapping)
+        and topology.get("passed") is True
+        and topology.get("expected_outcome_count") == 13
+        and topology.get("observed_outcome_count") == 13
+        and topology.get("full_release_count") is True
+        and observed_topology_rows_valid
+        and len(observed_topology_ids) == 13
+        and all(
+            row.get("backend") == "fft"
+            for row in observed_topology_rows
+        )
+        and not any(
+            comparison.kind == "serial_vs_threaded"
+            for comparison in report.comparisons
+        )
+    )
     return bool(
-        config.profile == "full_preregistered"
+        document.get("schema_version") == 4
+        and document.get("protocol") == "multidimensional_toy_gate_v2"
+        and document.get("protocol_version") == 2
+        and environment_evidence_valid
+        and exact_release_revision
+        and isinstance(config_document, Mapping)
+        and config_document.get("protocol")
+        == "multidimensional_toy_gate_v2"
+        and config_document.get("protocol_version") == 2
+        and config.profile == "full_preregistered"
         and config.certification_eligible
         and config.full_physical_ladder_selected
         and config.run_preregistered_refinements
+        and config.run_bounded_backend_validation
+        and config.production_backend == "fft"
+        and config.production_hilbert_backend == "fft"
+        and config.surface_gf_method == "analytic_diagonal"
+        and harmonic_preflight_passed
+        and backend_validation_passed
+        and outcome_certification_passed
+        and fft_topology_passed
         and _tuple_close(
             spec.polarization_frequencies,
             (1.5, 0.9, 0.6),
@@ -1145,13 +1406,19 @@ def _multidimensional_contract_passed(
         and _tuple_close(spec.g_values, (0.0, 0.025, 0.05))
         and _close(spec.mean_temperature, 0.7)
         and _tuple_close(spec.bias_values, (0.0, 0.1, 0.2))
-        and _tuple_close(spec.spacings, (0.05, 0.025, 0.0125))
+        and _tuple_close(
+            spec.spacings,
+            (0.0015625, 0.00078125, 0.000390625),
+        )
         and _tuple_close(spec.cutoffs, (5.0, 6.0))
-        and _tuple_close(spec.etas, (0.025, 0.0125, 0.00625))
+        and _tuple_close(
+            spec.etas,
+            (0.003125, 0.0015625, 0.00078125),
+        )
         and _tuple_close(spec.mixings, (0.2, 0.1))
-        and _close(numerical.spacing, 0.025)
+        and _close(numerical.spacing, 0.00078125)
         and _close(numerical.cutoff, 5.0)
-        and _close(numerical.eta_lead, 0.0125)
+        and _close(numerical.eta_lead, 0.0015625)
         and _close(numerical.mixing, 0.2)
         and refinement_directions_passed
         and all_six_archived
@@ -1608,6 +1875,31 @@ def build_production_toy_gate_report(
             _WEAK_COUPLING_LIMIT,
         )
     )
+    open_revision = (
+        open_identity.get("git_revision")
+        if isinstance(open_identity, Mapping)
+        else None
+    )
+    exact_release_revision_passed = bool(
+        validation_tier != "release"
+        or (
+            isinstance(open_revision, str)
+            and len(open_revision) == 40
+            and all(
+                character in "0123456789abcdef"
+                for character in open_revision
+            )
+            and isinstance(multidimensional_provenance, Mapping)
+            and isinstance(
+                multidimensional_provenance.get("identity"),
+                Mapping,
+            )
+            and multidimensional_provenance["identity"].get(
+                "git_revision"
+            )
+            == open_revision
+        )
+    )
     cross_platform_identity_consistent = bool(
         provenance_complete
         and code_identity_consistent
@@ -1615,16 +1907,50 @@ def build_production_toy_gate_report(
         and environment_lock["passed"]
         and open_identity == multidimensional_provenance.get("identity")
     )
+    harmonic_preflight_document = multidimensional_document.get(
+        "harmonic_preflight",
+        {},
+    )
+    multidimensional_harmonic_preflight_passed = bool(
+        isinstance(harmonic_preflight_document, Mapping)
+        and harmonic_preflight_document.get("passed") is True
+        and harmonic_preflight_document.get("all_seven_archived") is True
+    )
+    backend_validation_document = multidimensional_document.get(
+        "backend_validation",
+        {},
+    )
+    multidimensional_backend_validation_passed = bool(
+        isinstance(backend_validation_document, Mapping)
+        and backend_validation_document.get("passed") is True
+        and backend_validation_document.get(
+            "full_grid_serial_threaded_comparison_executed"
+        )
+        is False
+        and backend_validation_document.get("scope")
+        == "bounded_converged_scba_backend_oracle"
+    )
+    outcome_certification_document = multidimensional_document.get(
+        "outcome_certification",
+        {},
+    )
+    multidimensional_outcome_certification_passed = bool(
+        isinstance(outcome_certification_document, Mapping)
+        and outcome_certification_document.get("passed") is True
+        and outcome_certification_document.get("coverage") is True
+    )
     multidimensional_comparison_kinds = {
         comparison.kind
         for comparison in multidimensional_report.comparisons
     }
-    multidimensional_comparison_coverage = {
-        "zero_vs_born",
-        "direct_vs_continuation",
-        "serial_vs_threaded",
-        "numerical_refinement",
-    }.issubset(multidimensional_comparison_kinds)
+    multidimensional_comparison_coverage = (
+        multidimensional_comparison_kinds
+        == {
+            "zero_vs_born",
+            "direct_vs_continuation",
+            "numerical_refinement",
+        }
+    )
     multidimensional_underlying_evidence = bool(
         multidimensional_contract_passed
         and multidimensional_report.outcomes
@@ -1632,11 +1958,14 @@ def build_production_toy_gate_report(
             outcome.successful
             and outcome.result is not None
             and outcome.result.method == "scba"
-            and outcome.result.release_certified
+            and outcome.result.diagnostics.passed
             for outcome in multidimensional_report.outcomes
         )
         and multidimensional_report.comparisons
         and multidimensional_comparison_coverage
+        and multidimensional_harmonic_preflight_passed
+        and multidimensional_backend_validation_passed
+        and multidimensional_outcome_certification_passed
         and all(
             comparison.passed or not comparison.certification_critical
             for comparison in multidimensional_report.comparisons
@@ -1659,6 +1988,7 @@ def build_production_toy_gate_report(
         and multidimensional_certified
         and environment_lock["passed"]
         and cross_platform_identity_consistent
+        and exact_release_revision_passed
     )
     failures: list[str] = []
     if validation_tier != "release":
@@ -1710,6 +2040,18 @@ def build_production_toy_gate_report(
             "multidimensional SCBA comparison coverage is incomplete",
         ),
         (
+            multidimensional_harmonic_preflight_passed,
+            "seven-point harmonic multidimensional preflight failed",
+        ),
+        (
+            multidimensional_backend_validation_passed,
+            "bounded converged-SCBA backend validation failed",
+        ),
+        (
+            multidimensional_outcome_certification_passed,
+            "required multidimensional outcomes are not release-certified",
+        ),
+        (
             multidimensional_provenance_passed,
             "multidimensional source/input/environment provenance failed",
         ),
@@ -1723,6 +2065,10 @@ def build_production_toy_gate_report(
         (
             multidimensional_weak_coupling_passed,
             "multidimensional nine-DOF weak-coupling gate failed",
+        ),
+        (
+            exact_release_revision_passed,
+            "release evidence does not share one exact 40-character commit",
         ),
         (
             cross_platform_identity_consistent,
@@ -1778,6 +2124,9 @@ def build_production_toy_gate_report(
         "schema_version": _SCHEMA_VERSION,
         "summary": {
             "code_identity_consistent": code_identity_consistent,
+            "exact_release_revision_passed": (
+                exact_release_revision_passed
+            ),
             "cross_platform_identity_consistent": (
                 cross_platform_identity_consistent
             ),
@@ -1787,6 +2136,15 @@ def build_production_toy_gate_report(
             "full_locked_base_coverage": full_base_coverage,
             "multidimensional_release_certified": (
                 multidimensional_certified
+            ),
+            "multidimensional_harmonic_preflight_passed": (
+                multidimensional_harmonic_preflight_passed
+            ),
+            "multidimensional_backend_validation_passed": (
+                multidimensional_backend_validation_passed
+            ),
+            "multidimensional_outcome_certification_passed": (
+                multidimensional_outcome_certification_passed
             ),
             "multidimensional_contract_passed": (
                 multidimensional_contract_passed
