@@ -556,6 +556,8 @@ def _validate_production_report(
         "oracle_gate_passed",
         "multidimensional_release_certified",
         "multidimensional_contract_passed",
+        "multidimensional_static_configuration_passed",
+        "multidimensional_runtime_evidence_passed",
         "multidimensional_underlying_evidence_complete",
         "cross_platform_identity_consistent",
         "environment_lock_consistent",

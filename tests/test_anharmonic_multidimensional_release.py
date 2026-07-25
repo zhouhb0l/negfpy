@@ -86,6 +86,31 @@ def test_preregistration_preserves_exact_release_ladders_and_directions() -> Non
     assert full.certification_eligible
     assert full.run_preregistered_refinements
 
+    comparison_policy = full.as_dict()["comparison"]
+    assert comparison_policy["fixed_point_current_scope"] == (
+        "symmetrized_transport"
+    )
+    assert comparison_policy["fixed_point_current_rtol"] == 1.0e-8
+    assert comparison_policy["fixed_point_current_atol"] == 1.0e-12
+    assert comparison_policy["backend_current_scope"] == (
+        "full_conservation_vector"
+    )
+    assert comparison_policy["backend_current_rtol"] == 1.0e-10
+    assert comparison_policy["backend_current_atol"] == 1.0e-12
+    assert comparison_policy["refinement_current_scope"] == (
+        "symmetrized_transport"
+    )
+    assert comparison_policy["refinement_current_rtol"] == 5.0e-3
+    assert comparison_policy["refinement_current_atol"] == 1.0e-12
+    assert comparison_policy["refinement_field_policy"] == {
+        "compute_when_grid_identical": True,
+        "gate_only_when_spacing_cutoff_eta_unchanged": True,
+    }
+    assert comparison_policy["legacy_current_scope"] == (
+        "full_conservation_vector"
+    )
+    assert comparison_policy["legacy_current_policy"] == "backend_only"
+
     refinement_labels = {
         label
         for label, _ in multidimensional._refinement_points(full)
@@ -238,7 +263,22 @@ def test_bounded_pr_graph_converges_and_checks_all_required_smoke_paths(
         for item in report.comparisons
         if item.kind == "serial_vs_threaded"
     )
+    route_comparisons = [
+        item
+        for item in report.comparisons
+        if item.kind != "serial_vs_threaded"
+    ]
+    assert all(
+        item.current_scope == "symmetrized_transport"
+        for item in route_comparisons
+    )
+    assert all(item.field_gate_applicable for item in route_comparisons)
+    assert threaded.current_scope == "full_conservation_vector"
+    assert threaded.field_comparison_applicable
+    assert threaded.field_gate_applicable
+    assert threaded.current_gate_applicable
     assert threaded.current_max_absolute_error == 0.0
+    assert threaded.current_allowed_absolute_error is not None
     assert all(
         item.max_absolute_error == 0.0
         for item in threaded.field_errors
@@ -253,6 +293,21 @@ def test_bounded_pr_graph_converges_and_checks_all_required_smoke_paths(
         "explicitly non-certifying" in failure
         for failure in report.certification_failures
     )
+
+    invalid_backend = list(report.comparisons)
+    backend_index = invalid_backend.index(threaded)
+    invalid_backend[backend_index] = replace(
+        threaded,
+        current_scope="symmetrized_transport",
+    )
+    backend_tamper = multidimensional._multidimensional_topology_summary(
+        report.config,
+        report.outcomes,
+        tuple(invalid_backend),
+        report.conservation_checks,
+    )
+    assert not backend_tamper["comparisons_exact"]
+    assert not backend_tamper["passed"]
 
 
 def test_physical_path_is_explicitly_not_a_cartesian_sweep() -> None:
@@ -321,6 +376,125 @@ def test_predeclared_linewidth_and_shift_are_derived_from_center_parent_mode(
     assert comparison.line_shape.linewidth_error.max_absolute_error == 0.0
     assert comparison.line_shape.shift_error.max_absolute_error == 0.0
     assert "linewidth=-Im" in comparison.line_shape.definition
+
+
+def test_route_current_uses_symmetrized_transport_not_conservation_residuals(
+    coarse_report: MultidimensionalReleaseReport,
+) -> None:
+    endpoint = coarse_report.outcomes[0]
+    assert endpoint.result is not None
+    result = endpoint.result
+    common_mode_shift = 1.0e-2
+    shifted_currents = replace(
+        result.currents,
+        left=result.currents.left + common_mode_shift,
+        right=result.currents.right + common_mode_shift,
+        collision_power=(
+            result.currents.collision_power + common_mode_shift
+        ),
+    )
+    shifted = replace(
+        endpoint,
+        run_id="shifted_current_fixture",
+        result=replace(result, currents=shifted_currents),
+    )
+
+    route = multidimensional._compare_outcomes(
+        "route_current_scope",
+        "zero_vs_born",
+        endpoint,
+        shifted,
+        field_rtol=1.0e-8,
+        field_atol=1.0e-12,
+        current_rtol=1.0e-8,
+        current_atol=1.0e-12,
+        compare_fields=False,
+        current_scope="symmetrized_transport",
+    )
+    backend = multidimensional._compare_outcomes(
+        "backend_current_scope",
+        "serial_vs_threaded",
+        endpoint,
+        shifted,
+        field_rtol=1.0e-10,
+        field_atol=1.0e-12,
+        current_rtol=1.0e-10,
+        current_atol=1.0e-12,
+        compare_fields=False,
+        current_scope="full_conservation_vector",
+    )
+
+    assert route.passed
+    assert route.current_max_absolute_error == pytest.approx(
+        0.0,
+        abs=1.0e-16,
+    )
+    assert route.current_scope == "symmetrized_transport"
+    assert route.current_gate_applicable
+    assert not route.field_comparison_applicable
+    assert not route.field_gate_applicable
+    assert not backend.passed
+    assert backend.current_scope == "full_conservation_vector"
+    assert backend.current_max_absolute_error == pytest.approx(
+        common_mode_shift
+    )
+    assert "current comparison exceeds tolerance" in backend.failures
+
+
+def test_descriptive_same_grid_fields_do_not_become_eta_gate(
+    coarse_report: MultidimensionalReleaseReport,
+) -> None:
+    endpoint = coarse_report.outcomes[0]
+    assert endpoint.result is not None
+    result = endpoint.result
+    altered_green = replace(
+        result.green,
+        retarded=result.green.retarded + (0.25 + 0.0j),
+    )
+    altered = replace(
+        endpoint,
+        run_id="altered_same_grid_field_fixture",
+        result=replace(result, green=altered_green),
+    )
+    arguments = {
+        "field_rtol": 1.0e-8,
+        "field_atol": 1.0e-12,
+        "current_rtol": 5.0e-3,
+        "current_atol": 1.0e-12,
+        "compare_fields": True,
+        "current_scope": "symmetrized_transport",
+    }
+    descriptive = multidimensional._compare_outcomes(
+        "descriptive_eta_fields",
+        "numerical_refinement",
+        endpoint,
+        altered,
+        gate_fields=False,
+        **arguments,
+    )
+    gated = multidimensional._compare_outcomes(
+        "gated_mixing_fields",
+        "numerical_refinement",
+        endpoint,
+        altered,
+        gate_fields=True,
+        **arguments,
+    )
+
+    assert descriptive.passed
+    assert descriptive.field_comparison_applicable
+    assert not descriptive.field_gate_applicable
+    assert len(descriptive.field_errors) == 6
+    assert any(not item.passed for item in descriptive.field_errors)
+    assert descriptive.as_dict()["current_scope"] == (
+        "symmetrized_transport"
+    )
+    assert not gated.passed
+    assert gated.field_gate_applicable
+    assert any(
+        "green.retarded exceeds tolerance" in value
+        for value in gated.failures
+    )
 
 
 def test_report_is_strict_json_and_has_a_verified_digest(
@@ -471,6 +645,28 @@ def test_release_refinement_roles_archive_six_but_certify_only_four() -> None:
         "numerical_refinement_spacing_0p0015625",
         "numerical_refinement_eta_lead_0p003125",
     }
+
+
+def test_refinement_field_applicability_distinguishes_eta_and_mixing() -> None:
+    config = full_multidimensional_release_config()
+    points = dict(multidimensional._refinement_points(config))
+
+    assert multidimensional._refinement_field_applicability(
+        config,
+        points["spacing_0p000390625"],
+    ) == (False, False)
+    assert multidimensional._refinement_field_applicability(
+        config,
+        points["cutoff_6"],
+    ) == (False, False)
+    assert multidimensional._refinement_field_applicability(
+        config,
+        points["eta_lead_0p00078125"],
+    ) == (True, False)
+    assert multidimensional._refinement_field_applicability(
+        config,
+        points["mixing_0p1"],
+    ) == (True, True)
 
 
 def test_weak_coupling_and_provenance_are_derived_per_scba_run(
@@ -790,6 +986,106 @@ def test_full_graph_topology_and_references_are_exact_and_tamper_evident(
         report.conservation_checks,
     )
     assert locked["passed"]
+
+    expected_by_name = {
+        item["name"]: item for item in locked["expected_comparisons"]
+    }
+    for name in (
+        "zero_vs_born_endpoint",
+        "direct_vs_continuation_endpoint",
+    ):
+        record = expected_by_name[name]
+        assert record["current_scope"] == "symmetrized_transport"
+        assert record["field_comparison_applicable"] is True
+        assert record["field_gate_applicable"] is True
+        assert record["current_gate_applicable"] is True
+        assert record["field_rtol"] == full.field_rtol
+        assert record["field_atol"] == full.field_atol
+        assert record["current_rtol"] == full.field_rtol
+        assert record["current_atol"] == full.field_atol
+
+    for name in (
+        "numerical_refinement_spacing_0p0015625",
+        "numerical_refinement_spacing_0p000390625",
+        "numerical_refinement_cutoff_6",
+    ):
+        record = expected_by_name[name]
+        assert record["field_comparison_applicable"] is False
+        assert record["field_gate_applicable"] is False
+
+    for name in (
+        "numerical_refinement_eta_lead_0p003125",
+        "numerical_refinement_eta_lead_0p00078125",
+    ):
+        record = expected_by_name[name]
+        assert record["field_comparison_applicable"] is True
+        assert record["field_gate_applicable"] is False
+
+    mixing_record = expected_by_name["numerical_refinement_mixing_0p1"]
+    assert mixing_record["field_comparison_applicable"] is True
+    assert mixing_record["field_gate_applicable"] is True
+    for name, record in expected_by_name.items():
+        if not name.startswith("numerical_refinement_"):
+            continue
+        assert record["current_scope"] == "symmetrized_transport"
+        assert record["current_gate_applicable"] is True
+        assert record["field_rtol"] == full.field_rtol
+        assert record["field_atol"] == full.field_atol
+        assert record["current_rtol"] == full.refinement_rtol
+        assert record["current_atol"] == full.current_comparison_atol
+
+    comparison_indices = {
+        item.name: index for index, item in enumerate(report.comparisons)
+    }
+
+    def assert_comparison_tamper_rejected(
+        name: str,
+        **changes: object,
+    ) -> None:
+        invalid = list(report.comparisons)
+        index = comparison_indices[name]
+        invalid[index] = replace(invalid[index], **changes)
+        topology = multidimensional._multidimensional_topology_summary(
+            full,
+            report.outcomes,
+            tuple(invalid),
+            report.conservation_checks,
+        )
+        assert not topology["comparisons_exact"]
+        assert not topology["passed"]
+
+    assert_comparison_tamper_rejected(
+        "zero_vs_born_endpoint",
+        current_scope="full_conservation_vector",
+    )
+    assert_comparison_tamper_rejected(
+        "direct_vs_continuation_endpoint",
+        field_gate_applicable=False,
+    )
+    assert_comparison_tamper_rejected(
+        "direct_vs_continuation_endpoint",
+        current_gate_applicable=False,
+    )
+    assert_comparison_tamper_rejected(
+        "numerical_refinement_spacing_0p000390625",
+        field_comparison_applicable=True,
+    )
+    assert_comparison_tamper_rejected(
+        "numerical_refinement_eta_lead_0p00078125",
+        field_gate_applicable=True,
+    )
+    assert_comparison_tamper_rejected(
+        "numerical_refinement_mixing_0p1",
+        field_gate_applicable=False,
+    )
+    assert_comparison_tamper_rejected(
+        "zero_vs_born_endpoint",
+        field_rtol=0.5 * full.field_rtol,
+    )
+    assert_comparison_tamper_rejected(
+        "numerical_refinement_mixing_0p1",
+        current_rtol=0.5 * full.refinement_rtol,
+    )
 
     reordered = list(report.outcomes)
     reordered[1], reordered[2] = reordered[2], reordered[1]

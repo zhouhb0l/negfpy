@@ -207,6 +207,31 @@ compared separately on a bounded, converged SCBA oracle at the unchanged
 \(10^{-10}\) field tolerance. This design provides backend evidence without
 claiming an infeasible full-grid direct or threaded campaign.
 
+Comparison gates have distinct scopes. Zero-start/Born-start and
+direct/continuation endpoint comparisons test the complete
+\(G^{r,<,>}\) and \(\Sigma_{pp}^{r,<,>}\) fixed-point fields with
+`rtol=1e-8`, `atol=1e-12`. Their route-independent transport current is
+\[
+J_{\rm tr}=\frac{J_L-J_R}{2}.
+\]
+It excludes \(P_{pp}\): collision power and contact/full conservation are
+per-run gates, so differences between two already accepted conservation
+residuals are not a cross-route transport-current error. The bounded backend
+oracle is deliberately stricter and compares the full current/conservation
+vector as well as all six fields with `rtol=1e-10`, `atol=1e-12`.
+
+Pointwise fields are not a universal numerical-refinement observable.
+Changing \(\eta_{\rm lead}\) changes contact broadening and can change
+resolved spectral amplitudes even when current, selected linewidth, and
+selected shift have converged; eta-refined full fields are therefore
+archived descriptively but do not gate. Changing mixing alters only the
+iteration path, so a converged changed-mixing outcome must recover all six
+fixed-point fields at `rtol=1e-8`, `atol=1e-12`. Spacing and cutoff
+refinements use different frequency grids and likewise have no pointwise
+full-field gate. All four directional refinements still gate \(J_{\rm tr}\),
+the selected linewidth and shift at \(5\times10^{-3}\), and the
+interaction-self-energy tail at \(10^{-6}\).
+
 ## 3. Numeric acceptance gates
 
 | Group | Required cases | Acceptance |
@@ -217,12 +242,12 @@ claiming an infeasible full-grid direct or threaded campaign.
 | Three-mode physics | Decay and combination peaks, occupation factors, zero-temperature decay | Correct peak positions and independent FGR weights |
 | Retarded reconstruction | Analytic Hilbert pair, spectral identity, Kramers--Kronig real part | Direct principal-value fixture below \(10^{-11}\) |
 | Equilibrium | Gapped contact-only and interacting chains, at zero and finite temperature | KMS/FDT/Keldysh residuals below \(10^{-8}\); \(|J_\alpha|<10^{-10}J_0\) |
-| SCBA fixed point | One-site and three-to-five-layer chains, two initial states | Unmixed \(\Sigma^{r,<,>}\) and \(G\) residuals below \(10^{-8}\) for three consecutive iterations; same fixed point |
+| SCBA fixed point | One-site and three-to-five-layer chains, two initial states and continuation routes | Unmixed \(\Sigma^{r,<,>}\) and \(G\) residuals below \(10^{-8}\) for three consecutive iterations; all six fixed-point fields agree at `rtol=1e-8`, `atol=1e-12`; route transport uses \(J_{\rm tr}=(J_L-J_R)/2\) |
 | Conservation | Block-local and full-nonlocal intralayer fixtures; cross-cut FPU fixture | \(|J_L+J_R|\) and \(|P_{pp}|\) obey the locked current tolerance. Projected EOM and layer-collision sums recover global power; individual layers may redistribute energy. Raw harmonic bonds gate only when \(r_{\rm nl}\le10^{-12}\); otherwise EOM-corrected cuts gate. Cross-cut FPU has no spatial gate yet. |
 | Spectral quality | Lesser/greater correlation positivity in every state; harmonic-contact passivity in every state; Green/total/interaction spectral passivity only at equilibrium or zero interaction; signed-frequency symmetry, high-frequency limit, first moment | \(iC^{</>}\) PSD floor no worse than \(-10^{-10}\) of scale; interacting-NESS Green/total/\(\Gamma_{pp}\) values are descriptive and never clipped; moment error below \(5\times10^{-3}\) |
-| Refinement | Independent half-spacing, larger-cutoff, eta-at-most-half, and changed-mixing runs | Current and internally derived selected-peak changes below \(5\times10^{-3}\); outer interaction-self-energy tail below \(10^{-6}\) |
+| Refinement | Independent half-spacing, larger-cutoff, eta-at-most-half, and changed-mixing runs | \(J_{\rm tr}\) and internally derived selected-peak changes below \(5\times10^{-3}\); outer interaction-self-energy tail below \(10^{-6}\). Eta, spacing, and cutoff do not gate pointwise fields; changed mixing additionally recovers all six fields at `rtol=1e-8`, `atol=1e-12` |
 | Weak coupling | Every released cubic toy point | Linewidth and shift each below 10% of the associated mode frequency |
-| Optimized backends | Bounded converged serial/direct, threaded/direct, and FFT/FFT SCBA; later dense/sparse and dense/selected GF | Field relative error below \(10^{-10}\), scale-aware absolute error below \(10^{-12}\); unchanged conservation gate; no full-grid direct/threaded claim |
+| Optimized backends | Bounded converged serial/direct, threaded/direct, and FFT/FFT SCBA; later dense/sparse and dense/selected GF | All six fields and the full current/conservation vector agree at `rtol=1e-10`, `atol=1e-12`; unchanged conservation gate; no full-grid direct/threaded claim |
 | Restart | Continuous/interrupted runs and backend/worker change | Near-bitwise serial result and cross-backend error below \(10^{-10}\) |
 
 The state-conditional policy is deliberately conservative. In the equilibrium

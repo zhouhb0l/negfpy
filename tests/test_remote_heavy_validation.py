@@ -520,6 +520,8 @@ def _write_valid_worker_report(
             "oracle_gate_passed": True,
             "multidimensional_release_certified": True,
             "multidimensional_contract_passed": True,
+            "multidimensional_static_configuration_passed": True,
+            "multidimensional_runtime_evidence_passed": True,
             "multidimensional_underlying_evidence_complete": True,
             "cross_platform_identity_consistent": True,
             "environment_lock_consistent": True,
@@ -689,6 +691,66 @@ def test_worker_rejects_hash_valid_but_uncertified_current_report(
     assert not (artifacts / "job.lock").exists()
     assert "report summary gate failed: release_certified" in (
         artifacts / "attempts" / "attempt-001" / "production_toy_gate.log"
+    ).read_text(encoding="utf-8")
+    core.verify_sha256sums(artifacts)
+
+
+
+@pytest.mark.parametrize(
+    "gate_key",
+    (
+        "multidimensional_static_configuration_passed",
+        "multidimensional_runtime_evidence_passed",
+    ),
+)
+def test_worker_requires_explicit_multidimensional_contract_subgates(
+    gate_key: str,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+
+    def fake_run(_argv, **kwargs):
+        path = pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"])
+        report = _write_valid_worker_report(
+            report_path=path,
+            root=root,
+            lock_sha=lock_sha,
+        )
+        assert report["summary"]["multidimensional_contract_passed"] is True
+        report["summary"][gate_key] = False
+        report["report_sha256"] = _report_digest(
+            {
+                key: value
+                for key, value in report.items()
+                if key != "report_sha256"
+            },
+            ensure_ascii=False,
+        )
+        core._atomic_write_json(path, report)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 2
+    artifacts = root / "artifacts"
+    status = json.loads(
+        (artifacts / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["state"] == "failed"
+    assert status["report_facts"] is None
+    assert not (artifacts / "job.lock").exists()
+    assert f"report summary gate failed: {gate_key}" in (
+        artifacts
+        / "attempts"
+        / "attempt-001"
+        / "production_toy_gate.log"
     ).read_text(encoding="utf-8")
     core.verify_sha256sums(artifacts)
 

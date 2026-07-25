@@ -73,6 +73,10 @@ ComparisonKind = Literal[
     "serial_vs_threaded",
     "numerical_refinement",
 ]
+CurrentComparisonScope = Literal[
+    "symmetrized_transport",
+    "full_conservation_vector",
+]
 
 _WEAK_COUPLING_LIMIT = 0.1
 _REQUIRED_INPUT_HASHES = frozenset(
@@ -683,10 +687,25 @@ class MultidimensionalReleaseConfig:
                 "field_atol": self.field_atol,
                 "fixed_point_field_rtol": self.field_rtol,
                 "fixed_point_field_atol": self.field_atol,
+                "fixed_point_current_scope": "symmetrized_transport",
+                "fixed_point_current_rtol": self.field_rtol,
+                "fixed_point_current_atol": self.field_atol,
                 "backend_field_rtol": self.backend_field_rtol,
                 "backend_field_atol": self.backend_field_atol,
+                "backend_current_scope": "full_conservation_vector",
+                "backend_current_rtol": self.backend_field_rtol,
+                "backend_current_atol": self.backend_field_atol,
+                "refinement_current_scope": "symmetrized_transport",
+                "refinement_current_rtol": self.refinement_rtol,
+                "refinement_current_atol": self.current_comparison_atol,
+                "refinement_field_policy": {
+                    "compute_when_grid_identical": True,
+                    "gate_only_when_spacing_cutoff_eta_unchanged": True,
+                },
                 "current_rtol": self.current_comparison_rtol,
                 "current_atol": self.current_comparison_atol,
+                "legacy_current_scope": "full_conservation_vector",
+                "legacy_current_policy": "backend_only",
                 "refinement_rtol": self.refinement_rtol,
                 "line_shape_rtol": self.line_shape_rtol,
                 "linewidth_atol": self.linewidth_atol,
@@ -1496,6 +1515,15 @@ class MultidimensionalComparison:
     sigma_tail_right: float | None
     elapsed_ratio_right_over_left: float | None
     line_shape: MultidimensionalLineShapeComparison | None
+    current_scope: CurrentComparisonScope
+    field_comparison_applicable: bool
+    field_gate_applicable: bool
+    current_gate_applicable: bool
+    current_allowed_absolute_error: float | None
+    field_rtol: float
+    field_atol: float
+    current_rtol: float
+    current_atol: float
     certification_critical: bool
     passed: bool
     failures: tuple[str, ...]
@@ -1510,6 +1538,42 @@ class MultidimensionalComparison:
             "numerical_refinement",
         }:
             raise ValueError("unknown comparison kind.")
+        if self.current_scope not in {
+            "symmetrized_transport",
+            "full_conservation_vector",
+        }:
+            raise ValueError("unknown current comparison scope.")
+        for name in (
+            "field_comparison_applicable",
+            "field_gate_applicable",
+            "current_gate_applicable",
+        ):
+            object.__setattr__(self, name, bool(getattr(self, name)))
+        if self.field_gate_applicable and not self.field_comparison_applicable:
+            raise ValueError(
+                "a field gate requires an applicable field comparison."
+            )
+        if self.current_allowed_absolute_error is not None:
+            object.__setattr__(
+                self,
+                "current_allowed_absolute_error",
+                _finite(
+                    self.current_allowed_absolute_error,
+                    name="current_allowed_absolute_error",
+                    nonnegative=True,
+                ),
+            )
+        for name in (
+            "field_rtol",
+            "field_atol",
+            "current_rtol",
+            "current_atol",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _positive(getattr(self, name), name=name),
+            )
         if any(
             not isinstance(item, MultidimensionalFieldError)
             for item in self.field_errors
@@ -1560,6 +1624,19 @@ class MultidimensionalComparison:
                 if self.line_shape is None
                 else self.line_shape.as_dict()
             ),
+            "current_scope": self.current_scope,
+            "field_comparison_applicable": (
+                self.field_comparison_applicable
+            ),
+            "field_gate_applicable": self.field_gate_applicable,
+            "current_gate_applicable": self.current_gate_applicable,
+            "current_allowed_absolute_error": (
+                self.current_allowed_absolute_error
+            ),
+            "field_rtol": self.field_rtol,
+            "field_atol": self.field_atol,
+            "current_rtol": self.current_rtol,
+            "current_atol": self.current_atol,
             "certification_critical": self.certification_critical,
             "passed": self.passed,
             "failures": list(self.failures),
@@ -2427,8 +2504,8 @@ def _line_shape_comparison(
     )
 
 
-def _current_vector(result: AnharmonicResult) -> Array:
-    """Return gated currents, using corrected EOM cuts when available."""
+def _full_current_vector(result: AnharmonicResult) -> Array:
+    """Return the full current/conservation vector for backend equality."""
 
     currents = result.currents
     values = [currents.left, currents.right, currents.collision_power]
@@ -2446,6 +2523,16 @@ def _current_vector(result: AnharmonicResult) -> Array:
     return np.asarray(values, dtype=float)
 
 
+def _symmetrized_transport_current(result: AnharmonicResult) -> Array:
+    """Return the two-contact transport current ``(J_L - J_R) / 2``."""
+
+    currents = result.currents
+    return np.asarray(
+        [0.5 * (float(currents.left) - float(currents.right))],
+        dtype=float,
+    )
+
+
 def _compare_outcomes(
     name: str,
     kind: ComparisonKind,
@@ -2457,12 +2544,27 @@ def _compare_outcomes(
     current_rtol: float,
     current_atol: float,
     compare_fields: bool,
+    gate_fields: bool | None = None,
+    current_scope: CurrentComparisonScope = "symmetrized_transport",
+    gate_current: bool = True,
     certification_critical: bool = True,
     line_shape_spec: MultidimensionalLadderSpec | None = None,
     line_shape_rtol: float = 5.0e-3,
     linewidth_atol: float = 1.0e-12,
     shift_atol: float = 1.0e-8,
 ) -> MultidimensionalComparison:
+    field_gate_applicable = (
+        bool(compare_fields) if gate_fields is None else bool(gate_fields)
+    )
+    if field_gate_applicable and not compare_fields:
+        raise ValueError(
+            "gate_fields cannot be true when compare_fields is false."
+        )
+    if current_scope not in {
+        "symmetrized_transport",
+        "full_conservation_vector",
+    }:
+        raise ValueError("unknown current comparison scope.")
     failures: list[str] = []
     if not left.successful:
         failures.append(f"{left.run_id} did not converge")
@@ -2472,6 +2574,7 @@ def _compare_outcomes(
     current_absolute: float | None = None
     current_scale: float | None = None
     current_relative: float | None = None
+    current_allowed: float | None = None
     tail_left: float | None = None
     tail_right: float | None = None
     line_shape: MultidimensionalLineShapeComparison | None = None
@@ -2496,12 +2599,17 @@ def _compare_outcomes(
                             atol=field_atol,
                         )
                         field_errors.append(error)
-                        if not error.passed:
+                        if field_gate_applicable and not error.passed:
                             failures.append(
                                 f"{field}.{component} exceeds tolerance"
                             )
-        first_current = _current_vector(left.result)
-        second_current = _current_vector(right.result)
+        current_builder = (
+            _symmetrized_transport_current
+            if current_scope == "symmetrized_transport"
+            else _full_current_vector
+        )
+        first_current = current_builder(left.result)
+        second_current = current_builder(right.result)
         if first_current.shape != second_current.shape:
             failures.append("current vectors have different shapes")
         else:
@@ -2511,10 +2619,14 @@ def _compare_outcomes(
             current_scale = max(
                 float(np.max(np.abs(first_current))),
                 float(np.max(np.abs(second_current))),
-                current_atol / current_rtol,
             )
-            current_relative = current_absolute / current_scale
-            if current_absolute > current_atol + current_rtol * current_scale:
+            current_relative = (
+                current_absolute / current_scale
+                if current_scale > 0.0
+                else 0.0
+            )
+            current_allowed = current_atol + current_rtol * current_scale
+            if gate_current and current_absolute > current_allowed:
                 failures.append("current comparison exceeds tolerance")
         tail_left = float(keldysh_tail_ratio(left.result.sigma_pp))
         tail_right = float(keldysh_tail_ratio(right.result.sigma_pp))
@@ -2557,6 +2669,15 @@ def _compare_outcomes(
         sigma_tail_right=tail_right,
         elapsed_ratio_right_over_left=elapsed_ratio,
         line_shape=line_shape,
+        current_scope=current_scope,
+        field_comparison_applicable=bool(compare_fields),
+        field_gate_applicable=field_gate_applicable,
+        current_gate_applicable=bool(gate_current),
+        current_allowed_absolute_error=current_allowed,
+        field_rtol=field_rtol,
+        field_atol=field_atol,
+        current_rtol=current_rtol,
+        current_atol=current_atol,
         certification_critical=certification_critical,
         passed=not failures,
         failures=tuple(failures),
@@ -2955,8 +3076,8 @@ def _bounded_backend_validation(
             current_error = _field_error(
                 "current",
                 "left_right_collision",
-                _current_vector(reference),
-                _current_vector(candidate),
+                _full_current_vector(reference),
+                _full_current_vector(candidate),
                 rtol=config.backend_field_rtol,
                 atol=config.backend_field_atol,
             )
@@ -3272,6 +3393,23 @@ def _refinement_points(
     return tuple(candidates)
 
 
+def _refinement_field_applicability(
+    config: MultidimensionalReleaseConfig,
+    numerical: MultidimensionalNumericalPoint,
+) -> tuple[bool, bool]:
+    """Return ``(compare, gate)`` for a numerical-refinement field pair."""
+
+    same_grid = bool(
+        numerical.spacing == config.numerical.spacing
+        and numerical.cutoff == config.numerical.cutoff
+    )
+    gate_fields = bool(
+        same_grid
+        and numerical.eta_lead == config.numerical.eta_lead
+    )
+    return same_grid, gate_fields
+
+
 def _required_refinement_comparison_names(
     config: MultidimensionalReleaseConfig,
 ) -> dict[str, str | None]:
@@ -3552,56 +3690,137 @@ def _multidimensional_topology_summary(
         for name in _required_refinement_comparison_names(config).values()
         if name is not None
     }
-    expected_comparisons: list[tuple[str, str, str, str, bool]] = [
-        (
-            "zero_vs_born_endpoint",
-            "zero_vs_born",
-            direct_id,
-            born_id,
-            True,
+
+    def comparison_record(
+        *,
+        name: str,
+        kind: ComparisonKind,
+        left_run_id: str,
+        right_run_id: str,
+        certification_critical: bool,
+        current_scope: CurrentComparisonScope,
+        field_comparison_applicable: bool,
+        field_gate_applicable: bool,
+        current_gate_applicable: bool,
+        field_rtol: float,
+        field_atol: float,
+        current_rtol: float,
+        current_atol: float,
+    ) -> dict[str, object]:
+        return {
+            "name": name,
+            "kind": kind,
+            "left_run_id": left_run_id,
+            "right_run_id": right_run_id,
+            "certification_critical": certification_critical,
+            "current_scope": current_scope,
+            "field_comparison_applicable": field_comparison_applicable,
+            "field_gate_applicable": field_gate_applicable,
+            "current_gate_applicable": current_gate_applicable,
+            "field_rtol": field_rtol,
+            "field_atol": field_atol,
+            "current_rtol": current_rtol,
+            "current_atol": current_atol,
+        }
+
+    expected_comparisons: list[dict[str, object]] = [
+        comparison_record(
+            name="zero_vs_born_endpoint",
+            kind="zero_vs_born",
+            left_run_id=direct_id,
+            right_run_id=born_id,
+            certification_critical=True,
+            current_scope="symmetrized_transport",
+            field_comparison_applicable=True,
+            field_gate_applicable=True,
+            current_gate_applicable=True,
+            field_rtol=config.field_rtol,
+            field_atol=config.field_atol,
+            current_rtol=config.field_rtol,
+            current_atol=config.field_atol,
         ),
-        (
-            "direct_vs_continuation_endpoint",
-            "direct_vs_continuation",
-            direct_id,
-            continuation_id,
-            True,
+        comparison_record(
+            name="direct_vs_continuation_endpoint",
+            kind="direct_vs_continuation",
+            left_run_id=direct_id,
+            right_run_id=continuation_id,
+            certification_critical=True,
+            current_scope="symmetrized_transport",
+            field_comparison_applicable=True,
+            field_gate_applicable=True,
+            current_gate_applicable=True,
+            field_rtol=config.field_rtol,
+            field_atol=config.field_atol,
+            current_rtol=config.field_rtol,
+            current_atol=config.field_atol,
         ),
     ]
     refinement_start = path_count + 2
     if include_threaded_endpoint:
         threaded_id = str(expected_rows[path_count + 2]["run_id"])
         expected_comparisons.append(
-            (
-                "serial_vs_threaded_endpoint",
-                "serial_vs_threaded",
-                direct_id,
-                threaded_id,
-                True,
+            comparison_record(
+                name="serial_vs_threaded_endpoint",
+                kind="serial_vs_threaded",
+                left_run_id=direct_id,
+                right_run_id=threaded_id,
+                certification_critical=True,
+                current_scope="full_conservation_vector",
+                field_comparison_applicable=True,
+                field_gate_applicable=True,
+                current_gate_applicable=True,
+                field_rtol=config.backend_field_rtol,
+                field_atol=config.backend_field_atol,
+                current_rtol=config.backend_field_rtol,
+                current_atol=config.backend_field_atol,
             )
         )
         refinement_start += 1
-    for (label, _), row in zip(
+    for (label, numerical), row in zip(
         _refinement_points(config),
         expected_rows[refinement_start:],
     ):
         name = f"numerical_refinement_{label}"
+        compare_fields, gate_fields = _refinement_field_applicability(
+            config,
+            numerical,
+        )
         expected_comparisons.append(
-            (
-                name,
-                "numerical_refinement",
-                direct_id,
-                str(row["run_id"]),
-                name in required_refinement_names,
+            comparison_record(
+                name=name,
+                kind="numerical_refinement",
+                left_run_id=direct_id,
+                right_run_id=str(row["run_id"]),
+                certification_critical=(
+                    name in required_refinement_names
+                ),
+                current_scope="symmetrized_transport",
+                field_comparison_applicable=compare_fields,
+                field_gate_applicable=gate_fields,
+                current_gate_applicable=True,
+                field_rtol=config.field_rtol,
+                field_atol=config.field_atol,
+                current_rtol=config.refinement_rtol,
+                current_atol=config.current_comparison_atol,
             )
         )
     observed_comparisons = tuple(
-        (
-            item.name,
-            item.kind,
-            item.left_run_id,
-            item.right_run_id,
-            item.certification_critical,
+        comparison_record(
+            name=item.name,
+            kind=item.kind,
+            left_run_id=item.left_run_id,
+            right_run_id=item.right_run_id,
+            certification_critical=item.certification_critical,
+            current_scope=item.current_scope,
+            field_comparison_applicable=(
+                item.field_comparison_applicable
+            ),
+            field_gate_applicable=item.field_gate_applicable,
+            current_gate_applicable=item.current_gate_applicable,
+            field_rtol=item.field_rtol,
+            field_atol=item.field_atol,
+            current_rtol=item.current_rtol,
+            current_atol=item.current_atol,
         )
         for item in comparisons
     )
@@ -3689,17 +3908,8 @@ def _multidimensional_topology_summary(
             )
             for row in observed_rows
         ],
-        "expected_comparisons": [
-            {
-                "name": name,
-                "kind": kind,
-                "left_run_id": left,
-                "right_run_id": right,
-                "certification_critical": critical,
-            }
-            for name, kind, left, right, critical in expected_comparisons
-        ],
-        "observed_comparisons": [item.as_dict() for item in comparisons],
+        "expected_comparisons": list(expected_comparisons),
+        "observed_comparisons": list(observed_comparisons),
         "expected_conservation": [
             {
                 "name": name,
@@ -4092,9 +4302,10 @@ def run_multidimensional_release_benchmark(
                 born_seeded,
                 field_rtol=config.field_rtol,
                 field_atol=config.field_atol,
-                current_rtol=config.current_comparison_rtol,
-                current_atol=config.current_comparison_atol,
+                current_rtol=config.field_rtol,
+                current_atol=config.field_atol,
                 compare_fields=True,
+                current_scope="symmetrized_transport",
             ),
             _compare_outcomes(
                 "direct_vs_continuation_endpoint",
@@ -4103,9 +4314,10 @@ def run_multidimensional_release_benchmark(
                 continuation_endpoint,
                 field_rtol=config.field_rtol,
                 field_atol=config.field_atol,
-                current_rtol=config.current_comparison_rtol,
-                current_atol=config.current_comparison_atol,
+                current_rtol=config.field_rtol,
+                current_atol=config.field_atol,
                 compare_fields=True,
+                current_scope="symmetrized_transport",
             ),
         )
     )
@@ -4125,9 +4337,10 @@ def run_multidimensional_release_benchmark(
                 threaded,
                 field_rtol=config.backend_field_rtol,
                 field_atol=config.backend_field_atol,
-                current_rtol=config.current_comparison_rtol,
-                current_atol=config.current_comparison_atol,
+                current_rtol=config.backend_field_rtol,
+                current_atol=config.backend_field_atol,
                 compare_fields=True,
+                current_scope="full_conservation_vector",
             )
         )
 
@@ -4154,9 +4367,9 @@ def run_multidimensional_release_benchmark(
                 backend=config.production_backend,
             )
             outcomes.append(candidate)
-            same_grid = (
-                numerical.spacing == config.numerical.spacing
-                and numerical.cutoff == config.numerical.cutoff
+            compare_fields, gate_fields = _refinement_field_applicability(
+                config,
+                numerical,
             )
             comparison_name = f"numerical_refinement_{label}"
             comparison = _compare_outcomes(
@@ -4168,7 +4381,9 @@ def run_multidimensional_release_benchmark(
                 field_atol=config.field_atol,
                 current_rtol=config.refinement_rtol,
                 current_atol=config.current_comparison_atol,
-                compare_fields=same_grid,
+                compare_fields=compare_fields,
+                gate_fields=gate_fields,
+                current_scope="symmetrized_transport",
                 certification_critical=(
                     comparison_name in critical_refinement_names
                 ),

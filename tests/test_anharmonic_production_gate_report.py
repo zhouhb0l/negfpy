@@ -13,6 +13,7 @@ import negfpy.anharmonic.toy.production_gate_report as production_report
 from negfpy.anharmonic import SignedFrequencyGrid, solve_one_shot_born
 from negfpy.anharmonic.toy.multidimensional_release import (
     MultidimensionalReleaseReport,
+    full_multidimensional_release_config,
     pr_multidimensional_release_config,
 )
 from negfpy.anharmonic.toy.open_three_mode import (
@@ -65,18 +66,33 @@ def coarse_open_run() -> OpenThreeModeBornRun:
     return _evaluate_open_run("coarse_g0_T0p7", fixture)
 
 
-def _unexecuted_pr_report() -> MultidimensionalReleaseReport:
+def _unexecuted_report(
+    *,
+    full: bool = False,
+    max_iterations: int | None = None,
+) -> MultidimensionalReleaseReport:
+    config = (
+        full_multidimensional_release_config()
+        if full
+        else pr_multidimensional_release_config()
+    )
+    if max_iterations is not None:
+        config = replace(config, max_iterations=max_iterations)
     return MultidimensionalReleaseReport(
-        config=pr_multidimensional_release_config(),
+        config=config,
         outcomes=(),
         comparisons=(),
         conservation_checks=(),
-        failures=("PR multidimensional fixture intentionally not executed",),
-        certification_failures=("coarse PR profile",),
+        failures=("multidimensional fixture intentionally not executed",),
+        certification_failures=("fixture intentionally unexecuted",),
         total_elapsed_seconds=0.0,
         execution_passed=False,
         release_certified=False,
     )
+
+
+def _unexecuted_pr_report() -> MultidimensionalReleaseReport:
+    return _unexecuted_report()
 
 
 def test_coarse_and_incomplete_evidence_can_never_certify(
@@ -103,11 +119,122 @@ def test_coarse_and_incomplete_evidence_can_never_certify(
     assert not summary["scaling_coverage"]
     assert not summary["refinement_coverage"]
     assert not summary["multidimensional_contract_passed"]
+    assert not summary["multidimensional_static_configuration_passed"]
+    assert not summary["multidimensional_runtime_evidence_passed"]
     assert not summary["multidimensional_release_certified"]
     assert not summary["multidimensional_provenance_passed"]
     assert not summary["multidimensional_weak_coupling_passed"]
     assert not summary["cross_platform_identity_consistent"]
     assert pull_request.as_dict()["multidimensional_scba"]["coarse"]
+
+
+def test_static_configuration_is_independent_of_runtime_evidence(
+    coarse_open_run: OpenThreeModeBornRun,
+) -> None:
+    multidimensional = _unexecuted_report(full=True)
+    static_configuration, runtime_evidence = (
+        production_report._multidimensional_contract_status(
+            multidimensional,
+            multidimensional.as_dict(),
+        )
+    )
+
+    assert static_configuration
+    assert not runtime_evidence
+    assert not production_report._multidimensional_contract_passed(
+        multidimensional,
+        multidimensional.as_dict(),
+    )
+
+    combined = build_production_toy_gate_report(
+        (coarse_open_run,),
+        multidimensional,
+    ).as_dict()
+    summary = combined["summary"]
+    assert summary["multidimensional_static_configuration_passed"]
+    assert not summary["multidimensional_runtime_evidence_passed"]
+    assert not summary["multidimensional_contract_passed"]
+    assert (
+        "multidimensional SCBA configuration does not match the locked "
+        "release contract"
+        not in summary["failures"]
+    )
+    assert (
+        "multidimensional SCBA runtime evidence does not satisfy the "
+        "locked release contract"
+        in summary["failures"]
+    )
+
+
+def test_static_configuration_gate_rejects_a_control_mismatch() -> None:
+    multidimensional = _unexecuted_report(
+        full=True,
+        max_iterations=199,
+    )
+    static_configuration, runtime_evidence = (
+        production_report._multidimensional_contract_status(
+            multidimensional,
+            multidimensional.as_dict(),
+        )
+    )
+
+    assert not static_configuration
+    assert not runtime_evidence
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        (("fixed_point_current_scope",), "full_conservation_vector"),
+        (("fixed_point_current_rtol",), 2.0e-8),
+        (("fixed_point_current_atol",), 2.0e-12),
+        (("backend_current_scope",), "symmetrized_transport"),
+        (("backend_current_rtol",), 2.0e-10),
+        (("backend_current_atol",), 2.0e-12),
+        (("refinement_current_scope",), "full_conservation_vector"),
+        (("refinement_current_rtol",), 1.0e-2),
+        (("refinement_current_atol",), 2.0e-12),
+        (
+            (
+                "refinement_field_policy",
+                "compute_when_grid_identical",
+            ),
+            False,
+        ),
+        (
+            (
+                "refinement_field_policy",
+                "gate_only_when_spacing_cutoff_eta_unchanged",
+            ),
+            False,
+        ),
+        (("refinement_field_policy", "unexpected_policy"), True),
+        (("current_rtol",), 2.0e-10),
+        (("current_atol",), 2.0e-12),
+        (("legacy_current_scope",), "symmetrized_transport"),
+        (("legacy_current_policy",), "all_comparisons"),
+    ),
+)
+def test_static_configuration_rejects_serialized_policy_mutation(
+    path: tuple[str, ...],
+    value: object,
+) -> None:
+    multidimensional = _unexecuted_report(full=True)
+    document = json.loads(json.dumps(multidimensional.as_dict()))
+    comparison = document["config"]["comparison"]
+    target = comparison
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    static_configuration, _ = (
+        production_report._multidimensional_contract_status(
+            multidimensional,
+            document,
+        )
+    )
+
+    assert not static_configuration
 
 
 def test_json_is_strict_deterministic_hashed_and_immutable(

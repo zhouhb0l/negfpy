@@ -79,6 +79,44 @@ _REQUIRED_INPUT_HASHES = frozenset(
 )
 
 
+_LOCKED_MULTIDIMENSIONAL_COMPARISON_POLICY: dict[str, Any] = {
+    "field_rtol": 1.0e-8,
+    "field_atol": 1.0e-12,
+    "fixed_point_field_rtol": 1.0e-8,
+    "fixed_point_field_atol": 1.0e-12,
+    "fixed_point_current_scope": "symmetrized_transport",
+    "fixed_point_current_rtol": 1.0e-8,
+    "fixed_point_current_atol": 1.0e-12,
+    "backend_field_rtol": 1.0e-10,
+    "backend_field_atol": 1.0e-12,
+    "backend_current_scope": "full_conservation_vector",
+    "backend_current_rtol": 1.0e-10,
+    "backend_current_atol": 1.0e-12,
+    "refinement_current_scope": "symmetrized_transport",
+    "refinement_current_rtol": 5.0e-3,
+    "refinement_current_atol": 1.0e-12,
+    "refinement_field_policy": {
+        "compute_when_grid_identical": True,
+        "gate_only_when_spacing_cutoff_eta_unchanged": True,
+    },
+    "current_rtol": 1.0e-10,
+    "current_atol": 1.0e-12,
+    "legacy_current_scope": "full_conservation_vector",
+    "legacy_current_policy": "backend_only",
+    "refinement_rtol": 5.0e-3,
+    "line_shape_rtol": 5.0e-3,
+    "linewidth_atol": 1.0e-12,
+    "shift_atol": 1.0e-8,
+    "line_shape_observable": {
+        "dof": "center_layer.parent_x",
+        "target_angular_frequency": 1.5,
+        "linewidth": "-Im[Sigma_pp^r_xx(Omega_p)]/Omega_p",
+        "shift": "Re[Sigma_pp^r_xx(Omega_p)]/(2*Omega_p)",
+        "interpolation": "piecewise-linear on the signed-frequency grid",
+    },
+}
+
+
 def _finite_nonnegative(value: Any, *, name: str) -> float:
     if isinstance(value, (bool, np.bool_)) or np.asarray(value).ndim != 0:
         raise TypeError(f"{name} must be a scalar real number.")
@@ -1093,11 +1131,11 @@ def _tuple_close(values: Sequence[float], expected: Sequence[float]) -> bool:
     )
 
 
-def _multidimensional_contract_passed(
+def _multidimensional_contract_status(
     report: MultidimensionalReleaseReport,
     document: Mapping[str, Any],
-) -> bool:
-    """Check the locked benchmark independently of its stored pass scalar."""
+) -> tuple[bool, bool]:
+    """Return independent static-configuration and runtime-evidence gates."""
 
     config = report.config
     spec = config.spec
@@ -1131,6 +1169,16 @@ def _multidimensional_contract_passed(
         == archive.get("observed_comparison_names")
     )
     config_document = document.get("config")
+    comparison_document = (
+        config_document.get("comparison")
+        if isinstance(config_document, Mapping)
+        else None
+    )
+    serialized_comparison_policy_passed = bool(
+        isinstance(comparison_document, Mapping)
+        and dict(comparison_document)
+        == _LOCKED_MULTIDIMENSIONAL_COMPARISON_POLICY
+    )
     checkpoint_evidence = document.get("checkpoint_evidence", {})
     checkpoint_environment_sha256 = (
         checkpoint_evidence.get("environment_sha256")
@@ -1374,16 +1422,15 @@ def _multidimensional_contract_passed(
             for comparison in report.comparisons
         )
     )
-    return bool(
+    static_configuration_passed = bool(
         document.get("schema_version") == 4
         and document.get("protocol") == "multidimensional_toy_gate_v2"
         and document.get("protocol_version") == 2
-        and environment_evidence_valid
-        and exact_release_revision
         and isinstance(config_document, Mapping)
         and config_document.get("protocol")
         == "multidimensional_toy_gate_v2"
         and config_document.get("protocol_version") == 2
+        and serialized_comparison_policy_passed
         and config.profile == "full_preregistered"
         and config.certification_eligible
         and config.full_physical_ladder_selected
@@ -1392,10 +1439,6 @@ def _multidimensional_contract_passed(
         and config.production_backend == "fft"
         and config.production_hilbert_backend == "fft"
         and config.surface_gf_method == "analytic_diagonal"
-        and harmonic_preflight_passed
-        and backend_validation_passed
-        and outcome_certification_passed
-        and fft_topology_passed
         and _tuple_close(
             spec.polarization_frequencies,
             (1.5, 0.9, 0.6),
@@ -1420,8 +1463,6 @@ def _multidimensional_contract_passed(
         and _close(numerical.cutoff, 5.0)
         and _close(numerical.eta_lead, 0.0015625)
         and _close(numerical.mixing, 0.2)
-        and refinement_directions_passed
-        and all_six_archived
         and config.max_iterations >= 200
         and config.min_iterations >= 3
         and config.consecutive_passes >= 3
@@ -1445,6 +1486,29 @@ def _multidimensional_contract_passed(
         and config.linewidth_atol <= 1.0e-12
         and config.shift_atol <= 1.0e-8
     )
+    runtime_evidence_passed = bool(
+        environment_evidence_valid
+        and exact_release_revision
+        and harmonic_preflight_passed
+        and backend_validation_passed
+        and outcome_certification_passed
+        and fft_topology_passed
+        and refinement_directions_passed
+        and all_six_archived
+    )
+    return static_configuration_passed, runtime_evidence_passed
+
+
+def _multidimensional_contract_passed(
+    report: MultidimensionalReleaseReport,
+    document: Mapping[str, Any],
+) -> bool:
+    """Check the complete locked contract independently of stored scalars."""
+
+    static_configuration, runtime_evidence = (
+        _multidimensional_contract_status(report, document)
+    )
+    return bool(static_configuration and runtime_evidence)
 
 
 def _cost_accuracy_table(
@@ -1849,11 +1913,16 @@ def build_production_toy_gate_report(
         run_documents,
         multidimensional_document,
     )
-    multidimensional_contract_passed = (
-        _multidimensional_contract_passed(
-            multidimensional_report,
-            multidimensional_document,
-        )
+    (
+        multidimensional_static_configuration_passed,
+        multidimensional_runtime_evidence_passed,
+    ) = _multidimensional_contract_status(
+        multidimensional_report,
+        multidimensional_document,
+    )
+    multidimensional_contract_passed = bool(
+        multidimensional_static_configuration_passed
+        and multidimensional_runtime_evidence_passed
     )
     multidimensional_provenance = multidimensional_document.get(
         "provenance",
@@ -2031,9 +2100,14 @@ def build_production_toy_gate_report(
             "open-three-mode runs do not share one code identity",
         ),
         (
-            multidimensional_contract_passed,
+            multidimensional_static_configuration_passed,
             "multidimensional SCBA configuration does not match the locked "
             "release contract",
+        ),
+        (
+            multidimensional_runtime_evidence_passed,
+            "multidimensional SCBA runtime evidence does not satisfy the "
+            "locked release contract",
         ),
         (
             multidimensional_comparison_coverage,
@@ -2148,6 +2222,12 @@ def build_production_toy_gate_report(
             ),
             "multidimensional_contract_passed": (
                 multidimensional_contract_passed
+            ),
+            "multidimensional_static_configuration_passed": (
+                multidimensional_static_configuration_passed
+            ),
+            "multidimensional_runtime_evidence_passed": (
+                multidimensional_runtime_evidence_passed
             ),
             "multidimensional_comparison_coverage": (
                 multidimensional_comparison_coverage

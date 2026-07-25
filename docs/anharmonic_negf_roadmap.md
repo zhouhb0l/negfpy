@@ -542,11 +542,28 @@ After preflight, the production graph has exactly 13 outcomes:
 Every full production outcome uses exact zero-padded FFT convolution, the FFT
 implementation of the same finite-grid principal-value Hilbert sum, and
 analytic diagonal contacts. Zero/Born starts and continuation endpoints use
-the \(10^{-8}\) full-field tolerance. Backend equivalence is a separate,
-bounded, converged SCBA oracle comparing serial/direct, threaded/direct, and
-FFT/FFT full \(G^{r,<,>}\) and \(\Sigma_{pp}^{r,<,>}\) fields and currents at
-`rtol=1e-10`, `atol=1e-12`. The protocol makes no claim that direct or
-threaded SCBA was run on every resolved production grid.
+`rtol=1e-8`, `atol=1e-12` for every
+\(G^{r,<,>}\) and \(\Sigma_{pp}^{r,<,>}\) fixed-point field. Their
+route-independent transport observable is
+\(J_{\rm tr}=(J_L-J_R)/2\), not a vector containing \(P_{pp}\).
+Collision power, contact balance, and full balance are evaluated separately
+for every run; two accepted residuals are not cross-compared as transport
+current. Backend equivalence is a separate, bounded, converged SCBA oracle
+comparing serial/direct, threaded/direct, and FFT/FFT full fields and the
+full current/conservation vector at `rtol=1e-10`, `atol=1e-12`. The protocol
+makes no claim that direct or threaded SCBA was run on every resolved
+production grid.
+
+Refinement field applicability follows the quantity being changed.
+\(\eta_{\rm lead}\) changes contact broadening, so its pointwise fields are
+descriptive and non-gating; the eta direction gates \(J_{\rm tr}\), the
+selected linewidth and shift, and the self-energy tail. Frequency-spacing
+and cutoff changes use different grids and also have no pointwise field
+gate. Mixing changes only the fixed-point iteration path, so the
+changed-mixing direction additionally must reproduce all six fixed-point
+fields at `rtol=1e-8`, `atol=1e-12`. These applicability rules do not alter
+the preregistered physical controls or the \(0.5\%\) directional observable
+threshold.
 
 One-shot Born may screen these cases and seed continuation, but it is not a
 fixed point and is generally not conserving. Only converged SCBA can certify
