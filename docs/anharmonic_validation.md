@@ -1,8 +1,8 @@
 # Anharmonic NEGF validation and release checklist
 
 Status: executable `0.1.0.dev0` validation contract and implementation snapshot,
-2026-07-25. Protocol v2 is implemented but has not yet completed its clean
-remote release rerun.
+2026-07-25. Protocol v2 has produced one provisional failed endpoint, but the
+corrected contract has not yet completed a clean full-graph remote rerun.
 
 This document distinguishes three things that should not be conflated:
 
@@ -103,8 +103,10 @@ Run on every change:
 - direct principal-value reconstruction;
 - an independently enumerated exact-bin mode-space Born/FGR oracle, including
   the dynamic bubble shift and the spectral HWHM/FWHM convention;
-- algebraic symmetry, lesser/greater correlation positivity, conditional
-  passivity, FDT, high-frequency, and moment fixtures;
+- algebraic symmetry; lesser/greater correlation positivity in every state;
+  contact passivity in every state; conditional Green/total/interaction
+  passivity only at equilibrium or zero interaction; FDT, high-frequency,
+  and moment fixtures;
 - zero-vertex, weak-cubic, and alternate-initial-state SCBA;
 - serial/threaded equality;
 - contact balance, collision power, block-local raw harmonic-bond checks, and
@@ -217,11 +219,23 @@ claiming an infeasible full-grid direct or threaded campaign.
 | Equilibrium | Gapped contact-only and interacting chains, at zero and finite temperature | KMS/FDT/Keldysh residuals below \(10^{-8}\); \(|J_\alpha|<10^{-10}J_0\) |
 | SCBA fixed point | One-site and three-to-five-layer chains, two initial states | Unmixed \(\Sigma^{r,<,>}\) and \(G\) residuals below \(10^{-8}\) for three consecutive iterations; same fixed point |
 | Conservation | Block-local and full-nonlocal intralayer fixtures; cross-cut FPU fixture | \(|J_L+J_R|\) and \(|P_{pp}|\) obey the locked current tolerance. Projected EOM and layer-collision sums recover global power; individual layers may redistribute energy. Raw harmonic bonds gate only when \(r_{\rm nl}\le10^{-12}\); otherwise EOM-corrected cuts gate. Cross-cut FPU has no spatial gate yet. |
-| Spectral quality | Correlation positivity; Green/contact/total stability; equilibrium interaction passivity; signed-frequency symmetry, high-frequency limit, first moment | \(iC^{</>}\) PSD floor no worse than \(-10^{-10}\) of scale; NESS \(\Gamma_{pp}\) may be indefinite; moment error below \(5\times10^{-3}\) |
+| Spectral quality | Lesser/greater correlation positivity in every state; harmonic-contact passivity in every state; Green/total/interaction spectral passivity only at equilibrium or zero interaction; signed-frequency symmetry, high-frequency limit, first moment | \(iC^{</>}\) PSD floor no worse than \(-10^{-10}\) of scale; interacting-NESS Green/total/\(\Gamma_{pp}\) values are descriptive and never clipped; moment error below \(5\times10^{-3}\) |
 | Refinement | Independent half-spacing, larger-cutoff, eta-at-most-half, and changed-mixing runs | Current and internally derived selected-peak changes below \(5\times10^{-3}\); outer interaction-self-energy tail below \(10^{-6}\) |
 | Weak coupling | Every released cubic toy point | Linewidth and shift each below 10% of the associated mode frequency |
 | Optimized backends | Bounded converged serial/direct, threaded/direct, and FFT/FFT SCBA; later dense/sparse and dense/selected GF | Field relative error below \(10^{-10}\), scale-aware absolute error below \(10^{-12}\); unchanged conservation gate; no full-grid direct/threaded claim |
 | Restart | Continuous/interrupted runs and backend/worker change | Near-bitwise serial result and cross-backend error below \(10^{-10}\) |
+
+The state-conditional policy is deliberately conservative. In the equilibrium
+Lehmann discussion of Uhrig, Kalthoff, and Freericks, positive-frequency
+bosonic spectral positivity requires probabilities ordered monotonically with
+energy; their nonequilibrium Floquet representation admits no general
+bosonic positivity conclusion
+([Phys. Rev. Lett. 122, 130604
+(2019)](https://doi.org/10.1103/PhysRevLett.122.130604);
+[arXiv:1808.10199](https://arxiv.org/abs/1808.10199)). The present transport
+NESS is not a Floquet system: this citation supports only the general caveat
+that bosonic spectral positivity needs an occupation hypothesis, not a claim
+about the sign of any particular NEGFPy spectrum.
 
 For FPU-\(\alpha\) bond interactions, the conservation gate uses contact
 currents and collision power. Its bare cubic vertex crosses a layer cut, so
@@ -364,9 +378,10 @@ Implemented and covered by automated tests:
   gates, and the fitted interaction-broadening peak frequency changes by
   less than \(5\times10^{-3}\);
 - algebraic and symmetry identities; separate \(iC^{</>}\) correlation
-  positivity; Green/contact/total stability; equilibrium-only interaction
-  passivity; FDT, spectral-moment, high-frequency, conservation, memory, and
-  deterministic-backend tests;
+  positivity in every state; harmonic-contact passivity in every state;
+  conditional Green/total/interaction spectral passivity only at equilibrium
+  or zero interaction; FDT, spectral-moment, high-frequency, conservation,
+  memory, and deterministic-backend tests;
 - a harmonic IFC audit for reciprocity, acoustic and rotational sum-rule
   residuals, q-space Hermiticity, mapping consistency, and sampled stability;
 - full and compact phono3py `fc3.hdf5` ingestion foundations, including
@@ -408,8 +423,10 @@ were
 \(1.757079\times10^{-7}\). The old report also had a genuine coarse-grid
 Green spectral-moment error of 0.0704865, above 0.005. Separately, it reported
 a \(5.992684\times10^{-6}\) nonequilibrium \(\Gamma_{pp}\) passivity failure
-against \(10^{-10}\); protocol v2 removes that invalid NESS-only gate while
-retaining correlation positivity and the Green/contact/total stability gates.
+against \(10^{-10}\). That state-conditional gate was invalid. The corrected
+contract retains unconditional correlation positivity and contact passivity,
+and gates Green, total, and interaction spectral passivity only at
+equilibrium or zero interaction.
 
 The postmortem measured a full-self-energy nonlocal ratio of approximately
 0.46. On this archived field, the projected equation-of-motion exchange
@@ -419,6 +436,47 @@ result; the result must be reproduced by the clean protocol-v2 rerun. Every
 remaining outcome in the superseded graph was archived as blocked, so no
 continuation, backend comparison, or numerical-refinement claim was obtained
 from this attempt.
+
+### Protocol-v2 endpoint: provisional failed diagnostic
+
+A later workstation attempt used clean immutable commit
+`ab467f6abdf9ca9b7d7d13f67a2c966c95f788a0` and the protocol-v2 base grid
+(12,801 signed-frequency points). The hardest zero-start endpoint converged
+in 93 iterations. Its terminal self-energy and Green residuals were
+\(5.626106908840702\times10^{-9}\) and
+\(1.883264937980352\times10^{-10}\). The exact archived transport evidence
+was:
+
+- \(J_L=0.018310314275714244\) and
+  \(J_R=-0.018310314266458405\);
+- contact imbalance \(9.25583915067918\times10^{-12}\),
+  \(P_{pp}=-9.255838633342108\times10^{-12}\), and full balance
+  \(5.173370710020005\times10^{-19}\);
+- interaction-self-energy tail \(5.493998998582065\times10^{-10}\);
+- selected parent-mode linewidth \(0.012015829368999151\) and shift
+  \(0.0014191692116250685\), giving weak-coupling ratios
+  \(0.008010552912666101\) and \(0.0009461128077500456\).
+
+The endpoint nevertheless remains a **provisional failed diagnostic under its
+frozen revision**. That revision incorrectly applied Green and total
+spectral-passivity gates to interacting NESS, failed closed, and archived the
+other 12 preregistered outcomes as blocked. A postmortem, without clipping or
+positive-cone projection, found that all three worst descriptive values
+occurred at the first nonzero bin \(|\omega|=0.00078125\), deep in the pinned
+gap:
+
+| Quantity | Spectral scale | Minimum eigenvalue | Normalized violation |
+|---|---:|---:|---:|
+| Green spectral function | \(280.5143445104\) | \(-2.362492787\times10^{-6}\) | \(8.422003485\times10^{-9}\) |
+| Total embedded self-energy | \(0.250440241545\) | \(-2.933080306\times10^{-6}\) | \(1.171169732\times10^{-5}\) |
+| Interaction self-energy | \(0.118031155016\) | \(-2.939018084\times10^{-6}\) | \(2.490035858\times10^{-5}\) |
+
+All Green, contact, interaction, and total lesser/greater correlation-
+positivity violations were zero. The table is postmortem descriptive
+evidence, not a set of extra fields retroactively embedded in the raw report.
+Because the execution contract is part of provenance, the endpoint cannot be
+reclassified after the fact. A new immutable candidate must rerun the full
+graph under the corrected passivity scope.
 
 Still required before declaring the complete `0.1.0` research release
 validated:

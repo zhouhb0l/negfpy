@@ -526,7 +526,9 @@ def test_correlation_positivity_checks_i_correlation_psd() -> None:
     assert correlation_positivity_violation(indefinite) == pytest.approx(0.5)
 
 
-def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
+def test_interacting_nonlocal_ness_gates_correlations_not_retarded_passivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     device, lead, vertex = pinned_three_polarization_chain(
         3,
         spring=(0.1, 0.1, 0.1),
@@ -551,7 +553,8 @@ def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
     metrics = result.diagnostics.metrics
 
     assert metrics["equilibrium_fdt_applicable"] == 0.0
-    assert metrics["sigma_pp_passivity_applicable"] == 0.0
+    assert metrics["zero_vertex"] == 0.0
+    assert metrics["interacting_retarded_passivity_applicable"] == 0.0
     assert metrics["sigma_pp_passivity_violation"] > 1.0e-10
 
     off_diagonal_lesser = np.array(result.sigma_pp.lesser, copy=True)
@@ -560,6 +563,7 @@ def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
     assert np.max(np.abs(off_diagonal_lesser)) > 1.0e-6
 
     for label in ("green", "sigma_pp", "sigma_left", "sigma_right"):
+        assert metrics[f"{label}_correlation_positivity_applicable"] == 1.0
         assert (
             metrics[f"{label}_lesser_correlation_positivity_violation"]
             <= 1.0e-10
@@ -569,10 +573,13 @@ def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
             <= 1.0e-10
         )
 
-    for label in ("green", "sigma_left", "sigma_right"):
+    for label in ("green", "sigma_pp"):
+        assert metrics[f"{label}_passivity_applicable"] == 0.0
+    for label in ("sigma_left", "sigma_right"):
         assert metrics[f"{label}_passivity_applicable"] == 1.0
         assert metrics[f"{label}_passivity_violation"] <= 1.0e-10
-    assert metrics["sigma_total_passivity_violation"] <= 1.0e-10
+    assert metrics["sigma_total_passivity_applicable"] == 0.0
+    assert metrics["sigma_total_correlation_positivity_applicable"] == 1.0
     assert (
         metrics["sigma_total_lesser_correlation_positivity_violation"]
         <= 1.0e-10
@@ -581,7 +588,108 @@ def test_nonlocal_ness_gates_correlations_and_total_not_pp_gamma() -> None:
         metrics["sigma_total_greater_correlation_positivity_violation"]
         <= 1.0e-10
     )
-    assert not any(
-        "sigma_pp passivity" in failure
-        for failure in result.diagnostics.failures
+
+    monkeypatch.setitem(
+        check_solution.__globals__,
+        "passivity_violation",
+        lambda retarded, grid: 0.5,
     )
+    scoped_report = check_solution(problem, result, config)
+    for descriptive_label in ("green", "sigma_pp", "sigma_total"):
+        assert not any(
+            f"{descriptive_label} passivity" in failure
+            for failure in scoped_report.failures
+        )
+    for gated_label in ("sigma_left", "sigma_right"):
+        assert any(
+            f"{gated_label} passivity" in failure
+            for failure in scoped_report.failures
+        )
+
+
+def test_interacting_equilibrium_gates_all_retarded_passivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = SignedFrequencyGrid(step=1.0, n_positive=2)
+    problem = replace(
+        _problem(grid),
+        vertex=DenseCubicVertex(np.full((1, 1, 1), 0.01)),
+    )
+    config = SCBAConfig(eta_lead=1.0e-8)
+    result = solve_one_shot_born(problem, config)
+    metrics = result.diagnostics.metrics
+
+    assert metrics["equilibrium_fdt_applicable"] == 1.0
+    assert metrics["zero_vertex"] == 0.0
+    assert metrics["interacting_retarded_passivity_applicable"] == 1.0
+    for label in (
+        "green",
+        "sigma_pp",
+        "sigma_left",
+        "sigma_right",
+        "sigma_total",
+    ):
+        assert metrics[f"{label}_passivity_applicable"] == 1.0
+
+    monkeypatch.setitem(
+        check_solution.__globals__,
+        "passivity_violation",
+        lambda retarded, grid: 0.5,
+    )
+    gated_report = check_solution(problem, result, config)
+    for label in (
+        "green",
+        "sigma_pp",
+        "sigma_left",
+        "sigma_right",
+        "sigma_total",
+    ):
+        assert any(
+            f"{label} passivity" in failure
+            for failure in gated_report.failures
+        )
+
+
+def test_zero_vertex_ness_gates_all_retarded_passivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grid = SignedFrequencyGrid(step=1.0, n_positive=2)
+    base = _problem(grid)
+    problem = replace(
+        base,
+        left=replace(base.left, temperature=0.9),
+        right=replace(base.right, temperature=0.7),
+    )
+    config = SCBAConfig(eta_lead=1.0e-8)
+    result = solve_scba(problem, config)
+    metrics = result.diagnostics.metrics
+
+    assert metrics["equilibrium_fdt_applicable"] == 0.0
+    assert metrics["zero_vertex"] == 1.0
+    assert metrics["interacting_retarded_passivity_applicable"] == 1.0
+    for label in (
+        "green",
+        "sigma_pp",
+        "sigma_left",
+        "sigma_right",
+        "sigma_total",
+    ):
+        assert metrics[f"{label}_passivity_applicable"] == 1.0
+
+    monkeypatch.setitem(
+        check_solution.__globals__,
+        "passivity_violation",
+        lambda retarded, grid: 0.5,
+    )
+    gated_report = check_solution(problem, result, config)
+    for label in (
+        "green",
+        "sigma_pp",
+        "sigma_left",
+        "sigma_right",
+        "sigma_total",
+    ):
+        assert any(
+            f"{label} passivity" in failure
+            for failure in gated_report.failures
+        )

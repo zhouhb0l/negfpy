@@ -794,7 +794,15 @@ def check_solution(
         abs(problem.left.temperature - problem.right.temperature)
         <= 1.0e-14 * temperature_scale
     )
+    zero_vertex = _max_abs(problem.vertex.values) == 0.0
+    interacting_retarded_passivity_applicable = (
+        equal_temperature or zero_vertex
+    )
     metrics["equilibrium_fdt_applicable"] = float(equal_temperature)
+    metrics["zero_vertex"] = float(zero_vertex)
+    metrics["interacting_retarded_passivity_applicable"] = float(
+        interacting_retarded_passivity_applicable
+    )
 
     # Certification never trusts cached contacts, a supplied retarded
     # interaction self-energy, convergence history, or summarized currents.
@@ -1026,6 +1034,13 @@ def check_solution(
         metrics[
             f"{label}_greater_correlation_positivity_violation"
         ] = greater_positivity
+        metrics[
+            f"{label}_lesser_correlation_positivity_applicable"
+        ] = 1.0
+        metrics[
+            f"{label}_greater_correlation_positivity_applicable"
+        ] = 1.0
+        metrics[f"{label}_correlation_positivity_applicable"] = 1.0
         metrics[f"{label}_correlation_positivity_violation"] = max(
             lesser_positivity,
             greater_positivity,
@@ -1075,7 +1090,10 @@ def check_solution(
                 release_only=True,
             )
 
-        passivity_applicable = label != "sigma_pp" or equal_temperature
+        passivity_applicable = (
+            label in ("sigma_left", "sigma_right")
+            or interacting_retarded_passivity_applicable
+        )
         metrics[f"{label}_passivity_applicable"] = float(
             passivity_applicable
         )
@@ -1099,19 +1117,35 @@ def check_solution(
         total_self_energy.greater
     )
     metrics["sigma_total_passivity_violation"] = total_passivity
-    metrics["sigma_total_passivity_applicable"] = 1.0
+    metrics["sigma_total_passivity_applicable"] = float(
+        interacting_retarded_passivity_applicable
+    )
     metrics[
         "sigma_total_lesser_correlation_positivity_violation"
     ] = total_lesser_positivity
     metrics[
         "sigma_total_greater_correlation_positivity_violation"
     ] = total_greater_positivity
+    metrics[
+        "sigma_total_lesser_correlation_positivity_applicable"
+    ] = 1.0
+    metrics[
+        "sigma_total_greater_correlation_positivity_applicable"
+    ] = 1.0
+    metrics["sigma_total_correlation_positivity_applicable"] = 1.0
     metrics["sigma_total_correlation_positivity_violation"] = max(
         total_lesser_positivity,
         total_greater_positivity,
     )
+    if interacting_retarded_passivity_applicable:
+        _append_threshold_failure(
+            release_failures,
+            name="sigma_total passivity",
+            value=total_passivity,
+            limit=_PASSIVITY_RTOL,
+            release_only=True,
+        )
     for name, value in (
-        ("sigma_total passivity", total_passivity),
         (
             "sigma_total lesser correlation positivity",
             total_lesser_positivity,

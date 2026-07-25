@@ -443,27 +443,40 @@ G^r(-\omega)=G^r(\omega)^*
 \]
 
 for real real-space IFCs. For every stored lesser and greater correlation
-matrix \(C^{</>}\), it separately checks positive semidefiniteness of
+matrix \(C^{</>}\), it always checks positive semidefiniteness of
 \(iC^{</>}\) after Hermitian projection. This is the primitive positivity
-condition in the present \(-i\)-times-correlation convention.
+condition in the present \(-i\)-times-correlation convention; it applies
+separately to the Green, contact, interaction, and total lesser/greater
+correlations in both equilibrium and nonequilibrium calculations.
 
-Passivity is then applied only where it is mathematically justified:
+Spectral passivity has a narrower scope. The equilibrium bosonic Lehmann
+argument requires state probabilities that decrease monotonically with
+energy. Uhrig, Kalthoff, and Freericks make this assumption explicit and
+also show why no general bosonic positivity conclusion follows once the
+occupation and spectral shifts no longer obey that ordering
+([Phys. Rev. Lett. 122, 130604
+(2019)](https://doi.org/10.1103/PhysRevLett.122.130604);
+[arXiv:1808.10199](https://arxiv.org/abs/1808.10199)). A generic interacting
+nonequilibrium steady state has no corresponding monotone-occupation
+theorem. The certification contract therefore applies spectral passivity as
+follows:
 
-- \(\operatorname{sgn}(\omega)A_G(\omega)\) for the device Green function;
-- \(\operatorname{sgn}(\omega)\Gamma_\alpha(\omega)\) for each equilibrium
-  harmonic contact;
-- the broadening of the **total** embedded self-energy
-  \(\Sigma_L+\Sigma_R+\Sigma_{pp}\), which is required for stability of the
-  open steady-state solution; and
-- \(\operatorname{sgn}(\omega)\Gamma_{pp}(\omega)\) for the interaction
-  self-energy at equilibrium.
+- \(\operatorname{sgn}(\omega)\Gamma_\alpha(\omega)\) is gated for each
+  harmonic contact in every calculation. The retarded contact is a property
+  of its equilibrium reservoir and does not depend on the device's
+  nonequilibrium occupations.
+- \(\operatorname{sgn}(\omega)A_G(\omega)\), the broadening of the **total**
+  embedded self-energy \(\Sigma_L+\Sigma_R+\Sigma_{pp}\), and
+  \(\operatorname{sgn}(\omega)\Gamma_{pp}(\omega)\) are gated at global
+  equilibrium or when the cubic interaction is zero.
+- In an interacting nonequilibrium steady state, those three Green/total/
+  interaction quantities are archived as descriptive diagnostics only.
 
-Away from equilibrium,
+In particular,
 \(\Gamma_{pp}=i(\Sigma_{pp}^>-\Sigma_{pp}^<)\) is the difference of two
-positive correlation matrices and need not itself be positive semidefinite.
-Its indefinite eigenvalues are therefore recorded but are not a failure.
-Applying an equilibrium interaction-passivity gate to a nonequilibrium
-steady state would reject physically admissible in/out-scattering balance.
+positive correlation matrices and is not constrained by correlation
+positivity alone. The code neither clips negative eigenvalues nor projects
+any of these spectra onto a positive cone.
 
 The diagnostic layer also checks the high-frequency limit
 
@@ -492,9 +505,10 @@ relations without directly evaluating unstable large exponentials.
 `DiagnosticReport.passed` means the essential algebraic and conservation
 checks for that calculated state passed. `release_certified` is stricter: it
 also requires a converged SCBA result, `causal_hilbert`, signed-frequency
-symmetries, correlation positivity, the applicable Green/contact/total and
-equilibrium-interaction passivity gates, high-frequency and moment quality,
-and a sufficiently small interaction-self-energy tail. Certification refuses
+symmetries, correlation positivity, contact passivity in every state, the
+conditional Green/total/interaction passivity gates at equilibrium or zero
+interaction, high-frequency and moment quality, and a sufficiently small
+interaction-self-energy tail. Certification refuses
 solver tolerances looser than the locked dense-v0.1 ceilings, fewer than three
 minimum or consecutive iterations, undeclared physical source units, or a
 mismatch between the installed and source-declared package versions.

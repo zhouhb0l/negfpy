@@ -265,12 +265,17 @@ All of the following should pass:
 - \(G^a=(G^r)^\dagger\);
 - Keldysh spectral identity;
 - positive semidefiniteness of every Hermitian-projected
-  \(iC^{</>}\) correlation matrix for Green functions and self-energies;
-- positive-frequency stability/passivity of the Green spectral function,
-  each harmonic contact broadening, and the total embedded self-energy;
-- interaction-only \(\Gamma_{pp}\) passivity at equilibrium. In a
-  nonequilibrium steady state, \(\Gamma_{pp}=i(\Sigma_{pp}^>-\Sigma_{pp}^<)\)
-  may be indefinite and is recorded rather than rejected;
+  \(iC^{</>}\) correlation matrix for Green functions and self-energies in
+  every equilibrium and nonequilibrium calculation;
+- passivity of each harmonic contact broadening in every calculation;
+- Green, total-self-energy, and interaction-self-energy spectral passivity
+  only at global equilibrium or zero cubic interaction. In an interacting
+  nonequilibrium steady state these quantities are descriptive, not gates:
+  bosonic spectral positivity relies on monotonically ordered occupations,
+  for which there is no general NESS theorem
+  ([Uhrig et al., Phys. Rev. Lett. 122, 130604
+  (2019)](https://doi.org/10.1103/PhysRevLett.122.130604);
+  [arXiv:1808.10199](https://arxiv.org/abs/1808.10199));
 - causality of \(G^r\) and stability of the total embedded retarded problem;
 - \(J_L+J_R=0\);
 - raw harmonic bond current is constant only when the converged
@@ -475,9 +480,10 @@ not a validation result.
 - equilibrium KMS/fluctuation-dissipation identities;
 - positive semidefiniteness of Hermitian-projected \(iC^{</>}\) for the
   lesser/greater correlation matrices;
-- Green/contact/total embedded stability, plus interaction-only
-  \(\Gamma_{pp}\) passivity at equilibrium. NESS \(\Gamma_{pp}\) may be
-  indefinite and is not itself a passivity gate;
+- harmonic-contact passivity in every calculation, plus Green, total, and
+  interaction spectral passivity only at equilibrium or zero interaction.
+  All three latter quantities are descriptive in interacting NESS and are
+  never clipped;
 - exactly zero equilibrium current within the integration tolerance;
 - harmonic limit recovered as \(\Psi\to0\).
 
@@ -665,11 +671,10 @@ Then use [Guo et al., Phys. Rev. B 103, 174306
 ### Protocol-v2 checkpoint and first-attempt evidence
 
 Protocol v2 now encodes the resolved seven-point harmonic preflight, bounded
-converged backend oracle, 13-outcome FFT graph, equilibrium-only interaction
+converged backend oracle, 13-outcome FFT graph, state-conditional spectral
 passivity, full-nonlocal spatial-current bookkeeping, weak-coupling gates,
-clean common
-provenance, and private atomic HDF5 outcome resume. It has not yet completed a
-clean remote run.
+clean common provenance, and private atomic HDF5 outcome resume. It has not
+yet completed the full clean remote graph.
 
 The first remote attempt instead used commit
 `d05b4404af98e650e712b4ed7afd68705c1014f2`, the superseded protocol/schema,
@@ -688,12 +693,51 @@ That result is a provisional failure. The raw harmonic bond currents
 tolerance. Its Green spectral-moment error 0.0704865 also genuinely exceeded
 0.005. The old report additionally rejected a nonequilibrium
 \(\Gamma_{pp}\) passivity metric of \(5.992684\times10^{-6}\) against
-\(10^{-10}\); that NESS-only gate is scientifically invalid and removed in
-protocol v2. A postmortem found \(r_{\rm nl}\simeq0.46\), and the projected
+\(10^{-10}\). That state-conditional gate was invalid. Protocol v2 retains
+unconditional correlation positivity and contact passivity, and gates Green,
+total, and interaction spectral passivity only at equilibrium or zero
+interaction.
+
+A postmortem found \(r_{\rm nl}\simeq0.46\), and the projected
 EOM exchange closes the archived raw bond/contact mismatch exactly. This
 supports the diagnosis, but cannot substitute for a clean rerun. All other
 old-graph outcomes were archived as blocked, so there is no old-protocol
 continuation, backend, or refinement result to promote.
+
+A later clean protocol-v2 endpoint attempt used immutable commit
+`ab467f6abdf9ca9b7d7d13f67a2c966c95f788a0` and the 12,801-point base
+grid. It converged in 93 iterations, with terminal self-energy and Green
+residuals \(5.626106908840702\times10^{-9}\) and
+\(1.883264937980352\times10^{-10}\). The exact archived currents were
+\(J_L=0.018310314275714244\) and
+\(J_R=-0.018310314266458405\); the contact imbalance was
+\(9.25583915067918\times10^{-12}\),
+\(P_{pp}=-9.255838633342108\times10^{-12}\), and the full balance was
+\(5.173370710020005\times10^{-19}\). The interaction-self-energy tail was
+\(5.493998998582065\times10^{-10}\). At the selected parent mode the
+linewidth and shift were \(0.012015829368999151\) and
+\(0.0014191692116250685\), with weak-coupling ratios
+\(0.008010552912666101\) and \(0.0009461128077500456\), respectively.
+
+That endpoint is still a **provisional failed diagnostic**, not a certified
+result under its frozen revision. Its report incorrectly gated Green and
+total spectral passivity in interacting NESS and therefore stopped the
+remaining graph. A no-clipping postmortem located every worst descriptive
+value at the first nonzero bin, \(|\omega|=0.00078125\), deep in the pinned
+gap: Green scale \(280.5143445104\), minimum eigenvalue
+\(-2.362492787\times10^{-6}\), normalized violation
+\(8.422003485\times10^{-9}\); total-self-energy scale
+\(0.250440241545\), minimum eigenvalue
+\(-2.933080306\times10^{-6}\), normalized violation
+\(1.171169732\times10^{-5}\); and interaction-self-energy scale
+\(0.118031155016\), minimum eigenvalue
+\(-2.939018084\times10^{-6}\), normalized violation
+\(2.490035858\times10^{-5}\). All lesser/greater correlation-positivity
+violations were zero. These postmortem numbers are descriptive evidence,
+not extra fields embedded retrospectively in the raw report, and no spectrum
+was clipped or projected. A new immutable candidate must rerun the complete
+graph under the corrected contract; the old endpoint cannot be
+retroactively certified.
 
 Accordingly, `0.1.0` remains **unvalidated** until one clean candidate commit
 passes the seven-point harmonic preflight, bounded full-field
@@ -702,7 +746,7 @@ open-system matrix, restart comparison, and strict combined report.
 
 | Release | Required outcome | Current state |
 |---|---|---|
-| `0.1.0` | Python-only dense cubic SCBA for validated toy models | Protocol-v2 machinery and prior fine open-system evidence exist, but the only full remote attempt used the old contract and failed as documented above. Clean protocol-v2 rerun pending; not validated. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions. |
+| `0.1.0` | Python-only dense cubic SCBA for validated toy models | Protocol-v2 machinery and fine open-system evidence exist. The old full attempt and the later `ab467` endpoint are provisional failed diagnostics; neither is certifiable under its frozen revision. A new clean immutable candidate must pass the complete graph. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions. |
 | `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | Full/compact reading, schema/permutation checks, unit conversion, mass normalization, hashes, and provenance are implemented. Translational device mapping and the pinned phono3py matrix-element/linewidth oracle remain. |
 | `0.3.0` | Sparse real-space SCBA for quasi-1D material devices | Not implemented. It must first reproduce the dense contractions exactly and retain complete FC3-implied support. |
 | `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Not implemented. It requires explicit coupled \(q'\) sums, momentum folding, and validated \(1/N_q\) normalization. |
@@ -714,6 +758,11 @@ reservoirs are post-reference branches. None may become a silent default.
 
 ## 11. Core literature
 
+- G. S. Uhrig, M. H. Kalthoff, and J. K. Freericks, “Positivity of the
+  Spectral Densities of Retarded Floquet Green Functions,”
+  [Phys. Rev. Lett. 122, 130604
+  (2019)](https://doi.org/10.1103/PhysRevLett.122.130604)
+  ([arXiv:1808.10199](https://arxiv.org/abs/1808.10199)).
 - N. Mingo, “Anharmonic phonon flow through molecular-sized junctions,”
   [Phys. Rev. B 74, 125402 (2006)](https://doi.org/10.1103/PhysRevB.74.125402).
 - J.-S. Wang, J. Wang, and N. Zeng, “Nonequilibrium Green’s function
