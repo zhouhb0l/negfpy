@@ -114,6 +114,47 @@ def test_preregistration_preserves_exact_release_ladders_and_directions() -> Non
         MultidimensionalLadderSpec(pinnings=(2.05, 0.61, 0.17))
 
 
+def test_harmonic_preflight_derives_direction_without_scba_metric() -> None:
+    """The g=0 Born preflight must not require SCBA-only diagnostics."""
+
+    spec = replace(
+        MultidimensionalLadderSpec(),
+        spacings=(1.0, 0.5, 0.25),
+        cutoffs=(2.0, 3.0),
+        etas=(0.2, 0.1, 0.05),
+        mixings=(0.2, 0.1),
+    )
+    config = replace(
+        pr_multidimensional_release_config(),
+        spec=spec,
+        numerical=multidimensional.MultidimensionalNumericalPoint(
+            spacing=0.5,
+            cutoff=2.0,
+            eta_lead=0.1,
+            mixing=0.2,
+        ),
+        production_backend="fft",
+        production_hilbert_backend="fft",
+        surface_gf_method="analytic_diagonal",
+    )
+
+    report = multidimensional._harmonic_same_grid_preflight(
+        config,
+        "a" * 64,
+    )
+
+    assert len(report["points"]) == 7
+    assert all(
+        "direction" in record.get("current_checks", {})
+        for record in report["points"]
+    )
+    assert not any("KeyError" in failure for failure in report["failures"])
+    assert not any(
+        "does not match protocol" in failure
+        for failure in report["failures"]
+    )
+
+
 def test_problem_is_fixed_three_layer_nine_dof_xyz_fixture() -> None:
     config = pr_multidimensional_release_config()
     problem = build_multidimensional_problem(

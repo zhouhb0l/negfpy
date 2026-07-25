@@ -2628,8 +2628,23 @@ def _harmonic_same_grid_preflight(
                 "bond_to_contact": float(
                     metrics.get("bond_current_contact_abs_error", 0.0)
                 ),
-                "direction": float(
-                    metrics["current_direction_violation"]
+                "direction": (
+                    max(
+                        0.0,
+                        -result.currents.left,
+                        result.currents.right,
+                    )
+                    if problem.left.temperature > problem.right.temperature
+                    else (
+                        max(
+                            0.0,
+                            -result.currents.right,
+                            result.currents.left,
+                        )
+                        if problem.right.temperature
+                        > problem.left.temperature
+                        else 0.0
+                    )
                 ),
             }
             if moment > 5.0e-3:
@@ -2646,7 +2661,9 @@ def _harmonic_same_grid_preflight(
                     "harmonic essential diagnostics did not pass"
                 )
             expected_execution = {
-                "effective_backend": config.production_backend,
+                "backend": config.production_backend,
+                "effective_backend": "serial",
+                "cubic_kernel": "zero_vertex",
                 "hilbert_backend": config.production_hilbert_backend,
                 "surface_gf_method": config.surface_gf_method,
             }
