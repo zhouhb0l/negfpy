@@ -4,13 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "negfpy"
-version = "0.0.1"
+version = "0.1.0.dev0"
 description = "Phonon NEGF development"
 requires-python = ">=3.10"
-dependencies = ["numpy", "scipy"]
+dependencies = ["numpy", "scipy", "threadpoolctl>=3"]
+
+[project.optional-dependencies]
+fc3 = ["h5py>=3"]
+test = ["h5py>=3", "pytest>=8"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+  "nightly: bounded validation cases that are too costly for pull-request CI",
+]
