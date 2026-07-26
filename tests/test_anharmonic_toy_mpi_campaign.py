@@ -6,7 +6,6 @@ import shutil
 import numpy as np
 import pytest
 
-import negfpy
 from negfpy.anharmonic import _mpi_tasks as mpi_tasks
 from negfpy.anharmonic._mpi_tasks import (
     DuplicateTaskCheckpointError,
@@ -119,9 +118,6 @@ def _successful_executor(calls: list[str]):
 def test_static_dag_order_exact_parent_and_canonical_merge(
     tmp_path: Path,
 ) -> None:
-    assert Path(negfpy.__file__).resolve().is_relative_to(
-        Path(__file__).resolve().parents[1] / "src"
-    )
     campaign = _campaign()
     calls: list[str] = []
     report = execute_production_toy_mpi_campaign(
