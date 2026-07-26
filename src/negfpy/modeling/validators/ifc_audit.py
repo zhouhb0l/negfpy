@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from itertools import product
 from types import MappingProxyType
 from typing import Any
 
@@ -426,6 +427,102 @@ def _schema_and_merged_terms(
     return valid, masses, n_atoms, merged, duplicates
 
 
+def _audit_explicit_nyquist_grid(
+    ifc: IFCData,
+    merged: Mapping[Translation, Array],
+    *,
+    errors: list[str],
+    metrics: dict[str, float],
+) -> bool:
+    """Validate a reader-declared explicit q2r reciprocal grid."""
+
+    metadata = ifc.metadata if isinstance(ifc.metadata, Mapping) else {}
+    expansion = metadata.get("nyquist_expansion")
+    declaration_present = bool(
+        expansion is not None
+        or metadata.get("explicit_nyquist_signs") is not None
+        or metadata.get("reciprocal_grid_complete") is not None
+    )
+    metrics["explicit_nyquist_grid_declared"] = float(declaration_present)
+    metrics["explicit_nyquist_grid_complete"] = 0.0
+    if not declaration_present:
+        return True
+    if not isinstance(expansion, Mapping):
+        errors.append("Explicit Nyquist grid declaration lacks expansion metadata.")
+        return False
+    nr = metadata.get("nr")
+    if not isinstance(nr, (list, tuple)) or len(nr) != 3:
+        errors.append("Explicit Nyquist grid declaration requires three positive nr values.")
+        return False
+    try:
+        repeats = tuple(int(value) for value in nr)
+    except (TypeError, ValueError):
+        errors.append("Explicit Nyquist grid declaration contains invalid nr values.")
+        return False
+    if any(value <= 0 for value in repeats):
+        errors.append("Explicit Nyquist grid declaration contains non-positive nr values.")
+        return False
+
+    valid = True
+    if expansion.get("schema") != "negfpy.qe_q2r_nyquist_expansion.v1":
+        errors.append("Explicit Nyquist grid has an unsupported expansion schema.")
+        valid = False
+    if expansion.get("strategy") != "all_sign_variants_equal_weight":
+        errors.append("Explicit Nyquist grid has an unsupported weighting strategy.")
+        valid = False
+    for name, value in (
+        ("complete_reciprocal_grid", expansion.get("complete_reciprocal_grid")),
+        ("source_mesh_equivalent", expansion.get("source_mesh_equivalent")),
+        ("explicit_nyquist_signs", metadata.get("explicit_nyquist_signs")),
+        ("reciprocal_grid_complete", metadata.get("reciprocal_grid_complete")),
+    ):
+        if value is not True:
+            errors.append(f"Explicit Nyquist grid requires {name}=true.")
+            valid = False
+
+    expected_axes: list[tuple[int, ...]] = []
+    for repeat in repeats:
+        if repeat == 1:
+            expected_axes.append((0,))
+        else:
+            expected_axes.append(tuple(range(-(repeat // 2), repeat // 2 + 1)))
+    expected = set(product(*expected_axes))
+    present = set(merged)
+    metrics["explicit_nyquist_expected_support_count"] = float(len(expected))
+    metrics["explicit_nyquist_present_support_count"] = float(len(present))
+    if present != expected:
+        errors.append(
+            "Explicit Nyquist grid support is incomplete or contains undeclared translations."
+        )
+        valid = False
+    try:
+        declared_count = int(expansion.get("expanded_support_count"))
+    except (TypeError, ValueError):
+        declared_count = -1
+    if declared_count != len(expected):
+        errors.append("Explicit Nyquist grid expanded_support_count is inconsistent.")
+        valid = False
+
+    try:
+        mesh_residual = float(expansion.get("source_mesh_max_abs"))
+        mesh_threshold = float(expansion.get("source_mesh_threshold"))
+    except (TypeError, ValueError):
+        mesh_residual = float("inf")
+        mesh_threshold = 0.0
+    metrics["explicit_nyquist_source_mesh_max_abs"] = mesh_residual
+    metrics["explicit_nyquist_source_mesh_threshold"] = mesh_threshold
+    if (
+        not np.isfinite(mesh_residual)
+        or not np.isfinite(mesh_threshold)
+        or mesh_threshold < 0.0
+        or mesh_residual > mesh_threshold
+    ):
+        errors.append("Explicit Nyquist source-mesh equivalence evidence is invalid.")
+        valid = False
+    metrics["explicit_nyquist_grid_complete"] = float(valid)
+    return valid
+
+
 _LEVI_CIVITA = np.asarray(
     (
         ((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)),
@@ -698,6 +795,19 @@ def audit_ifc_data(
         warnings=warnings,
         metrics=metrics,
     )
+    if schema_valid and merged:
+        schema_valid = bool(
+            _audit_explicit_nyquist_grid(
+                ifc,
+                merged,
+                errors=errors,
+                metrics=metrics,
+            )
+            and schema_valid
+        )
+    else:
+        metrics["explicit_nyquist_grid_declared"] = 0.0
+        metrics["explicit_nyquist_grid_complete"] = 0.0
     mapping_valid = _audit_mapping(
         ifc,
         n_atoms,

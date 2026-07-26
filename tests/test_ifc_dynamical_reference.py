@@ -181,11 +181,20 @@ def _qe_full_grid_source() -> tuple[str, np.ndarray, tuple[int, int, int], float
     positive_y = np.array(
         [[-0.3, 0.02, 0.01], [0.0, -0.2, 0.04], [-0.03, 0.0, -0.25]]
     )
+    y_nyquist = np.array(
+        [[-0.13, 0.04, -0.02], [0.04, -0.11, 0.03], [-0.02, 0.03, -0.09]]
+    )
+    mixed_nyquist = np.array(
+        [[-0.07, 0.01, 0.03], [-0.02, -0.05, 0.04], [0.0, -0.01, -0.06]]
+    )
     raw[0, 0, 0] = onsite
     raw[1, 0, 0] = positive_x
     raw[2, 0, 0] = positive_x.T
     raw[0, 1, 0] = positive_y
     raw[0, 3, 0] = positive_y.T
+    raw[0, 2, 0] = y_nyquist
+    raw[1, 2, 0] = mixed_nyquist
+    raw[2, 2, 0] = mixed_nyquist.T
     mass = 5.0
 
     lines = [
@@ -209,7 +218,7 @@ def _qe_full_grid_source() -> tuple[str, np.ndarray, tuple[int, int, int], float
     return "\n".join(lines) + "\n", raw, repeats, mass
 
 
-def _qe_source_matrices(
+def _qe_raw_source_matrices(
     raw: np.ndarray,
     repeats: tuple[int, int, int],
     mass: float,
@@ -234,6 +243,44 @@ def _qe_source_matrices(
                 * np.exp(1j * np.dot(qpoint, translation))
                 / mass
             )
+    return matrices
+
+
+def _expanded_signs_independent(index: int, repeat: int) -> tuple[int, ...]:
+    signed = _signed_fft_index_independent(index, repeat)
+    if repeat > 1 and repeat % 2 == 0 and signed == -(repeat // 2):
+        return (-(repeat // 2), repeat // 2)
+    return (signed,)
+
+
+def _qe_source_matrices(
+    raw: np.ndarray,
+    repeats: tuple[int, int, int],
+    mass: float,
+    qpoints: np.ndarray,
+) -> np.ndarray:
+    """Independent equal-image extension of the raw periodic q2r grid."""
+
+    matrices = np.zeros((qpoints.shape[0], 3, 3), dtype=np.complex128)
+    for q_index, qpoint in enumerate(qpoints):
+        for ix, iy, iz in product(
+            range(repeats[0]),
+            range(repeats[1]),
+            range(repeats[2]),
+        ):
+            variants = tuple(
+                product(
+                    _expanded_signs_independent(ix, repeats[0]),
+                    _expanded_signs_independent(iy, repeats[1]),
+                    _expanded_signs_independent(iz, repeats[2]),
+                )
+            )
+            for translation in variants:
+                matrices[q_index] += (
+                    raw[ix, iy, iz]
+                    * np.exp(1j * np.dot(qpoint, translation))
+                    / (mass * len(variants))
+                )
     return matrices
 
 
@@ -268,7 +315,7 @@ def test_qe_full_grid_source_oracle_covers_odd_and_even_fft_indices(
             "format": "qe_q2r_fc",
             "fft_repeats": repeats,
             "generic_q_seed": 90210,
-            "reference_route": "raw full-grid direct Fourier sum",
+            "reference_route": "test-side equal-image Nyquist expansion",
         },
         gauge="periodic",
         dof_per_atom=3,
@@ -277,11 +324,32 @@ def test_qe_full_grid_source_oracle_covers_odd_and_even_fft_indices(
     result = compare_ifc_dynamical_matrices(ifc, reference)
 
     assert sorted({term.dx for term in ifc.terms}) == [-1, 0, 1]
-    assert sorted({term.dy for term in ifc.terms}) == [-2, -1, 0, 1]
+    assert sorted({term.dy for term in ifc.terms}) == [-2, -1, 0, 1, 2]
     assert sorted({term.dz for term in ifc.terms}) == [0]
     assert result.passed
     assert result.max_abs_error < 2.0e-15
     assert result.max_relative_error < 2.0e-15
+    assert ifc.metadata["explicit_nyquist_signs"] is True
+    expansion = ifc.metadata["nyquist_expansion"]
+    assert expansion["raw_support_count"] == 12
+    assert expansion["expanded_support_count"] == 15
+    assert expansion["source_mesh_equivalent"] is True
+    assert expansion["source_mesh_max_abs"] < 1.0e-12
+
+    source_mesh = np.asarray(
+        [
+            2.0 * np.pi * np.asarray(index) / np.asarray(repeats)
+            for index in product(*(range(value) for value in repeats))
+        ]
+    )
+    np.testing.assert_allclose(
+        _qe_source_matrices(raw, repeats, mass, source_mesh),
+        _qe_raw_source_matrices(raw, repeats, mass, source_mesh),
+        rtol=0.0,
+        atol=1.0e-15,
+    )
+    for matrix in source_matrices:
+        np.testing.assert_allclose(matrix, matrix.conj().T, rtol=0.0, atol=3.0e-16)
     assert len(result.source_sha256) == 64
     assert len(result.reference_sha256) == 64
     assert len(result.ifc_sha256) == 64

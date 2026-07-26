@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
+from itertools import product
 from typing import Any
 
 import numpy as np
@@ -35,7 +37,11 @@ def infer_principal_layer_size(ifc: IFCData, config: BuildConfig | None = None) 
                 except Exception:
                     nr1 = None
             has_nyquist_x = bool(nr1 is not None and nr1 > 1 and (nr1 % 2 == 0) and max_abs_dx == (nr1 // 2))
-            if has_nyquist_x and pl_size > max_abs_dx:
+            if (
+                has_nyquist_x
+                and pl_size > max_abs_dx
+                and not _ifc_has_explicit_nyquist_grid(ifc)
+            ):
                 if not bool(config.nyquist_split_half):
                     raise ValueError(
                         "principal_layer_size is too large for this full-grid IFC: "
@@ -58,6 +64,8 @@ def _add_subblock(target: Array, row_idx: int, col_idx: int, block: Array, block
 
 
 def _ifc_has_full_realspace_grid(ifc: IFCData) -> bool:
+    if _ifc_has_explicit_nyquist_grid(ifc):
+        return True
     nr = ifc.metadata.get("nr") if isinstance(ifc.metadata, dict) else None
     if nr is None or len(nr) != 3:
         return False
@@ -69,6 +77,50 @@ def _ifc_has_full_realspace_grid(ifc: IFCData) -> bool:
         return False
     unique_shifts = {(int(t.dx), int(t.dy), int(t.dz)) for t in ifc.terms}
     return len(unique_shifts) == nr1 * nr2 * nr3
+
+
+def _explicit_axis_indices(repeat: int) -> tuple[int, ...]:
+    if repeat <= 0:
+        return ()
+    if repeat == 1:
+        return (0,)
+    if repeat % 2 == 0:
+        return tuple(range(-(repeat // 2), repeat // 2 + 1))
+    return tuple(range(-(repeat // 2), repeat // 2 + 1))
+
+
+def _ifc_has_explicit_nyquist_grid(ifc: IFCData) -> bool:
+    """Validate the q2r explicit-Nyquist completeness declaration."""
+
+    metadata = ifc.metadata if isinstance(ifc.metadata, Mapping) else {}
+    expansion = metadata.get("nyquist_expansion")
+    nr = metadata.get("nr")
+    if not isinstance(expansion, Mapping) or not isinstance(nr, (list, tuple)):
+        return False
+    if len(nr) != 3:
+        return False
+    try:
+        repeats = tuple(int(value) for value in nr)
+    except (TypeError, ValueError):
+        return False
+    if any(value <= 0 for value in repeats):
+        return False
+    if (
+        expansion.get("schema") != "negfpy.qe_q2r_nyquist_expansion.v1"
+        or expansion.get("strategy") != "all_sign_variants_equal_weight"
+        or expansion.get("complete_reciprocal_grid") is not True
+        or expansion.get("source_mesh_equivalent") is not True
+        or metadata.get("explicit_nyquist_signs") is not True
+        or metadata.get("reciprocal_grid_complete") is not True
+    ):
+        return False
+    expected = set(product(*(_explicit_axis_indices(value) for value in repeats)))
+    present = {(int(term.dx), int(term.dy), int(term.dz)) for term in ifc.terms}
+    try:
+        declared_count = int(expansion.get("expanded_support_count"))
+    except (TypeError, ValueError):
+        return False
+    return present == expected and declared_count == len(expected)
 
 
 def _expected_signed_fft_indices(n: int) -> set[int]:
@@ -101,6 +153,8 @@ def _ifc_has_complete_transport_axis_grid(ifc: IFCData) -> bool:
     if nr1 <= 0:
         return False
     present_dx = {int(t.dx) for t in ifc.terms}
+    if _ifc_has_explicit_nyquist_grid(ifc):
+        return present_dx == set(_explicit_axis_indices(nr1))
     return present_dx == _expected_signed_fft_indices(nr1)
 
 
@@ -135,6 +189,7 @@ def build_fc_terms(
     use_nyquist_half_split = bool(
         config.nyquist_split_half
         and has_complete_transport_axis_grid
+        and not _ifc_has_explicit_nyquist_grid(ifc)
         and nr1 is not None
         and nr1 > 1
         and (nr1 % 2 == 0)
