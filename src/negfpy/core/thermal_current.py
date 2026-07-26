@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 
 import numpy as np
+from scipy.integrate import trapezoid
 
 from .negf import DeviceLike, LeadLike, transmission, transmission_kavg
 
@@ -64,7 +65,7 @@ def heat_current_from_spectrum(
         raise ValueError("transmission_vals must have the same length as omegas.")
 
     spectral = _spectral_bose_weight(omega, temp_left=temp_left, temp_right=temp_right) * tvals
-    return float((1.0 / (2.0 * np.pi)) * np.trapz(spectral, omega))
+    return float((1.0 / (2.0 * np.pi)) * trapezoid(spectral, omega))
 
 
 def heat_current_1d(

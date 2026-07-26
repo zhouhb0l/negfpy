@@ -17,11 +17,10 @@ def test_transmission_plateau_matched_chain() -> None:
 
     wmax = analytic_band_max(params)
     omegas = np.linspace(0.2 * wmax, 0.8 * wmax, 9)
-    vals = np.array([transmission(w, device, lead, lead, eta=1e-8) for w in omegas])
+    vals = np.array([transmission(w, device, lead, lead, eta=1e-10) for w in omegas])
 
     assert np.all(np.isfinite(vals))
-    assert np.mean(vals) > 0.96
-    assert np.max(np.abs(vals - 1.0)) < 0.08
+    np.testing.assert_allclose(vals, 1.0, rtol=1.0e-10, atol=1.0e-12)
 
 
 def test_transmission_nonnegative() -> None:
