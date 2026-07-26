@@ -69,7 +69,12 @@
   MPIBaselineWallSeconds,MPICandidateWallSeconds,MPICandidateSpeedup,%
   MPIMaxMemoryFractionObserved,MPISocketCount,MPIScalingPhysicsSHA,%
   MPIReleasePhysicsSHA,MPIScalingManifestSHA,MPIRunnerManifestSHA,%
-  MPIExecutionManifestSHA,MPIScalingPassed,MPIPhysicsEqualityPassed,%
+  MPIExecutionManifestSHA,ArtifactSHA256SUMSRawSHA,ArtifactFetchReceiptSHA,%
+  StagingSHA256SUMSRawSHA,StagingImportReceiptSHA,%
+  ProductionFiguresSHA256SUMSRawSHA,ProductionFiguresReceiptSHA,%
+  HistoricalFiguresSHA256SUMSRawSHA,HistoricalFiguresReceiptSHA,%
+  ReleaseStrictReportFileSHA,ReleaseStrictReportBodySHA,%
+  MPIToyMinimumSpeedupSatisfied,MPIScalingPassed,MPIPhysicsEqualityPassed,%
   MPIBindingPassed,MPIMemoryPreflightPassed,MPIRunnerReleaseCertified}
 \newcommand{\RequireReleaseConfigTrue}[2]{%
   \ifdefstring{#1}{true}{}{%
@@ -1167,7 +1172,9 @@ was interrupted after atomically publishing a case artifact but before
 publishing its task receipt, restart adopts that orphan only after validating
 its exact task, source, environment, configuration, and content hashes. A
 focused interruption test resumes a genuinely partial two-rank campaign with
-four ranks and requires the same canonical physics and canonical report.
+four ranks and requires the same canonical physics projection used for
+rank-equality decisions. It does not claim byte equality of the full report,
+whose timing and orchestration provenance necessarily change with rank count.
 These failure-atomic shutdown, orphan-adoption, and changed-rank partial
 restart tests validate scheduler semantics; they do not change a scientific
 failure or retune its controls.
@@ -1185,7 +1192,23 @@ Scaling-selection file: \\[-1mm]
 Release-runner file: \\[-1mm]
 \quad{\scriptsize\texttt{\MPIRunnerManifestSHA}} \\[1mm]
 MPI execution-manifest file: \\[-1mm]
-\quad{\scriptsize\texttt{\MPIExecutionManifestSHA}}
+\quad{\scriptsize\texttt{\MPIExecutionManifestSHA}} \\[1mm]
+Fetched artifact raw \code{SHA256SUMS}: \\[-1mm]
+\quad{\scriptsize\texttt{\ArtifactSHA256SUMSRawSHA}} \\[1mm]
+Local fetch receipt: \\[-1mm]
+\quad{\scriptsize\texttt{\ArtifactFetchReceiptSHA}} \\[1mm]
+Production staging raw \code{SHA256SUMS} / import receipt: \\[-1mm]
+\quad{\scriptsize\texttt{\StagingSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\StagingImportReceiptSHA}} \\[1mm]
+Production figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
+\quad{\scriptsize\texttt{\ProductionFiguresSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\ProductionFiguresReceiptSHA}} \\[1mm]
+Historical figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
+\quad{\scriptsize\texttt{\HistoricalFiguresSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\HistoricalFiguresReceiptSHA}} \\[1mm]
+Strict report file / nested body: \\[-1mm]
+\quad{\scriptsize\texttt{\ReleaseStrictReportFileSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\ReleaseStrictReportBodySHA}}
 \end{tabular}
 \end{center}
 
