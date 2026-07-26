@@ -131,6 +131,63 @@ def test_harmonic_adapter_matches_core_for_asymmetric_lead_orientation() -> None
     )
 
 
+def test_harmonic_adapter_matches_scaled_core_with_asymmetric_leads() -> None:
+    d00 = np.array([[4.0, 0.2], [0.2, 3.5]], dtype=np.complex128)
+    d01 = np.array([[-0.8, 0.35], [-0.1, -0.6]], dtype=np.complex128)
+    lead = LeadBlocks(d00=d00, d01=d01, d10=d01.conj().T)
+    device = Device1D(onsite_blocks=[d00.copy()], coupling_blocks=[])
+    omega = 1.84
+    eta = 2.0e-6
+    omega_scale = 2.3
+
+    core_green, core_left, core_right = device_green_function(
+        omega=omega,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        eta=eta,
+        eta_device=0.0,
+        omega_scale=omega_scale,
+    )
+
+    scale_squared = omega_scale**2
+    scaled_lead = LeadBlocks(
+        d00=d00 / scale_squared,
+        d01=d01 / scale_squared,
+        d10=d01.conj().T / scale_squared,
+    )
+    scaled_device = Device1D(
+        onsite_blocks=[d00 / scale_squared],
+        coupling_blocks=[],
+    )
+    scaled_omega = omega / omega_scale
+    grid = SignedFrequencyGrid(step=scaled_omega / 10.0, n_positive=20)
+    problem = CubicSCBAProblem(
+        device=scaled_device,
+        left=HarmonicReservoir(scaled_lead, temperature=0.5),
+        right=HarmonicReservoir(scaled_lead, temperature=0.4),
+        vertex=DenseCubicVertex(np.zeros((2, 2, 2))),
+        grid=grid,
+        scale=SolverScale(omega0=omega_scale),
+    )
+    adapter_left, adapter_right = build_retarded_contacts(
+        problem,
+        eta / omega_scale,
+    )
+    adapter_green = solve_retarded(problem, adapter_left, adapter_right)
+    index = grid.zero_index + 10
+
+    np.testing.assert_allclose(
+        adapter_left[index], core_left, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        adapter_right[index], core_right, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        adapter_green[index], core_green, rtol=1e-12, atol=1e-12
+    )
+
+
 def test_explicit_rectangular_contact_is_embedded_at_requested_dof() -> None:
     lead = LeadBlocks(d00=np.array([[3.0]]), d01=np.array([[-1.0]]))
     reservoir = HarmonicReservoir(

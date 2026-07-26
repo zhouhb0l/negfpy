@@ -266,6 +266,9 @@ def surface_gf(
 ) -> Array:
     """Return retarded surface GF using the selected solver."""
 
+    if not np.isfinite(eta) or eta <= 0.0:
+        raise ValueError("eta must be finite and strictly positive.")
+
     m = method.strip().lower()
     if m in {"sancho_rubio", "sancho-rubio", "sr"}:
         return surface_gf_sancho_rubio(

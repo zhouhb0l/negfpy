@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from negfpy.core import surface_gf, transmission
 from negfpy.models import ChainParams, analytic_band_max, device_perfect_chain, lead_blocks
@@ -63,3 +64,18 @@ def test_transmission_generalized_eigen_matches_sancho_rubio_chain() -> None:
     assert np.isfinite(t_svd)
     assert abs(t_sr - t_ge) < 1e-7
     assert abs(t_sr - t_svd) < 1e-7
+
+
+@pytest.mark.parametrize("eta", (0.0, -1.0e-8, np.nan, np.inf))
+def test_surface_green_rejects_nonpositive_or_nonfinite_eta(eta: float) -> None:
+    params = ChainParams(mass=1.0, spring=1.0)
+    lead = lead_blocks(params)
+
+    with pytest.raises(ValueError, match="finite and strictly positive"):
+        surface_gf(
+            omega=1.0,
+            d00=lead.d00,
+            d01=lead.d01,
+            d10=lead.d10,
+            eta=eta,
+        )
