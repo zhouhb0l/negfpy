@@ -14,7 +14,12 @@ KPar = tuple[float, ...] | None
 
 @dataclass(frozen=True)
 class LeadBlocks:
-    """Periodic lead represented by nearest-neighbor principal-layer blocks."""
+    """Periodic lead represented in increasing-layer orientation.
+
+    d01 is the block from layer n (row) to n+1 (column), and d10 is the
+    reverse block. A left contact exchanges these blocks when solving its
+    outward semi-infinite surface.
+    """
 
     d00: Array
     d01: Array

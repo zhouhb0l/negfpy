@@ -579,6 +579,20 @@ def _unwrap_transport_n1_minimum_image(
         raise ValueError("model.n1_transport_unwrap must be one of: null, auto, minimum_image.")
     info["mode"] = mode_norm
 
+    term_generation = (
+        ifc.metadata.get("term_generation")
+        if isinstance(ifc.metadata, dict)
+        else None
+    )
+    if term_generation == "phonopy_shortest_vectors":
+        # The phonopy reader has already distributed every pair over its
+        # shortest periodic images, including repeat-one axes. Applying the
+        # legacy workflow reconstruction again would remap those terms a
+        # second time and change the physical IFC.
+        info["reason"] = "already_mapped_by_reader"
+        info["source_term_generation"] = term_generation
+        return ifc, info
+
     nr = ifc.metadata.get("nr") if isinstance(ifc.metadata, dict) else None
     if not (isinstance(nr, (tuple, list)) and len(nr) == 3):
         info["reason"] = "nr_metadata_missing"
@@ -859,9 +873,6 @@ def _build_interface_contacts(params):
     # right interface coupling term in transport basis:
     # KR01(dy,dz) == FC10(-dy,-dz)^T
     fc_r01_terms = {(-dy, -dz): np.asarray(v, dtype=np.complex128).T for (dy, dz), v in fc10_terms.items()}
-    # left lead-side nearest-neighbor coupling:
-    # KL01(dy,dz) == KR01(-dy,-dz)^T == FC10(dy,dz)
-    fc_l01_terms = {k: np.asarray(v, dtype=np.complex128) for k, v in fc10_terms.items()}
 
     masses = np.repeat(np.asarray(params.masses, dtype=float), int(params.dof_per_atom))
     mhalf = np.diag(1.0 / np.sqrt(masses))
@@ -876,9 +887,6 @@ def _build_interface_contacts(params):
     def _d01_right(ky: float, kz: float) -> np.ndarray:
         return mhalf @ _sum_k_terms(fc_r01_terms, ky=ky, kz=kz, ndof=ndof) @ mhalf
 
-    def _d01_left(ky: float, kz: float) -> np.ndarray:
-        return mhalf @ _sum_k_terms(fc_l01_terms, ky=ky, kz=kz, ndof=ndof) @ mhalf
-
     def _right_builder(kpar):
         ky, kz = _parse_ky_kz(kpar)
         d00 = _d00(ky, kz)
@@ -888,7 +896,9 @@ def _build_interface_contacts(params):
     def _left_builder(kpar):
         ky, kz = _parse_ky_kz(kpar)
         d00 = _d00(ky, kz)
-        d01 = _d01_left(ky, kz)
+        # LeadBlocks always uses the global increasing-layer orientation. The
+        # core surface solver reverses d01/d10 for a left reservoir.
+        d01 = _d01_right(ky, kz)
         return d00, d01, d01.conj().T
 
     def _vdl_right(kpar):

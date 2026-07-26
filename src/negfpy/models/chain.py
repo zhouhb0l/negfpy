@@ -44,12 +44,16 @@ def device_mass_defect(
     if defect_index < 0 or defect_index >= n_layers:
         raise ValueError("defect_index out of range")
 
-    onsite = []
-    for i in range(n_layers):
-        mass = defect_mass if i == defect_index else params.mass
-        onsite.append(np.array([[2.0 * params.spring / mass]], dtype=float))
+    masses = np.full(n_layers, params.mass, dtype=float)
+    masses[defect_index] = defect_mass
 
-    coupling = [np.array([[-params.spring / params.mass]], dtype=float) for _ in range(n_layers - 1)]
+    onsite = [np.array([[2.0 * params.spring / mass]], dtype=float) for mass in masses]
+    # In mass-weighted coordinates D = M^-1/2 Phi M^-1/2, so a bond
+    # connecting sites i and i+1 is -k/sqrt(m_i*m_(i+1)).
+    coupling = [
+        np.array([[-params.spring / np.sqrt(masses[i] * masses[i + 1])]], dtype=float)
+        for i in range(n_layers - 1)
+    ]
     return Device1D(onsite_blocks=onsite, coupling_blocks=coupling)
 
 

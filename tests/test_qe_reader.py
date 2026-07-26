@@ -45,6 +45,8 @@ def test_qe_reader_parses_minimal_fc(tmp_path: Path) -> None:
     assert ifc.dof_per_atom == 3
     assert ifc.masses.shape == (1,)
     assert len(ifc.terms) == 1
+    assert ifc.units == "sqrt(Ry/(2*me*bohr^2))"
+    assert ifc.units == ifc.metadata["omega_internal_unit"]
     term = ifc.terms[0]
     assert (term.dx, term.dy, term.dz) == (0, 0, 0)
     assert term.block.shape == (3, 3)

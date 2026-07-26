@@ -91,6 +91,46 @@ def test_dense_harmonic_adapter_matches_existing_device_green_function() -> None
     assert np.allclose(green[negative], green[positive].conj(), atol=1e-12)
 
 
+def test_harmonic_adapter_matches_core_for_asymmetric_lead_orientation() -> None:
+    d00 = np.array([[4.0, 0.2], [0.2, 3.5]], dtype=np.complex128)
+    d01 = np.array([[-0.8, 0.35], [-0.1, -0.6]], dtype=np.complex128)
+    lead = LeadBlocks(d00=d00, d01=d01, d10=d01.conj().T)
+    device = Device1D(onsite_blocks=[d00.copy()], coupling_blocks=[])
+    reservoir = HarmonicReservoir(lead=lead, temperature=0.5)
+    omega = 1.8
+    eta = 1.0e-6
+
+    _, core_left, core_right = device_green_function(
+        omega=omega,
+        device=device,
+        lead_left=lead,
+        lead_right=lead,
+        eta=eta,
+        eta_device=0.0,
+    )
+    adapter_left = retarded_contact_self_energy(
+        omega,
+        reservoir,
+        ndof=2,
+        eta_lead=eta,
+        side="left",
+    )
+    adapter_right = retarded_contact_self_energy(
+        omega,
+        reservoir,
+        ndof=2,
+        eta_lead=eta,
+        side="right",
+    )
+
+    np.testing.assert_allclose(
+        adapter_left, core_left, rtol=1.0e-12, atol=1.0e-12
+    )
+    np.testing.assert_allclose(
+        adapter_right, core_right, rtol=1.0e-12, atol=1.0e-12
+    )
+
+
 def test_explicit_rectangular_contact_is_embedded_at_requested_dof() -> None:
     lead = LeadBlocks(d00=np.array([[3.0]]), d01=np.array([[-1.0]]))
     reservoir = HarmonicReservoir(

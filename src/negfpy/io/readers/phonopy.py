@@ -69,7 +69,11 @@ def _shortest_lattice_translations(
     primitive_lattice = np.asarray(primitive_lattice, dtype=float)
     repeats = np.asarray(repeats, dtype=int)
 
-    ranges = [range(-search_radius, search_radius + 1) if int(n) > 1 else range(0, 1) for n in repeats]
+    # A repeat of one collapses the raw supercell index, but it does not make
+    # the corresponding primitive-lattice direction nonperiodic. Basis atoms
+    # near opposite cell faces can therefore have their shortest connecting
+    # image at a nonzero translation even on a repeat-one axis.
+    ranges = [range(-search_radius, search_radius + 1) for _ in repeats]
     best_dist2: float | None = None
     out: list[tuple[int, int, int]] = []
     for ix in ranges[0]:
@@ -384,7 +388,7 @@ def _build_ifc_from_phonopy_force_constants(
             IFCTerm(dx=int(t.dx), dy=int(t.dy), dz=int(t.dz), block=np.asarray(t.block, dtype=np.complex128) * fc_scale)
             for t in terms
         ),
-        units="sqrt(Ry/(me*bohr^2))",
+        units="sqrt(Ry/(2*me*bohr^2))",
         metadata={
             "source_format": "phonopy_force_constants",
             "force_constants_path": str(fc_path),

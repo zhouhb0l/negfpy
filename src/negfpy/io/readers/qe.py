@@ -176,7 +176,7 @@ def read_qe_q2r_ifc(source: Any) -> IFCData:
         masses=masses,
         dof_per_atom=3,
         terms=terms,
-        units="sqrt(Ry/(me*bohr^2))",
+        units="sqrt(Ry/(2*me*bohr^2))",
         metadata={
             "source_format": "qe_q2r_fc",
             "path": str(path),

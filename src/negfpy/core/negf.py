@@ -75,13 +75,26 @@ def _self_energy_contact(
     device_to_lead: Array,
     eta: float,
     *,
+    side: str,
     surface_gf_method: str,
 ) -> Array:
+    if side not in {"left", "right"}:
+        raise ValueError("side must be 'left' or 'right'.")
+    d10 = lead.d10 if lead.d10 is not None else lead.d01.conj().T
+    if side == "left":
+        # surface_gf describes a lead extending toward increasing layer
+        # index. A left lead extends in the opposite direction, so its
+        # outward and inward principal-layer couplings must be exchanged.
+        surface_d01 = d10
+        surface_d10 = lead.d01
+    else:
+        surface_d01 = lead.d01
+        surface_d10 = d10
     gsurf = surface_gf(
         omega=omega,
         d00=lead.d00,
-        d01=lead.d01,
-        d10=lead.d10,
+        d01=surface_d01,
+        d10=surface_d10,
         eta=eta,
         method=surface_gf_method,
     )
@@ -160,11 +173,26 @@ def _build_system_matrix_and_contact_sigmas(
     npl = dev.dof_per_layer
     n_layers = dev.n_layers
     dim = n_layers * npl
-    eta_dev = float(eta if eta_device is None else eta_device)
+    # Lead broadening is a numerical aid for the semi-infinite surface solve.
+    # Applying it to the finite device without a matching lesser/greater
+    # self-energy creates an unaccounted dissipative bath. None therefore
+    # means the conservative value zero; device absorption must be explicit.
+    eta_dev = float(0.0 if eta_device is None else eta_device)
     if eta_dev < 0.0:
         raise ValueError("eta_device must be non-negative.")
     eta_lead = float(eta)
     omega_eff = float(omega)
+
+    if device_to_lead_left is None:
+        # Resolve defaults from the caller's unscaled lead blocks. The
+        # coupling is scaled exactly once below with all dynamical blocks.
+        vdl_left = left.d10 if left.d10 is not None else left.d01.conj().T
+    else:
+        vdl_left = np.asarray(device_to_lead_left, dtype=np.complex128)
+    if device_to_lead_right is None:
+        vdl_right = right.d01
+    else:
+        vdl_right = np.asarray(device_to_lead_right, dtype=np.complex128)
 
     if omega_scale is not None:
         scale = float(omega_scale)
@@ -189,16 +217,6 @@ def _build_system_matrix_and_contact_sigmas(
             d10=None if right.d10 is None else np.asarray(right.d10, dtype=np.complex128) / scale2,
         )
 
-    if device_to_lead_left is None:
-        # Backward-compatible default for periodic matched contacts.
-        vdl_left = left.d10 if left.d10 is not None else left.d01.conj().T
-    else:
-        vdl_left = np.asarray(device_to_lead_left, dtype=np.complex128)
-    if device_to_lead_right is None:
-        # Backward-compatible default for periodic matched contacts.
-        vdl_right = right.d01
-    else:
-        vdl_right = np.asarray(device_to_lead_right, dtype=np.complex128)
     if omega_scale is not None:
         vdl_left = vdl_left / (float(omega_scale) * float(omega_scale))
         vdl_right = vdl_right / (float(omega_scale) * float(omega_scale))
@@ -232,6 +250,7 @@ def _build_system_matrix_and_contact_sigmas(
         lead=left,
         device_to_lead=vdl_left,
         eta=eta_lead,
+        side="left",
         surface_gf_method=surface_gf_method,
     )
     sigma_r_block = _self_energy_contact(
@@ -239,6 +258,7 @@ def _build_system_matrix_and_contact_sigmas(
         lead=right,
         device_to_lead=vdl_right,
         eta=eta_lead,
+        side="right",
         surface_gf_method=surface_gf_method,
     )
 

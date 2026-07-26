@@ -1,6 +1,6 @@
 import numpy as np
 
-from negfpy.core import transmission
+from negfpy.core import device_green_function, surface_gf, transmission
 from negfpy.core.types import Device1D, LeadBlocks
 from negfpy.models import ChainParams, device_perfect_chain, lead_blocks
 
@@ -91,3 +91,38 @@ def test_kdependent_device_to_lead_callable_matches_explicit_array() -> None:
         contact_right_indices=[9],
     )
     assert abs(t_explicit - t_callable) < 1e-12
+
+
+def test_left_surface_reverses_nonsymmetric_principal_layer_couplings() -> None:
+    d00 = np.array([[4.0, 0.2], [0.2, 3.5]], dtype=np.complex128)
+    d01 = np.array([[-0.8, 0.35], [-0.1, -0.6]], dtype=np.complex128)
+    d10 = d01.conj().T
+    lead = LeadBlocks(d00=d00, d01=d01, d10=d10)
+    device = Device1D(onsite_blocks=[d00.copy()], coupling_blocks=[])
+    omega = 1.8
+    eta = 1.0e-6
+
+    _, sigma_left, sigma_right = device_green_function(
+        omega,
+        device,
+        lead,
+        lead,
+        eta=eta,
+        eta_device=0.0,
+    )
+    surface_right = surface_gf(
+        omega, d00, d01, d10, eta=eta
+    )
+    surface_left = surface_gf(
+        omega, d00, d10, d01, eta=eta
+    )
+    expected_left = d10 @ surface_left @ d10.conj().T
+    expected_right = d01 @ surface_right @ d01.conj().T
+
+    assert np.linalg.norm(surface_left - surface_right) > 1.0e-2
+    np.testing.assert_allclose(
+        sigma_left, expected_left, rtol=1.0e-12, atol=1.0e-12
+    )
+    np.testing.assert_allclose(
+        sigma_right, expected_right, rtol=1.0e-12, atol=1.0e-12
+    )

@@ -10,7 +10,9 @@ from negfpy.modeling import (
     build_material_kspace_params,
     infer_principal_layer_size,
 )
+from negfpy.models import MaterialKspaceParams
 from negfpy.workflows.ifc_bulk import (
+    _build_interface_contacts,
     _drop_nyquist_transverse_terms,
     _enforce_transverse_pm_symmetry,
     _reorient_ifc_for_transport_direction,
@@ -29,6 +31,27 @@ def _toy_ifc_payload() -> dict:
             {"translation": [1, 0, 0], "block": [[-0.7]]},
         ],
     }
+
+
+def test_workflow_contacts_use_one_global_lead_orientation() -> None:
+    coupling = np.array([[-0.8, 0.3], [-0.1, -0.6]])
+    params = MaterialKspaceParams(
+        masses=np.ones(2),
+        fc00_terms={(0, 0): 4.0 * np.eye(2)},
+        fc01_terms={(0, 0): coupling},
+        fc10_terms={(0, 0): coupling.T},
+        dof_per_atom=1,
+    )
+    left, right, vdl_left, vdl_right = _build_interface_contacts(params)
+    kpoint = (0.23, -0.31)
+    left_blocks = left.blocks(kpoint)
+    right_blocks = right.blocks(kpoint)
+
+    for left_block, right_block in zip(left_blocks, right_blocks):
+        np.testing.assert_allclose(left_block, right_block)
+    np.testing.assert_allclose(
+        vdl_left(kpoint), vdl_right(kpoint).conj().T
+    )
 
 
 def test_phonopy_reader_is_registered() -> None:
@@ -75,6 +98,35 @@ def test_n1_transport_unwrap_auto_applies_when_nr1_is_1() -> None:
     dx_set = {int(t.dx) for t in out.terms}
     assert -1 in dx_set
     assert 0 in dx_set
+
+
+def test_n1_transport_unwrap_skips_phonopy_shortest_vector_terms() -> None:
+    ifc = IFCData(
+        masses=np.array([1.0, 1.0]),
+        dof_per_atom=1,
+        terms=(
+            IFCTerm(
+                dx=0,
+                dy=0,
+                dz=0,
+                block=np.array([[2.0, -0.3], [-0.3, 2.0]]),
+            ),
+        ),
+        metadata={
+            "nr": (2, 1, 1),
+            "term_generation": "phonopy_shortest_vectors",
+        },
+        lattice_vectors=np.eye(3),
+        atom_positions=np.array([[0.0, 0.0, 0.0], [0.0, 0.6, 0.0]]),
+    )
+    oriented = _reorient_ifc_for_transport_direction(ifc, direction=2)
+
+    for mode in ("auto", "minimum_image"):
+        out, info = _unwrap_transport_n1_minimum_image(oriented, mode=mode)
+        assert out is oriented
+        assert info["applied"] is False
+        assert info["reason"] == "already_mapped_by_reader"
+        assert info["source_term_generation"] == "phonopy_shortest_vectors"
 
 
 def _write_phonopy_fc_and_poscar(tmp_path) -> tuple:
@@ -132,6 +184,8 @@ def test_read_phonopy_force_constants_from_path(tmp_path) -> None:
     assert ifc.metadata.get("source_format") == "phonopy_force_constants"
     assert ifc.metadata.get("mass_unit_converted") == "2*electron_mass (QE Ry mass unit)"
     assert ifc.metadata.get("force_constant_unit_converted") == "Ry/bohr^2"
+    assert ifc.units == "sqrt(Ry/(2*me*bohr^2))"
+    assert ifc.units == ifc.metadata["omega_internal_unit"]
 
     terms = {(int(t.dx), int(t.dy), int(t.dz)): np.asarray(t.block) for t in ifc.terms}
     fc_scale = float(ifc.metadata["force_constant_scale_to_qe"])
@@ -194,6 +248,63 @@ def test_phonopy_reader_uses_pair_shortest_vectors(tmp_path) -> None:
     assert ifc.atom_symbols == ("Ge", "Si")
     assert np.isclose(terms[(1, 0, 0)][3, 0].real, 5.0 * fc_scale)
     assert np.isclose(terms.get((-1, 0, 0), np.zeros((6, 6)))[3, 0].real, 0.0)
+
+
+def test_phonopy_reader_searches_shortest_images_when_repeat_is_one(
+    tmp_path,
+) -> None:
+    poscar = tmp_path / "POSCAR"
+    force_constants = tmp_path / "FORCE_CONSTANTS"
+    poscar.write_text(
+        "\n".join(
+            [
+                "repeat-one z shortest image",
+                "1.0",
+                "1.0 0.0 0.0",
+                "0.0 1.0 0.0",
+                "0.0 0.0 1.0",
+                "Si Ge",
+                "1 1",
+                "Direct",
+                "0.0 0.0 0.1",
+                "0.0 0.0 0.9",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lines = ["2 2"]
+    for i in range(2):
+        for j in range(2):
+            lines.append(f"{i + 1} {j + 1}")
+            block = np.zeros((3, 3))
+            if i == 1 and j == 0:
+                block[0, 0] = 7.0
+            for a in range(3):
+                lines.append(
+                    f"{block[a,0]: .16f} "
+                    f"{block[a,1]: .16f} "
+                    f"{block[a,2]: .16f}"
+                )
+    force_constants.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ifc = read_ifc(
+        {
+            "force_constants_path": str(force_constants),
+            "poscar_path": str(poscar),
+            "supercell": [1, 1, 1],
+        },
+        reader="phonopy",
+    )
+    terms = {
+        (int(term.dx), int(term.dy), int(term.dz)): np.asarray(term.block)
+        for term in ifc.terms
+    }
+    fc_scale = float(ifc.metadata["force_constant_scale_to_qe"])
+
+    assert (0, 0, 1) in terms
+    assert np.isclose(terms[(0, 0, 1)][0, 3].real, 7.0 * fc_scale)
 
 
 def test_read_phonopy_force_constants_from_dict_source(tmp_path) -> None:
