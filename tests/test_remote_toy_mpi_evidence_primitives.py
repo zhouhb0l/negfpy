@@ -136,6 +136,13 @@ def test_symlink_parent_and_parent_traversal_are_rejected(
 
     with pytest.raises(runner.RemoteToyMPIRunnerError, match="symlink"):
         runner._safe_artifact_path(link, record, name="fixture")
+    manifest = real / "phase-manifest.json"
+    runner.write_hashed_manifest(manifest, {"phase": 1})
+    manifest_link = real / "phase-link.json"
+    manifest_link.symlink_to(manifest)
+    with pytest.raises(runner.RemoteToyMPIRunnerError, match="symlink"):
+        runner.read_hashed_manifest(manifest_link)
+
     with pytest.raises(runner.RemoteToyMPIRunnerError, match="parent traversal"):
         runner._absolute_path_without_symlinks(
             real / ".." / "real", name="fixture"

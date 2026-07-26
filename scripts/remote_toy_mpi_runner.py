@@ -156,7 +156,10 @@ def write_hashed_manifest(
 def read_hashed_manifest(path: str | Path) -> dict[str, Any]:
     """Strictly reload an immutable manifest and verify both encodings."""
 
-    source = Path(path).expanduser().resolve()
+    source = _absolute_path_without_symlinks(
+        path,
+        name="hashed manifest",
+    ).resolve(strict=True)
     try:
         raw = source.read_bytes()
         document = json.loads(raw.decode("ascii"))
