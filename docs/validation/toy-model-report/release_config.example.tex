@@ -1,0 +1,30 @@
+% Macro inventory only. Do not copy this file as release_config.tex.
+% Generate release_config.tex from verified remote artifacts with
+% generate_release_config.py; the false gates below are deliberately invalid.
+\newcommand{\ProductionStagingDir}{production-staging-exact-commit}
+\newcommand{\ProductionFigureDir}{production-figures-exact-commit}
+\newcommand{\HistoricalFigureDir}{historical-figures}
+\newcommand{\ExpectedToyGateCommit}{0123456789abcdef0123456789abcdef01234567}
+\newcommand{\ReportDate}{26 July 2026}
+\newcommand{\MPIRankLadder}{1, 2, 4, 8, and 16}
+\newcommand{\MPIFastestRankCount}{16}
+\newcommand{\MPICandidateRankCount}{8}
+\newcommand{\MPIReleaseRankCount}{8}
+\newcommand{\MPISiliconRankCount}{8}
+\newcommand{\MPIReleaseMode}{task-MPI}
+\newcommand{\MPIBaselineWallSeconds}{100.000000}
+\newcommand{\MPICandidateWallSeconds}{25.000000}
+\newcommand{\MPICandidateSpeedup}{4.000000}
+\newcommand{\MPIMaxMemoryFractionObserved}{0.100000}
+\newcommand{\MPISocketCount}{2}
+\newcommand{\MPIScalingPhysicsSHA}{aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+\newcommand{\MPIReleasePhysicsSHA}{bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+\newcommand{\MPIScalingManifestSHA}{cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+\newcommand{\MPIRunnerManifestSHA}{dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd}
+\newcommand{\MPIExecutionManifestSHA}{eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee}
+\newcommand{\MPIToyMinimumSpeedupSatisfied}{false}
+\newcommand{\MPIScalingPassed}{false}
+\newcommand{\MPIPhysicsEqualityPassed}{false}
+\newcommand{\MPIBindingPassed}{false}
+\newcommand{\MPIMemoryPreflightPassed}{false}
+\newcommand{\MPIRunnerReleaseCertified}{false}
