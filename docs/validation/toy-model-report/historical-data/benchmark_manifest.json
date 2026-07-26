@@ -1,0 +1,82 @@
+{
+  "artifact_sha256": {
+    "data/mingo2006_figure4.csv": "825cb40ce927ef1f0e78372e300106b771457a12eb6137d915184eb26737909a",
+    "data/mingo2006_figure4_smooth_calculations.csv": "24c90da9512c1d5f2e0be40be219b87679ab6f5e9d449e3f4b3f2ce95047bb1a",
+    "data/wang2006_anharmonic_checkpoints.csv": "31c82d7d7827a8fbcb0d64b0aab4f0c259df1d8c883db9b9a6ec45bf158cb555",
+    "data/wang2006_harmonic.csv": "b828914893bcb81945c00a8742d8aea052551aafd12bfb074957ff1ca9d08212",
+    "data/wang2006_published_reference_curves.csv": "c2acc1de6ce11bde6a878b3719720c0cfb848a613cf0b8687200f5e654ade750"
+  },
+  "curation": {
+    "legacy_generator_manifest_raw_sha256": "3eac62b3fd3674ecffdfbffb27d78974477e47aa0ff2918a4106ffa69964a6dc",
+    "policy": "Only the five named CSV files are carried into the clean repository. Machine details, unrelated generated artifacts, and the legacy dirty-worktree inventory are deliberately excluded.",
+    "selected_file_count": 5
+  },
+  "datasets": {
+    "mingo2006_figure4.csv": {
+      "calculated_columns": [
+        "negfpy_printed_normalized_pW_per_K",
+        "negfpy_half_weight_sensitivity_pW_per_K"
+      ],
+      "published_columns": [
+        "temperature_K",
+        "published_vector_pW_per_K"
+      ],
+      "source_kind": "figure-extracted published vector plus NEGFPy historical calculations",
+      "warning": "The half-weight path is a sensitivity calculation, not a selected production normalization."
+    },
+    "mingo2006_figure4_smooth_calculations.csv": {
+      "source_kind": "NEGFPy historical calculations on a 0--600 K display grid",
+      "warning": "This file contains no author raw data and no interacting Mingo Fig. 8 calculation."
+    },
+    "wang2006_anharmonic_checkpoints.csv": {
+      "source_kind": "selected historical regression checkpoints against figure-extracted reference curves",
+      "warning": "The O(T^2) and selective mean-field rows use separately named historical approximations and are not conserving production SCBA evidence."
+    },
+    "wang2006_harmonic.csv": {
+      "source_kind": "figure-extracted published vector plus NEGFPy harmonic calculations",
+      "warning": "The published vector is not author raw numerical data."
+    },
+    "wang2006_published_reference_curves.csv": {
+      "source_kind": "figure-extracted Wang harmonic, O(T^2), and selective-mean-field paths",
+      "warning": "These curves are source-limited historical references, not exact same-input certification data."
+    }
+  },
+  "generator": "scripts/generate_benchmarks.py",
+  "literature": {
+    "mingo2006": {
+      "doi": "10.1103/PhysRevB.74.125402",
+      "scope": "Fig. 4 harmonic comparison only",
+      "status": "historical_reproduction_unresolved",
+      "title": "Anharmonic phonon flow through molecular-sized junctions"
+    },
+    "wang2006": {
+      "doi": "10.1103/PhysRevB.74.033408",
+      "scope": "harmonic and selected O(T^2)/selective-mean-field regression paths",
+      "status": "historical_source_limited_regression",
+      "title": "Nonequilibrium Green's function approach to mesoscopic thermal transport"
+    }
+  },
+  "release_certified": false,
+  "schema": "negfpy.anharmonic.historical_benchmark_source_manifest.v1",
+  "stage_results": {
+    "mingo2006": {
+      "figure4_points": 18,
+      "half_weight_max_abs_error_pW_per_K": 0.22945418532328787,
+      "half_weight_rms_error_pW_per_K": 0.12640983416484905,
+      "normalized_max_abs_error_pW_per_K": 5.042314459621597,
+      "normalized_rms_error_pW_per_K": 3.2301097197343456
+    },
+    "wang2006": {
+      "harmonic_max_abs_error_nW_per_K": 0.0002770547620684072,
+      "harmonic_points": 51,
+      "harmonic_rms_error_nW_per_K": 0.0001235871534414119
+    }
+  },
+  "status": "explicitly_noncertifying_historical_context",
+  "use_policy": {
+    "can_certify_production_prefactor": false,
+    "can_certify_release": false,
+    "mingo_fig8_interacting_curve_available": false,
+    "wang_o_t4_implemented": false
+  }
+}

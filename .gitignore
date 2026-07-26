@@ -75,3 +75,11 @@ results/
 cache/
 outputs/
 validation-artifacts/
+
+# Report artifacts are regenerated from checksum-anchored validation data.
+docs/validation/toy-model-report/release_config.tex
+docs/validation/toy-model-report/output/
+docs/validation/toy-model-report/production-staging-*/
+docs/validation/toy-model-report/production-figures-*/
+docs/validation/toy-model-report/historical-figures/
+docs/validation/toy-model-report/tmp/

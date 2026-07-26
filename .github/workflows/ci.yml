@@ -18,9 +18,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install report inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-liberation poppler-utils
       - name: Build clean wheel
         run: |
-          python -m pip install "build>=1" "h5py>=3" "pytest>=8"
+          python -m pip install "build>=1" "h5py>=3" "pytest>=8" "matplotlib>=3.7" "pillow>=10"
           python -m build --wheel --outdir dist
           python -m pip install dist/*.whl
       - name: Prove tests import the wheel
@@ -30,5 +34,11 @@ jobs:
       # list: every new small, unmarked validation test belongs in PR CI.
       - name: Full non-nightly fresh-wheel suite
         run: python -m pytest -q -m "not nightly"
+      - name: Report artifact pipeline with strict warnings
+        run: |
+          python -m pytest -W error -q \
+            docs/validation/toy-model-report/tests/test_import_current_publication.py \
+            docs/validation/toy-model-report/tests/test_render_production_toy_gate_figures.py \
+            docs/validation/toy-model-report/tests/test_render_historical_paper_benchmarks.py
       - name: Toy SCBA smoke calculation
         run: python examples/anharmonic_toy_scba.py
