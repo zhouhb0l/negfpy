@@ -36,6 +36,22 @@ def coarse_report() -> MultidimensionalReleaseReport:
 
 
 
+def _release_certifying_metadata(source: object) -> dict[str, object]:
+    metadata = dict(source)
+    metadata.update(
+        {
+            "package_version": "0.1.0rc1",
+            "declared_package_version": "0.1.0rc1",
+            "installed_package_version": "0.1.0rc1",
+            "package_version_consistent": True,
+            "source_tree_sha256": "b" * 64,
+            "git_revision": "a" * 40,
+            "git_dirty": False,
+        }
+    )
+    return metadata
+
+
 def _result_for_solver_inputs(
     source: object,
     problem: object,
@@ -856,6 +872,7 @@ def test_direct_gate_is_strict_for_full_but_preserves_coarse_smoke(
         direct.result,
         diagnostics=certified_diagnostics,
         release_certified=True,
+        metadata=_release_certifying_metadata(direct.result.metadata),
     )
     certified_direct = replace(direct, result=certified_result)
     assert multidimensional._direct_endpoint_unlocks_graph(
@@ -934,6 +951,7 @@ def test_full_graph_topology_and_references_are_exact_and_tamper_evident(
         currents=zero_currents,
         diagnostics=certified_diagnostics,
         release_certified=True,
+        metadata=_release_certifying_metadata(original.metadata),
     )
     monkeypatch.setattr(
         multidimensional,

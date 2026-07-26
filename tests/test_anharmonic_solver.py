@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import negfpy.anharmonic.solver as solver_module
 from negfpy.anharmonic import (
     CubicSCBAProblem,
     DenseCubicVertex,
@@ -44,6 +45,18 @@ def _problem(
         vertex=vertex,
         grid=SignedFrequencyGrid(step=step, n_positive=n_positive),
     )
+
+
+def _clean_code_provenance() -> dict[str, str | bool]:
+    return {
+        "package_version": "0.1.0rc1",
+        "declared_package_version": "0.1.0rc1",
+        "installed_package_version": "0.1.0rc1",
+        "package_version_consistent": True,
+        "source_tree_sha256": "b" * 64,
+        "git_revision": "a" * 40,
+        "git_dirty": False,
+    }
 
 
 def _test_config(**updates: object) -> SCBAConfig:
@@ -128,9 +141,16 @@ def test_zero_vertex_scba_matches_harmonic_green_and_landauer_current() -> None:
     )
 
 
-def test_refined_harmonic_limit_is_end_to_end_release_certified() -> None:
+def test_refined_harmonic_limit_is_end_to_end_release_certified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Exercise every certification gate on an actual solver result."""
 
+    monkeypatch.setattr(
+        solver_module,
+        "code_provenance",
+        _clean_code_provenance,
+    )
     problem = _problem(
         cubic=0.0,
         n_layers=1,
@@ -150,6 +170,7 @@ def test_refined_harmonic_limit_is_end_to_end_release_certified() -> None:
     assert result.diagnostics.passed
     assert result.diagnostics.release_certified
     assert result.release_certified
+    assert result.has_release_certifying_provenance
     assert result.diagnostics.failures == ()
     assert result.diagnostics.metrics["green_spectral_moment_residual"] < 5.0e-3
     assert result.diagnostics.metrics["green_high_frequency_residual"] < 5.0e-3
@@ -160,6 +181,60 @@ def test_refined_harmonic_limit_is_end_to_end_release_certified() -> None:
     assert (
         result.diagnostics.metrics["cutoff_to_harmonic_upper_bound"] >= 3.0
     )
+
+
+@pytest.mark.parametrize(
+    "provenance_updates",
+    (
+        {"git_dirty": True},
+        {"git_dirty": "unknown"},
+        {"git_revision": "unknown"},
+        {"source_tree_sha256": "not-a-sha256"},
+        {
+            "installed_package_version": "0.1.0",
+            "package_version_consistent": False,
+        },
+    ),
+    ids=(
+        "dirty",
+        "unknown-dirty-state",
+        "invalid-revision",
+        "invalid-source-hash",
+        "version-mismatch",
+    ),
+)
+def test_clean_physics_diagnostics_do_not_certify_invalid_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    provenance_updates: dict[str, object],
+) -> None:
+    provenance = {**_clean_code_provenance(), **provenance_updates}
+    monkeypatch.setattr(
+        solver_module,
+        "code_provenance",
+        lambda: dict(provenance),
+    )
+    problem = _problem(
+        cubic=0.0,
+        n_layers=1,
+        step=0.025,
+        n_positive=1000,
+    )
+    config = SCBAConfig(
+        eta_lead=0.025,
+        max_iterations=8,
+        min_iterations=3,
+        consecutive_passes=3,
+    )
+
+    result = solve_scba(problem, config)
+
+    assert result.converged
+    assert result.diagnostics.release_certified
+    assert result.diagnostics.metrics["package_version_consistent"] == float(
+        provenance.get("package_version_consistent") is True
+    )
+    assert not result.has_release_certifying_provenance
+    assert not result.release_certified
 
 
 def test_loose_controls_can_converge_but_never_release_certify() -> None:

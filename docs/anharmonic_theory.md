@@ -503,16 +503,29 @@ Equilibrium calculations additionally check KMS/fluctuation--dissipation
 relations without directly evaluating unstable large exponentials.
 
 `DiagnosticReport.passed` means the essential algebraic and conservation
-checks for that calculated state passed. `release_certified` is stricter: it
-also requires a converged SCBA result, `causal_hilbert`, signed-frequency
-symmetries, correlation positivity, contact passivity in every state, the
-conditional Green/total/interaction passivity gates at equilibrium or zero
-interaction, high-frequency and moment quality, and a sufficiently small
-interaction-self-energy tail. Certification refuses
-solver tolerances looser than the locked dense-v0.1 ceilings, fewer than three
-minimum or consecutive iterations, undeclared physical source units, or a
-mismatch between the installed and source-declared package versions.
-Provenance hashes
+checks for that calculated state passed.
+`DiagnosticReport.release_certified` is a stricter per-run numerical/physics
+flag: it also requires a converged SCBA result, `causal_hilbert`,
+signed-frequency symmetries, correlation positivity, contact passivity in
+every state, the conditional Green/total/interaction passivity gates at
+equilibrium or zero interaction, high-frequency and moment quality, and a
+sufficiently small interaction-self-energy tail. Certification refuses solver
+tolerances looser than the locked dense-v0.1 ceilings, fewer than three minimum
+or consecutive iterations, or undeclared physical source units.
+
+`AnharmonicResult.release_certified` is the combined per-result flag. In
+addition to the diagnostic flag, it requires a clean 40- or 64-character
+lowercase hexadecimal Git revision, a 64-character lowercase hexadecimal
+source-tree SHA256, matching canonical installed, declared, and recorded
+package versions, and `git_dirty is False`. NEGFPy's certifiable version
+grammar is the canonical PEP 440 subset used by its locked build: an optional
+numeric epoch, a dot-separated numeric release, optional lowercase `a`, `b`,
+or `rc`, optional `.post` and `.dev` components, and an optional lowercase
+alphanumeric dot-separated local component. No normalization occurs at this
+gate: all three strings must already be identical canonical text. The current
+`0.1.0rc1` version satisfies this grammar. Dirty, unknown, or malformed
+provenance therefore leaves the physical diagnostic flag intact but forces the
+result-level flag to false. Provenance hashes
 the exact lesser/greater continuation state actually consumed (the retarded
 component is rebuilt), method, problem, configuration, and source tree.
 Per-run certification does not replace

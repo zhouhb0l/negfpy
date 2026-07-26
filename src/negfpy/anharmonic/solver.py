@@ -446,6 +446,7 @@ def _finalize_result(
         converged
         and method == "scba"
         and diagnostics.release_certified
+        and provisional.has_release_certifying_provenance
     )
     return replace(
         provisional,

@@ -4,7 +4,9 @@
 The former covers algebraic consistency and, for self-consistent Born
 calculations, energy conservation.  Certification additionally requires the
 symmetry, passivity, cutoff, sum-rule, convergence, and approximation gates
-specified for the v0.1 reference solver.
+specified for the v0.1 reference solver. This diagnostic certification
+is intentionally numerical/physical only; :class:`AnharmonicResult` adds the
+clean code-provenance requirement.
 """
 
 from __future__ import annotations
@@ -1666,17 +1668,14 @@ def check_solution(
         release_failures.append(
             "release: physical scale source units must be declared"
         )
-    package_version_consistent = bool(
-        result.metadata.get("package_version_consistent", False)
+    # Retain provenance visibility as a descriptive metric. It does not enter
+    # this numerical/physics-only diagnostic certification decision.
+    package_version_consistent = (
+        result.metadata.get("package_version_consistent") is True
     )
     metrics["package_version_consistent"] = float(
         package_version_consistent
     )
-    if not package_version_consistent:
-        release_failures.append(
-            "release: installed and declared negfpy package versions must match"
-        )
-
     passed = not essential_failures
     release_certified = passed and not release_failures
     return DiagnosticReport(

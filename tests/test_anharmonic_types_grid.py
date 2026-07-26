@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -40,6 +40,24 @@ def _device(n_layers: int = 2) -> Device1D:
             np.array([[-1.0]], dtype=np.complex128) for _ in range(n_layers - 1)
         ],
     )
+
+
+def _version_metadata(version: str) -> dict[str, object]:
+    return {
+        "package_version": version,
+        "declared_package_version": version,
+        "installed_package_version": version,
+    }
+
+
+def _clean_release_provenance() -> dict[str, object]:
+    return {
+        **_version_metadata("0.1.0rc1"),
+        "package_version_consistent": True,
+        "source_tree_sha256": "b" * 64,
+        "git_revision": "a" * 40,
+        "git_dirty": False,
+    }
 
 
 def test_anharmonic_api_is_not_reexported_before_release_gate() -> None:
@@ -340,7 +358,7 @@ def test_result_containers_are_read_only_and_report_balances() -> None:
         history=(iteration,),
         converged=True,
         release_certified=True,
-        metadata={"backend": "serial"},
+        metadata={"backend": "serial", **_clean_release_provenance()},
     )
 
     assert currents.contact_balance == pytest.approx(0.25)
@@ -348,12 +366,51 @@ def test_result_containers_are_read_only_and_report_balances() -> None:
     assert not np.asarray(currents.contact_spectra).flags.writeable
     assert result.iteration_history == (iteration,)
     assert result.release_certified
+    assert result.has_release_certifying_provenance
     assert not result.green.retarded.flags.writeable
     assert isinstance(result.metadata, MappingProxyType)
 
     error = SCBAConvergenceError("did not converge", result)
     assert error.result is result
     assert error.partial_result is result
+
+    with pytest.raises(ValueError, match="code provenance"):
+        replace(result, metadata={})
+
+    representative_version = "1!2.0rc1.dev2+cpu.x86"
+    representative_metadata = {
+        **_clean_release_provenance(),
+        **_version_metadata(representative_version),
+        "git_revision": "c" * 64,
+    }
+    representative = replace(result, metadata=representative_metadata)
+    assert representative.has_release_certifying_provenance
+    assert representative.release_certified
+
+    invalid_cases = (
+        {"git_dirty": True},
+        {"git_dirty": "unknown"},
+        {"git_revision": "unknown"},
+        {"git_revision": "A" * 40},
+        {"git_revision": "a" * 39},
+        {"git_revision": "g" * 40},
+        {"git_revision": "g" * 64},
+        {"source_tree_sha256": "B" * 64},
+        {"source_tree_sha256": "b" * 63},
+        {"package_version_consistent": False},
+        {"package_version_consistent": "true"},
+        {"installed_package_version": "0.1.0"},
+        {"declared_package_version": "unknown"},
+        {"package_version": ""},
+        _version_metadata(" "),
+        _version_metadata("UNKNOWN"),
+        _version_metadata("unknown "),
+        _version_metadata("not a version"),
+    )
+    for updates in invalid_cases:
+        metadata = {**_clean_release_provenance(), **updates}
+        with pytest.raises(ValueError, match="code provenance"):
+            replace(result, metadata=metadata)
 
 
 def test_result_rejects_spectrum_grid_mismatch() -> None:

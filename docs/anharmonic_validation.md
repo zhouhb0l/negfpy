@@ -4,14 +4,19 @@ Status: executable `0.1.0rc1` validation contract and implementation snapshot,
 2026-07-25. Protocol v2 has produced one provisional failed endpoint, but the
 corrected contract has not yet completed a clean full-graph remote rerun.
 
-This document distinguishes three things that should not be conflated:
+This document distinguishes four things that should not be conflated:
 
 - a solver call that reached a numerically self-consistent state;
-- a result whose built-in diagnostics mark it `release_certified`;
+- a calculated state whose `DiagnosticReport.release_certified` flag passes
+  the locked numerical and physics gates;
+- an `AnharmonicResult.release_certified` flag that additionally requires a
+  clean, complete, version-consistent code identity;
 - a NEGFPy release for which all independent physics, refinement, and
   provenance gates have been run and archived.
 
-Only the third supports a publication-quality platform claim.
+Only the fourth supports a publication-quality platform claim. A dirty,
+unknown, or malformed code identity does not erase useful physical
+diagnostics, but it can never produce a release-certified result.
 
 ## 1. Running the current checks
 

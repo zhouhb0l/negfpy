@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import permutations
+import re
 from types import MappingProxyType
 from typing import Any, ClassVar, Literal
 
@@ -19,6 +20,15 @@ Array = np.ndarray
 Metadata = Mapping[str, Any]
 ContactIndices = tuple[int, ...] | slice | None
 SIGMA_PP_BLOCK_LOCAL_RTOL = 1.0e-12
+_VERSION_COMPONENT = r"(?:0|[1-9][0-9]*)"
+_RELEASE_PACKAGE_VERSION = re.compile(
+    rf"(?:{_VERSION_COMPONENT}!)?"
+    rf"{_VERSION_COMPONENT}(?:\.{_VERSION_COMPONENT})*"
+    rf"(?:(?:a|b|rc){_VERSION_COMPONENT})?"
+    rf"(?:\.post{_VERSION_COMPONENT})?"
+    rf"(?:\.dev{_VERSION_COMPONENT})?"
+    r"(?:\+[a-z0-9]+(?:\.[a-z0-9]+)*)?"
+)
 
 
 def _readonly_array(values: Any, *, dtype: np.dtype[Any]) -> Array:
@@ -77,6 +87,50 @@ def _freeze_metadata_value(value: Any) -> Any:
     if isinstance(value, set):
         return frozenset(_freeze_metadata_value(item) for item in value)
     return value
+
+
+def _is_lowercase_hex(value: Any, *, lengths: set[int]) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) in lengths
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_release_package_version(value: Any) -> bool:
+    """Accept NEGFPy's certifiable canonical PEP 440 subset."""
+
+    return bool(
+        isinstance(value, str)
+        and _RELEASE_PACKAGE_VERSION.fullmatch(value) is not None
+    )
+
+
+def _has_release_certifying_provenance(metadata: Metadata) -> bool:
+    """Return whether metadata identifies one clean, versioned source state."""
+
+    package_version = metadata.get("package_version")
+    declared_version = metadata.get("declared_package_version")
+    installed_version = metadata.get("installed_package_version")
+    versions_match = bool(
+        metadata.get("package_version_consistent") is True
+        and _is_release_package_version(package_version)
+        and _is_release_package_version(declared_version)
+        and _is_release_package_version(installed_version)
+        and package_version == declared_version == installed_version
+    )
+    return bool(
+        _is_lowercase_hex(
+            metadata.get("git_revision"),
+            lengths={40, 64},
+        )
+        and _is_lowercase_hex(
+            metadata.get("source_tree_sha256"),
+            lengths={64},
+        )
+        and metadata.get("git_dirty") is False
+        and versions_match
+    )
 
 
 def _finite_real(value: Any, *, name: str, positive: bool = False) -> float:
@@ -761,7 +815,12 @@ class CurrentReport:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class DiagnosticReport:
-    """Named numerical diagnostics and release-certification state."""
+    """Named numerical/physics diagnostics for one calculated state.
+
+    ``release_certified`` covers the locked per-run numerical and physical
+    gates only. It deliberately does not certify code provenance; the
+    enclosing :class:`AnharmonicResult` combines both layers.
+    """
 
     metrics: Mapping[str, float] = field(default_factory=dict)
     failures: tuple[str, ...] = ()
@@ -795,7 +854,12 @@ class DiagnosticReport:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class AnharmonicResult:
-    """Complete immutable output of a one-shot Born or SCBA calculation."""
+    """Complete immutable output of a one-shot Born or SCBA calculation.
+
+    Unlike ``diagnostics.release_certified``, this result-level
+    ``release_certified`` flag also requires a clean, fully identified code
+    revision and consistent package versions.
+    """
 
     method: str
     grid: SignedFrequencyGrid
@@ -837,24 +901,33 @@ class AnharmonicResult:
         if any(not isinstance(record, SCBAIteration) for record in history):
             raise TypeError("history must contain only SCBAIteration records.")
 
+        metadata = _freeze_mapping(self.metadata)
         converged = bool(self.converged)
         release_certified = bool(self.release_certified)
         if release_certified and (
             not converged
             or not self.diagnostics.passed
             or not self.diagnostics.release_certified
+            or not _has_release_certifying_provenance(metadata)
         ):
             raise ValueError(
-                "release_certified requires convergence and certified passing diagnostics."
+                "release_certified requires convergence, certified passing "
+                "diagnostics, and clean release-certifying code provenance."
             )
         object.__setattr__(self, "history", history)
         object.__setattr__(self, "converged", converged)
         object.__setattr__(self, "release_certified", release_certified)
-        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+        object.__setattr__(self, "metadata", metadata)
 
     @property
     def iteration_history(self) -> tuple[SCBAIteration, ...]:
         return self.history
+
+    @property
+    def has_release_certifying_provenance(self) -> bool:
+        """Whether metadata identifies clean code suitable for a release."""
+
+        return _has_release_certifying_provenance(self.metadata)
 
 
 def estimate_dense_memory_bytes(
