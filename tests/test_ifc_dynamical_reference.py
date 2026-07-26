@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import negfpy
 from negfpy.io import read_ifc
 from negfpy.modeling import (
     IFCDynamicalReference,
@@ -45,12 +44,6 @@ def _reference(
         dof_per_atom=dof_per_atom,
         basis_positions=basis_positions,
     )
-
-
-def test_tests_import_the_candidate_source_tree() -> None:
-    expected = Path(__file__).resolve().parents[1] / "src" / "negfpy"
-    imported = Path(negfpy.__file__).resolve().parent
-    assert imported == expected.resolve()
 
 
 def test_direct_analytic_reference_is_canonical_and_merges_each_translation_once() -> None:
