@@ -2327,6 +2327,15 @@ def test_remote_python_entrypoints_cannot_dirty_a_clean_worktree_with_pycache(
     bootstrap = cli._remote_bootstrap_command(COMMIT)
     launch = cli._launch_command(COMMIT, "negf-toy-pycache-regression")
     assert "env PYTHONDONTWRITEBYTECODE=1 " in bootstrap
+    remote = core._remote_shell_dir(COMMIT)
+    assert (
+        f"PATH={core.REMOTE_TOOLS_BIN}:{remote}/environment/bin:/usr/bin:/bin "
+        in bootstrap
+    )
+    assert (
+        f"PATH={core.REMOTE_TOOLS_BIN}:{remote}/environment/bin:/usr/bin:/bin "
+        in launch
+    )
     assert "env PYTHONDONTWRITEBYTECODE=1 " in launch
 
     repository = pathlib.Path(__file__).parents[1].resolve()
@@ -2342,9 +2351,15 @@ def test_remote_python_entrypoints_cannot_dirty_a_clean_worktree_with_pycache(
         ("git", "-C", str(worktree), "checkout", "--quiet", "--detach", "HEAD"),
         check=True,
     )
+    local_git = shutil.which("git")
+    assert local_git is not None
+    remote_tools = tmp_path / "remote-tools-bin"
+    remote_tools.mkdir()
+    (remote_tools / "git").symlink_to(pathlib.Path(local_git).resolve())
     environment = dict(os.environ)
     environment.update(
         {
+            "PATH": str(remote_tools),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPATH": str(worktree / "src"),
         }
@@ -2356,7 +2371,9 @@ def test_remote_python_entrypoints_cannot_dirty_a_clean_worktree_with_pycache(
             (
                 "import negfpy; "
                 "from negfpy.anharmonic._provenance import code_provenance; "
-                "code_provenance(); "
+                "record = code_provenance(); "
+                "assert record[\"git_revision\"] != \"unknown\"; "
+                "assert record[\"git_dirty\"] is False; "
                 "from negfpy.anharmonic.toy._mpi_production_gate_physics "
                 "import production_toy_physics_sha256; "
                 "from negfpy.anharmonic.toy._mpi_production_gate "

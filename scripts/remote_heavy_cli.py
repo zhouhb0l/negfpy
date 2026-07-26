@@ -40,8 +40,20 @@ ORCHESTRATION_SCRIPT_PATHS = (
 )
 
 
+def _remote_runtime_path(remote: str) -> str:
+    return ":".join(
+        (
+            core.REMOTE_TOOLS_BIN,
+            f"{remote}/environment/bin",
+            "/usr/bin",
+            "/bin",
+        )
+    )
+
+
 def _remote_bootstrap_command(commit: str) -> str:
     remote = core._remote_shell_dir(commit)
+    runtime_path = _remote_runtime_path(remote)
     return " && ".join(
         (
             f"mkdir -p {remote}/incoming {remote}/artifacts",
@@ -59,7 +71,7 @@ def _remote_bootstrap_command(commit: str) -> str:
             f"--file {remote}/incoming/environment-explicit.lock",
             f"{remote}/environment/bin/python -m pip install --no-deps "
             f"--no-build-isolation -e {remote}/worktree",
-            f"env PYTHONDONTWRITEBYTECODE=1 "
+            f"env PYTHONDONTWRITEBYTECODE=1 PATH={runtime_path} "
             f"PYTHONPATH={remote}/worktree/src {remote}/environment/bin/python "
             f"{remote}/worktree/scripts/remote_heavy_cli.py "
             f"_record-remote-environment --deployment-dir {remote} --commit {commit}",
@@ -109,12 +121,13 @@ def deploy(
 
 def _launch_command(commit: str, session: str) -> str:
     remote = core._remote_shell_dir(commit)
+    runtime_path = _remote_runtime_path(remote)
     session = core._validate_session(session)
     limits = " ".join(
         f"{key}=1" for key in sorted(core.THREAD_LIMIT_ENV)
     )
     worker = (
-        f"env PYTHONDONTWRITEBYTECODE=1 "
+        f"env PYTHONDONTWRITEBYTECODE=1 PATH={runtime_path} "
         f"PYTHONPATH={remote}/worktree/src {limits} "
         f"{remote}/environment/bin/python "
         f"{remote}/worktree/scripts/remote_heavy_cli.py _worker "
