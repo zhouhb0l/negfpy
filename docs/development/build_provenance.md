@@ -8,29 +8,48 @@ source or editable imports.
 
 For a wheel built directly from a clean, exact Git checkout, the record stores
 the canonical 40- or 64-hex commit object ID, `git_dirty=false`, the declared
-package version, and a SHA256 over every installed `.py` relative path followed
-by its exact bytes. The JSON is canonical and is included in wheel `RECORD`.
-The Git root is resolved from the build-hook module location, never from the
-invoking working directory.
+package version, and a SHA256 over the complete installed package payload.
+The hash is domain-separated and length-prefixes the file count, every UTF-8
+relative path, and every content byte string. It excludes only the generated
+provenance JSON and runtime `__pycache__`/`.pyc`/`.pyo` files; symlinks and
+special files fail closed. The JSON is canonical and is included in wheel
+`RECORD`. The Git root is resolved from the build-hook module location, never
+from the invoking working directory.
 
-At runtime, an installed metadata file takes precedence over Git repositories
-in ancestor directories. This prevents a wheel under a repository-local
-`.venv` from being attributed to the enclosing checkout. The record is used
+Before copying, the hook removes only the exact generated
+`build_lib/negfpy` directory under a validated build root. It rejects the
+project root, source ancestors, source descendants, symlinks, and every target
+that overlaps canonical `src/negfpy` before deletion. After copying, it
+compares every package path and byte against both `src/negfpy` and regular
+HEAD blobs. This remains effective when index flags hide worktree changes and
+prevents ignored stale build output from being attributed to a clean commit.
+
+At runtime, live Git is permitted only when the resolved import root is
+exactly `<project>/src/negfpy` beside that project's `.git` and
+`pyproject.toml`. That authenticated source layout compares the complete
+current package payload directly with regular HEAD blobs, so ignored files and
+index-hidden mutations remain dirty. It ignores any forged embedded record and
+records it as worktree dirt. Every other import is treated as an
+installed package: its embedded record is used when valid, and an absent or
+invalid record remains unknown without consulting ancestor repositories. This
+prevents a wheel under a repository-local `.venv` from being attributed to the
+enclosing checkout. The record is used
 only when it is a regular non-symlink file with the exact schema and keys,
 strict JSON (no duplicates or nonfinite values), the installed version, a
 canonical Git object ID, and a package-source hash matching the installed
-Python bytes. A present but invalid record fails closed to unknown Git state;
-it never falls through to an ancestor repository.
+package payload bytes. A present but invalid record fails closed to unknown
+Git state; it never falls through to an ancestor repository.
 
-Dirty direct builds record `git_dirty=true`. Builds without an exact Git root,
-including wheels rebuilt from an sdist, record unknown Git state. Both are
+Dirty direct builds record `git_dirty=true`. The only accepted unknown pair is
+`git_revision="unknown", git_dirty="unknown"`. Builds without an exact Git
+root, including wheels rebuilt from an sdist, record that pair. Both are
 noncertifying. All release-report paths additionally require
 `git_dirty is False`; a revision and source hash alone are insufficient.
 
 The embedded JSON is an integrity binding, not a digital signature. Release
 authenticity still comes from the external checksummed Git bundle, clean
 worktree verification, environment manifest, launch receipt, and exact-commit
-remote certification. Altering installed `.py` bytes invalidates the embedded
+remote certification. Altering installed package bytes invalidates the embedded
 record unless the metadata is also replaced, which remains detectable against
 those external release receipts.
 

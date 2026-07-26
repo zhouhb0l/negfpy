@@ -224,6 +224,13 @@ def _record_remote_environment(
         text=True,
     ).stdout.strip()
     package_provenance = code_provenance()
+    if (
+        package_provenance.get("git_revision") != commit
+        or package_provenance.get("git_dirty") is not False
+    ):
+        raise core.RemoteValidationError(
+            "deployed NEGFPy runtime provenance is not the requested clean commit"
+        )
     source_tree_sha256 = package_provenance.get("source_tree_sha256")
     if (
         not isinstance(source_tree_sha256, str)

@@ -107,7 +107,9 @@ interpreter, installed distributions, platform, and thread limits.
 
 Wheel installs additionally follow the fail-closed build identity contract in
 [`development/build_provenance.md`](development/build_provenance.md); embedded
-metadata supplements but never replaces the deployment bundle and worktree receipts.
+metadata supplements but never replaces the deployment bundle and worktree
+receipts. Remote identity comparison treats this SHA256 as an opaque value from
+`code_provenance()`; it does not implement a second hash algorithm.
 
 The explicit Linux lock pins Python 3.10.19, Open MPI 5.0.10, mpi4py 4.1.1,
 NumPy 2.2.6, SciPy 1.15.2, h5py 3.16.0, threadpoolctl 3.6.0, and pytest 9.0.3.

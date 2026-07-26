@@ -24,6 +24,7 @@ Array = np.ndarray
 
 _BUILD_PROVENANCE_SCHEMA = "negfpy.build_provenance.v1"
 _BUILD_PROVENANCE_FILE = "_build_provenance.json"
+_PACKAGE_HASH_DOMAIN = b"negfpy.package-payload.v1\0"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_REVISION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _BUILD_PROVENANCE_KEYS = frozenset(
@@ -38,25 +39,58 @@ _BUILD_PROVENANCE_KEYS = frozenset(
 )
 
 
-def _package_source_sha256(package_root: Path) -> str | None:
-    """Hash installed Python paths and bytes, failing closed on read errors."""
+def _package_payload_entries(
+    package_root: Path,
+) -> tuple[tuple[str, bytes], ...] | None:
+    """Read the complete behavior-bearing package payload."""
 
     try:
-        paths = sorted(
-            (path for path in package_root.rglob("*.py") if path.is_file()),
-            key=lambda path: path.relative_to(package_root).as_posix(),
-        )
-        if not paths or any(path.is_symlink() for path in paths):
+        root = package_root.resolve()
+        if package_root.is_symlink() or not root.is_dir():
             return None
-        digest = hashlib.sha256()
-        for path in paths:
-            digest.update(
-                path.relative_to(package_root).as_posix().encode("utf-8")
-            )
-            digest.update(path.read_bytes())
+        entries: list[tuple[str, bytes]] = []
+        for path in sorted(
+            root.rglob("*"),
+            key=lambda item: item.relative_to(root).as_posix(),
+        ):
+            relative = path.relative_to(root)
+            if (
+                relative.as_posix() == _BUILD_PROVENANCE_FILE
+                or "__pycache__" in relative.parts
+                or relative.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            if path.is_symlink():
+                return None
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                return None
+            entries.append((relative.as_posix(), path.read_bytes()))
     except (OSError, RuntimeError, ValueError):
         return None
+    return tuple(entries) if entries else None
+
+
+def _payload_sha256(entries: tuple[tuple[str, bytes], ...]) -> str:
+    digest = hashlib.sha256()
+    digest.update(_PACKAGE_HASH_DOMAIN)
+    digest.update(len(entries).to_bytes(8, "big"))
+    for relative, content in entries:
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
     return digest.hexdigest()
+
+
+def _package_source_sha256(package_root: Path) -> str | None:
+    """Hash the framed full installed payload, failing closed on anomalies."""
+
+    entries = _package_payload_entries(package_root)
+    return None if entries is None else _payload_sha256(entries)
 
 
 def _reject_duplicate_json_keys(
@@ -80,7 +114,7 @@ def _validated_embedded_build_provenance(
     package_source_sha256: str,
     installed_version: str,
 ) -> tuple[str, bool | str] | None:
-    """Validate fixed-path wheel metadata against the installed source bytes."""
+    """Validate fixed-path wheel metadata against installed payload bytes."""
 
     path = package_root / _BUILD_PROVENANCE_FILE
     try:
@@ -118,9 +152,8 @@ def _validated_embedded_build_provenance(
     if type(dirty) is bool:
         if _GIT_REVISION_RE.fullmatch(revision) is None:
             return None
-    elif dirty == "unknown":
-        if revision != "unknown" and _GIT_REVISION_RE.fullmatch(revision) is None:
-            return None
+    elif dirty == "unknown" and revision == "unknown":
+        pass
     else:
         return None
     return revision, dirty
@@ -307,17 +340,91 @@ def initial_self_energy_hash(
     return digest.hexdigest()
 
 
-def _declared_package_version(package_root: Path) -> str:
-    """Read the source checkout declaration without consulting cwd."""
+def _head_package_entries(
+    repository: Path,
+    git_executable: str,
+) -> tuple[tuple[str, bytes], ...] | None:
+    """Read exact regular package blobs from HEAD, ignoring index flags."""
 
-    project_file: Path | None = None
-    for candidate in (package_root, *package_root.parents):
-        possible = candidate / "pyproject.toml"
-        if possible.is_file():
-            project_file = possible
-            break
-    if project_file is None:
-        return "unknown"
+    try:
+        listing = subprocess.run(
+            (
+                git_executable,
+                "ls-tree",
+                "-rz",
+                "--full-tree",
+                "HEAD",
+                "--",
+                "src/negfpy",
+            ),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            timeout=5.0,
+        ).stdout
+        entries: list[tuple[str, bytes]] = []
+        prefix = "src/negfpy/"
+        for raw in listing.split(b"\0"):
+            if not raw:
+                continue
+            header, separator, raw_path = raw.partition(b"\t")
+            mode, kind, object_id = header.split(b" ")
+            source_path = raw_path.decode("utf-8")
+            if (
+                not separator
+                or mode not in {b"100644", b"100755"}
+                or kind != b"blob"
+                or not source_path.startswith(prefix)
+            ):
+                return None
+            content = subprocess.run(
+                (
+                    git_executable,
+                    "cat-file",
+                    "blob",
+                    object_id.decode("ascii"),
+                ),
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                timeout=5.0,
+            ).stdout
+            entries.append((source_path[len(prefix) :], content))
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        return None
+    entries.sort(key=lambda item: item[0])
+    return tuple(entries) if entries else None
+
+
+def _source_repository(package_root: Path) -> Path | None:
+    """Return only the repository owning the exact ``src/negfpy`` tree."""
+
+    resolved = package_root.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if not (candidate / ".git").exists():
+            continue
+        expected = candidate / "src" / "negfpy"
+        try:
+            if (
+                not expected.is_symlink()
+                and expected.resolve() == resolved
+                and (candidate / "pyproject.toml").is_file()
+            ):
+                return candidate
+        except OSError:
+            return None
+    return None
+
+
+def _declared_package_version(project_root: Path) -> str:
+    """Read the exact source checkout declaration without consulting cwd."""
+
+    project_file = project_root / "pyproject.toml"
     try:
         project_text = project_file.read_text(encoding="utf-8")
     except OSError:
@@ -348,18 +455,22 @@ def code_provenance() -> dict[str, str | bool]:
 
     package_root = Path(__file__).resolve().parents[1]
     package_source_sha256 = _package_source_sha256(package_root)
-    embedded_present, embedded = _embedded_build_provenance_if_present(
-        package_root,
-        package_source_sha256=package_source_sha256,
-        installed_version=installed_version,
-    )
+    repository = _source_repository(package_root)
+    if repository is None:
+        embedded_present, embedded = _embedded_build_provenance_if_present(
+            package_root,
+            package_source_sha256=package_source_sha256,
+            installed_version=installed_version,
+        )
+    else:
+        embedded_present, embedded = False, None
     declared_version = (
         "unknown"
-        if embedded_present
-        else _declared_package_version(package_root)
+        if repository is None
+        else _declared_package_version(repository)
     )
     # Installed wheel metadata is generated from the project declaration.
-    # A present wheel record takes precedence over every package ancestor.
+    # Non-source installs use embedded metadata or remain unknown.
     if declared_version == "unknown" and installed_version != "unknown":
         declared_version = installed_version
     package_version = (
@@ -389,12 +500,7 @@ def code_provenance() -> dict[str, str | bool]:
             result["git_dirty"] = dirty
         return result
 
-    repository = package_root
-    for candidate in (package_root, *package_root.parents):
-        if (candidate / ".git").exists():
-            repository = candidate
-            break
-    else:
+    if repository is None:
         return result
 
     git_executable = shutil.which("git")
@@ -484,7 +590,14 @@ def code_provenance() -> dict[str, str | bool]:
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return result
-    result["git_dirty"] = bool(dirty.strip())
+    current_entries = _package_payload_entries(package_root)
+    head_entries = _head_package_entries(repository, git_executable)
+    if current_entries is None or head_entries is None:
+        result["git_dirty"] = "unknown"
+    else:
+        result["git_dirty"] = bool(
+            dirty.strip() or current_entries != head_entries
+        )
     return result
 
 
