@@ -16,11 +16,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install
-        run: python -m pip install -e ".[test]"
+      - name: Build clean wheel
+        run: |
+          python -m pip install "build>=1" "h5py>=3" "pytest>=8"
+          python -m build --wheel --outdir dist
+          python -m pip install dist/*.whl
+      - name: Prove tests import the wheel
+        run: |
+          python -c "import pathlib, negfpy; path=pathlib.Path(negfpy.__file__).resolve(); assert not path.is_relative_to(pathlib.Path.cwd().resolve()), path"
       # Heavy release gates run only on the designated key-only workstation.
       # Hosted runners never connect to private machines.
-      - name: Full bounded suite
+      - name: Full bounded fresh-wheel suite
         run: python -m pytest -q -m "not nightly"
       - name: Dense toy smoke calculation
         run: python examples/anharmonic_toy_scba.py
