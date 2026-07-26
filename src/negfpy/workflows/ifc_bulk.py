@@ -1038,9 +1038,10 @@ def _unwrap_transport_n1_minimum_image(
 
     For any lattice axis whose repeat is 1, wrapped FFT indices collapse that
     shift to zero. This opt-in routine reassigns each atom-pair sub-block along
-    every collapsed axis by choosing the shortest Cartesian image distance over
-    shifts in {-1, 0, +1}. After transport reorientation this covers both the
-    transport axis and any transverse axes with repeat 1.
+    every collapsed axis using the shortest Cartesian image distance over
+    shifts in {-1, 0, +1}, splitting the original weight over exactly tied
+    images. After transport reorientation this covers both the transport axis
+    and any transverse axes with repeat 1.
     """
 
     info: dict[str, Any] = {
@@ -1051,6 +1052,7 @@ def _unwrap_transport_n1_minimum_image(
         "ambiguous_pair_count": 0,
         "pairs_assigned_nonzero_shift": 0,
         "pairs_assigned_nonzero_dx": 0,
+        "degenerate_images_weight_split": False,
         "collapsed_axes": [],
     }
     mode_raw = None if mode is None else str(mode).strip()
@@ -1110,7 +1112,7 @@ def _unwrap_transport_n1_minimum_image(
     accum: dict[tuple[int, int, int], np.ndarray] = {}
     ambiguous = 0
     reassigned_nonzero = 0
-    preferred_order = (0, -1, 1)
+    assigned_nonzero_dx = 0
 
     def _ensure_term(key: tuple[int, int, int]) -> np.ndarray:
         out = accum.get(key)
@@ -1124,10 +1126,6 @@ def _unwrap_transport_n1_minimum_image(
         block = np.asarray(term.block, dtype=np.complex128)
         if block.shape != (ndof, ndof):
             raise ValueError(f"Invalid IFC term block shape {block.shape}; expected ({ndof},{ndof}).")
-        if dx0 != 0:
-            _ensure_term((dx0, dy, dz))[:, :] += block
-            continue
-
         for i in range(nat):
             rs = i * dof
             ri = frac[i, :]
@@ -1147,17 +1145,28 @@ def _unwrap_transport_n1_minimum_image(
                             candidate_shifts.append(((int(sx), int(sy), int(sz)), float(np.linalg.norm(dcart))))
 
                 dmin = min(d for _, d in candidate_shifts)
-                candidates = [shift for shift, d in candidate_shifts if abs(d - dmin) <= tie_tolerance]
+                candidates = sorted(
+                    shift
+                    for shift, d in candidate_shifts
+                    if abs(d - dmin) <= tie_tolerance
+                )
                 if len(candidates) > 1:
                     ambiguous += 1
-                best_shift = min(
-                    candidates,
-                    key=lambda shift: tuple(preferred_order.index(int(v)) for v in shift),
-                )
-                if best_shift != (dx0, dy, dz):
+                original_shift = (dx0, dy, dz)
+                if candidates != [original_shift]:
                     reassigned_nonzero += 1
+                if any(shift[0] != 0 for shift in candidates):
+                    assigned_nonzero_dx += 1
 
-                _ensure_term(best_shift)[rs : rs + dof, cs : cs + dof] += sub
+                # A shortest-vector degeneracy represents one physical
+                # atom-pair interaction distributed over equivalent periodic
+                # images. Preserve its total weight exactly; duplicating the
+                # full sub-block at every image would change D(q).
+                weight = 1.0 / float(len(candidates))
+                for shift in candidates:
+                    _ensure_term(shift)[rs : rs + dof, cs : cs + dof] += (
+                        weight * sub
+                    )
 
     terms_new = tuple(IFCTerm(dx=k[0], dy=k[1], dz=k[2], block=v) for k, v in sorted(accum.items()))
     meta = dict(ifc.metadata)
@@ -1167,13 +1176,15 @@ def _unwrap_transport_n1_minimum_image(
         "collapsed_axes": [int(v) for v in collapsed_axes],
         "ambiguous_pair_count": int(ambiguous),
         "pairs_assigned_nonzero_shift": int(reassigned_nonzero),
-        "pairs_assigned_nonzero_dx": int(reassigned_nonzero),
+        "pairs_assigned_nonzero_dx": int(assigned_nonzero_dx),
+        "degenerate_images_weight_split": True,
     }
     info["applied"] = True
     info["reason"] = "applied"
     info["ambiguous_pair_count"] = int(ambiguous)
     info["pairs_assigned_nonzero_shift"] = int(reassigned_nonzero)
-    info["pairs_assigned_nonzero_dx"] = int(reassigned_nonzero)
+    info["pairs_assigned_nonzero_dx"] = int(assigned_nonzero_dx)
+    info["degenerate_images_weight_split"] = True
     return IFCData(
         masses=np.asarray(ifc.masses, dtype=float),
         dof_per_atom=int(ifc.dof_per_atom),
