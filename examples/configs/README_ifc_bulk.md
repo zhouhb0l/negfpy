@@ -19,16 +19,25 @@ python examples/run_ifc_bulk.py --input <config.json>
 
 `run.output_mode` controls where results are written:
 - `flat` (default): writes to `run.output_dir` (legacy behavior)
-- `study`: writes to `studies/<study>/<material>/runs/<timestamp>_<run_name>/`
+- `study`: writes beneath
+  `<studies_root>/<study>/<material>/runs/<timestamp>_<run_name>/`
 
 Study mode also writes:
 - `input.json` snapshot inside each run folder
 - `manifest.jsonl` (append-only run index) in the study root
 - provenance in `*_report.json` (config hash, IFC hash, git head, git dirty flag, hostname)
 
+Material-specific configurations, IFC inputs, drivers, and results are kept
+outside the repository in the workspace-level `../studies/` tree. When running
+from the repository root, set `run.studies_root` to `../studies` or use an
+equivalent relative path from the launch directory.
+
 ## Minimal Workflow
 
-1. Put your `.fc` file under the study folder (recommended: `studies/<study>/inputs/ifc/`), or use an absolute path.
+1. Create a material folder under the workspace study tree and place the `.fc`
+   input beneath it, for example
+   `../studies/materials/<study>/inputs/ifc/material.fc` when launching from the
+   repository root.
 2. Generate a template:
 
 ```bash
@@ -199,9 +208,9 @@ Unexpected transmission differences between runs:
 - compare the two `*_report.json` files field-by-field
 - especially check `n_layers`, `kmesh.mode`, and eta settings
 
-## Example Configs
+## Generic Template
 
-- `examples/configs/ifc_bulk_graphene_transmission.json`
-- `examples/configs/ifc_bulk_silicon_transmission.json`
-- `examples/configs/ifc_bulk_graphene_benchmark_match.json`
-- `examples/configs/ifc_bulk_graphene_fcs.json`
+`examples/configs/ifc_bulk_template.json` is the only repository configuration.
+Copy it into the relevant workspace study and record the material-specific IFC
+and run settings there. This keeps source-code tests and releases independent
+of local datasets and generated results.

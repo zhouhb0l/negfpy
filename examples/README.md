@@ -1,28 +1,28 @@
-# Examples Overview
+# Examples
 
-## Primary Entry Point
+The repository contains only generic or self-contained examples:
 
-Use the bulk IFC runner for day-to-day material calculations from `.fc` files:
+- `anharmonic_toy_scba.py` runs the reduced-unit anharmonic toy model.
+- `run_ifc_bulk.py` is the generic entry point for harmonic calculations from an
+  IFC configuration.
+- `configs/ifc_bulk_template.json` is the generic IFC configuration template.
+
+Run the toy example with:
 
 ```bash
-python examples/run_ifc_bulk.py --input examples/configs/ifc_bulk_template.json
+python examples/anharmonic_toy_scba.py
 ```
 
-Bulk runner docs and config templates:
-- `examples/configs/README_ifc_bulk.md`
-- `examples/configs/ifc_bulk_template.json`
+Generate and edit an IFC configuration before running a material calculation:
 
-## Validation / Benchmark Scripts
+```bash
+python examples/run_ifc_bulk.py \
+  --write-template examples/configs/ifc_bulk_template.json
+python examples/run_ifc_bulk.py --input path/to/config.json
+```
 
-These are kept at top-level because they are useful for solver and regression checks:
-- `examples/graphene_ifc_transmission_benchmark.py`
-- `examples/graphene_kmatrix_legacy_benchmark.py`
-- `examples/silicon_ifc_dispersion_compare.py`
+See `examples/configs/README_ifc_bulk.md` for the configuration reference.
 
-## Legacy Archive
-
-Older one-off examples were moved to:
-- `examples/legacy/examples_ifc/`
-- `examples/legacy/toy_models/`
-
-These scripts are kept for reference but are not the recommended interface for new runs.
+Material-specific drivers, IFC inputs, and generated results belong in the
+workspace-level `../studies/` tree rather than in the source repository. Legacy
+implementations and superseded examples are retained in the workspace archive.

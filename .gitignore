@@ -75,7 +75,3 @@ results/
 cache/
 outputs/
 validation-artifacts/
-
-# Legacy build artifacts
-oldfortrancode/*.mod
-oldfortrancode/*.exe
