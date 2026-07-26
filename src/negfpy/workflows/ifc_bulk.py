@@ -49,7 +49,9 @@ from negfpy.modeling import (
     qe_omega_to_thz,
 )
 from negfpy.modeling.builders import build_material_kspace_params
+from negfpy.modeling.validators import audit_ifc_data
 from negfpy.models import material_kspace_device, material_kspace_lead
+from negfpy.workflows._ifc_audit import ifc_audit_payload
 
 
 DEFAULT_ETA_VALUES: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3)
@@ -250,6 +252,7 @@ def _harmonic_release_preflight(
     calculation: str,
     kmesh: dict[str, Any] | None,
     results: dict[str, Any] | None = None,
+    ifc_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Enforce and document the release-safe harmonic transport contract.
 
@@ -356,6 +359,18 @@ def _harmonic_release_preflight(
         success="transverse q meshes contain each periodic point exactly once",
     )
 
+    if ifc_audit is not None:
+        final_ifc_audit = dict(ifc_audit.get("final", {}))
+        record(
+            "final_ifc_audit",
+            final_ifc_audit.get("passed") is True,
+            failure=(
+                "the final IFC dataset failed the mandatory reciprocal, ASR, "
+                "rotational, mapping, Hermiticity, or stability audit"
+            ),
+            success="the final IFC dataset passed every mandatory audit",
+        )
+
     if results is not None:
         summary = dict(results.get("summary", {}))
         record(
@@ -399,6 +414,7 @@ def _harmonic_release_preflight(
             "min_success_fraction": min_fraction_raw,
             "eta_device": eta_device_raw,
             "duplicate_qmesh_sections": duplicate_sections,
+            "ifc_audit_present": ifc_audit is not None,
         },
     }
     if requested and failures:
@@ -708,14 +724,25 @@ def _reorient_ifc_for_transport_direction(ifc: IFCData, *, direction: int) -> IF
     meta["transport_direction"] = int(direction)
     meta["transport_permutation"] = perm
 
+    lattice_vectors = None
+    if ifc.lattice_vectors is not None:
+        lattice_vectors = np.asarray(ifc.lattice_vectors, dtype=float)[
+            np.asarray(perm, dtype=int), :
+        ].copy()
+    atom_positions = None
+    if ifc.atom_positions is not None:
+        atom_positions = np.asarray(ifc.atom_positions, dtype=float)[
+            :, np.asarray(perm, dtype=int)
+        ].copy()
+
     return IFCData(
         masses=np.asarray(ifc.masses, dtype=float),
         dof_per_atom=int(ifc.dof_per_atom),
         terms=tuple(terms),
         units=ifc.units,
         metadata=meta,
-        lattice_vectors=ifc.lattice_vectors,
-        atom_positions=ifc.atom_positions,
+        lattice_vectors=lattice_vectors,
+        atom_positions=atom_positions,
         atom_symbols=ifc.atom_symbols,
         index_convention=ifc.index_convention,
     )
@@ -2790,6 +2817,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     git_is_dirty = _git_dirty(workspace_root)
 
     ifc_raw = read_ifc(ifc_path, reader=reader)
+    raw_ifc_audit = audit_ifc_data(ifc_raw)
     n_terms_raw = len(ifc_raw.terms)
     asr_residual_max = None
     if enforce_asr:
@@ -2813,6 +2841,20 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     ifc_filtered, n_terms_removed = _apply_transverse_cutoff(ifc_oriented, dy_cutoff=dy_cutoff, dz_cutoff=dz_cutoff)
     n1_unwrap_mode = mcfg.get("n1_transport_unwrap", "auto")
     ifc_model, n1_unwrap_info = _unwrap_transport_n1_minimum_image(ifc_filtered, mode=n1_unwrap_mode)
+    final_ifc_audit = audit_ifc_data(ifc_model)
+    ifc_audit = ifc_audit_payload(
+        raw=raw_ifc_audit,
+        final=final_ifc_audit,
+        release_preflight=bool(run_cfg.get("release_preflight", False)),
+    )
+    if bool(run_cfg.get("release_preflight", False)) and not final_ifc_audit.passed:
+        failure_detail = "; ".join(final_ifc_audit.errors)
+        if not failure_detail:
+            failure_detail = "one or more mandatory IFC checks failed"
+        raise ValueError(
+            "Harmonic IFC release preflight failed: final IFC audit did not "
+            f"pass: {failure_detail}"
+        )
 
     n_layers = int(mcfg.get("n_layers", 30))
     build_cfg = BuildConfig(
@@ -2842,6 +2884,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         calculation=calc_type,
         kmesh=kmesh_info,
         results=None,
+        ifc_audit=ifc_audit,
     )
     results: dict[str, Any]
     omega_info: dict[str, Any] | None = None
@@ -2863,9 +2906,9 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         elif calc_type == "fcs":
             lv_m = _resolve_lattice_vectors_for_area(
                 ifc_lattice_vectors=(
-                    None if ifc_model.lattice_vectors is None else np.asarray(ifc_model.lattice_vectors, dtype=float)
+                    None if ifc_raw.lattice_vectors is None else np.asarray(ifc_raw.lattice_vectors, dtype=float)
                 ),
-                ifc_metadata=dict(ifc_model.metadata),
+                ifc_metadata=dict(ifc_raw.metadata),
                 lattice_vectors_override_angstrom=lattice_vectors_override_angstrom,
             )
             area_m2: float | None = None
@@ -2898,6 +2941,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         calculation=calc_type,
         kmesh=kmesh_info,
         results=results,
+        ifc_audit=ifc_audit,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2918,17 +2962,17 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
                 "lattice_vectors_override_angstrom": None
                 if lattice_vectors_override_angstrom is None
                 else np.asarray(lattice_vectors_override_angstrom, dtype=float).tolist(),
-                "atom_symbols": None if ifc_filtered.atom_symbols is None else list(ifc_filtered.atom_symbols),
+                "atom_symbols": None if ifc_raw.atom_symbols is None else list(ifc_raw.atom_symbols),
                 "lattice_vectors_raw": None
-                if ifc_filtered.lattice_vectors is None
-                else np.asarray(ifc_filtered.lattice_vectors, dtype=float).tolist(),
-                "source_format": str(ifc_filtered.metadata.get("source_format", "")),
+                if ifc_raw.lattice_vectors is None
+                else np.asarray(ifc_raw.lattice_vectors, dtype=float).tolist(),
+                "source_format": str(ifc_raw.metadata.get("source_format", "")),
             }
             lv_m = _resolve_lattice_vectors_for_area(
                 ifc_lattice_vectors=(
-                    None if ifc_filtered.lattice_vectors is None else np.asarray(ifc_filtered.lattice_vectors, dtype=float)
+                    None if ifc_raw.lattice_vectors is None else np.asarray(ifc_raw.lattice_vectors, dtype=float)
                 ),
-                ifc_metadata=dict(ifc_filtered.metadata),
+                ifc_metadata=dict(ifc_raw.metadata),
                 lattice_vectors_override_angstrom=lattice_vectors_override_angstrom,
             )
             if lv_m is not None:
@@ -3114,6 +3158,15 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "atom_symbols": None if ifc_model.atom_symbols is None else list(ifc_model.atom_symbols),
             "lattice_vectors": None if ifc_model.lattice_vectors is None else np.asarray(ifc_model.lattice_vectors).tolist(),
             "metadata": dict(ifc_model.metadata),
+            "audit": ifc_audit,
+            "correction": {
+                "name": "translational_asr_on_self_term",
+                "requested": bool(enforce_asr),
+                "applied": bool(enforce_asr),
+                "maximum_residual_before_correction": asr_residual_max,
+                "raw_audit_passed": bool(raw_ifc_audit.passed),
+                "final_audit_passed": bool(final_ifc_audit.passed),
+            },
         },
         "model": {
             "transport_direction": int(transport_direction),
