@@ -233,3 +233,20 @@ def test_reader_distributes_degenerate_shortest_vector_weight_exactly(
         (term.dx, term.dy, term.dz): np.asarray(term.block)
         for term in ifc.terms
     }
+    scale = float(ifc.metadata["force_constant_scale_to_qe"])
+    left = float(terms[(-1, 0, 0)][0, 3].real)
+    home = float(terms[(0, 0, 0)][0, 3].real)
+
+    # The pair lies exactly halfway between two periodic images. Each image
+    # must receive one half of the source block, and the complete source
+    # weight must be conserved across the two generated IFC terms.
+    np.testing.assert_allclose(left, 4.0 * scale, rtol=0.0, atol=1.0e-15)
+    np.testing.assert_allclose(home, 4.0 * scale, rtol=0.0, atol=1.0e-15)
+    np.testing.assert_allclose(
+        left + home,
+        8.0 * scale,
+        rtol=0.0,
+        atol=1.0e-15,
+    )
+    multiplicities = ifc.metadata["shortest_vector_multiplicity_counts"]
+    assert int(multiplicities[2]) >= 1
