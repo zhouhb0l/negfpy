@@ -53,6 +53,9 @@ _STOP_TAG = 4103
 
 ArtifactValidator = Callable[[Path, "TaskSpec"], Mapping[str, Any] | None]
 TaskWorker = Callable[["TaskSpec", "TaskContext"], "TaskResult"]
+OrphanArtifactAdopter = Callable[
+    [Path, "TaskSpec", Mapping[str, Any]], "TaskResult"
+]
 
 
 class TaskMPIError(RuntimeError):
@@ -688,6 +691,7 @@ def _checkpoint_from_result(
     *,
     elapsed_seconds: float,
     artifact_validator: ArtifactValidator | None,
+    orphan_artifact_adopted: bool = False,
 ) -> TaskCheckpoint:
     relative_path: str | None = None
     artifact_sha256: str | None = None
@@ -703,6 +707,16 @@ def _checkpoint_from_result(
             ) from exc
         validation = _validate_artifact(artifact, task, artifact_validator)
         artifact_sha256 = _file_sha256(artifact)
+    execution = {
+        "rank": context.rank,
+        "communicator_size": context.communicator_size,
+        "hostname": context.hostname,
+        "elapsed_seconds": elapsed_seconds,
+        "thread_limit": context.thread_limit,
+        "thread_cap": context.thread_cap_metadata,
+    }
+    if orphan_artifact_adopted:
+        execution["orphan_artifact_adopted"] = True
     return TaskCheckpoint(
         manifest_sha256=manifest.manifest_sha256,
         task_id=task.task_id,
@@ -712,16 +726,7 @@ def _checkpoint_from_result(
         artifact_sha256=artifact_sha256,
         artifact_validation=validation,
         metadata=result.metadata,
-        execution=_freeze_json(
-            {
-                "rank": context.rank,
-                "communicator_size": context.communicator_size,
-                "hostname": context.hostname,
-                "elapsed_seconds": elapsed_seconds,
-                "thread_limit": context.thread_limit,
-                "thread_cap": context.thread_cap_metadata,
-            }
-        ),
+        execution=_freeze_json(execution),
     )
 
 
@@ -1099,8 +1104,11 @@ def _execute_one(
     communicator_size: int,
     thread_limit: int,
     artifact_validator: ArtifactValidator | None,
+    orphan_artifact_suffix: str | None,
+    orphan_artifact_adopter: OrphanArtifactAdopter | None,
 ) -> TaskCheckpoint:
     started = time.perf_counter()
+    orphan_adopted = False
     with threadpool_limits(limits=thread_limit):
         cap = _thread_cap_snapshot(thread_limit)
         if cap["all_loaded_libraries_capped"] is not True:
@@ -1118,9 +1126,26 @@ def _execute_one(
             thread_limit=thread_limit,
             thread_cap_metadata=cap,
         )
-        result = worker(task, context)
+        orphan_path = (
+            None
+            if orphan_artifact_suffix is None
+            else context.artifact_path(orphan_artifact_suffix)
+        )
+        if orphan_path is not None and orphan_path.exists():
+            assert orphan_artifact_adopter is not None
+            evidence = _validate_artifact(
+                orphan_path, task, artifact_validator
+            )
+            result = orphan_artifact_adopter(orphan_path, task, evidence)
+            orphan_adopted = True
+        else:
+            result = worker(task, context)
     if not isinstance(result, TaskResult):
         raise TypeError("task worker must return a TaskResult.")
+    if orphan_adopted and result.artifact_path != orphan_path:
+        raise TaskCheckpointMismatchError(
+            "orphan adopter must return the validated immutable artifact."
+        )
     elapsed = time.perf_counter() - started
     checkpoint = _checkpoint_from_result(
         manifest,
@@ -1129,6 +1154,7 @@ def _execute_one(
         context,
         elapsed_seconds=elapsed,
         artifact_validator=artifact_validator,
+        orphan_artifact_adopted=orphan_adopted,
     )
     target = task_checkpoint_path(manifest, task, checkpoint_directory)
     write_task_checkpoint(target, checkpoint)
@@ -1233,6 +1259,8 @@ def execute_task_manifest(
     thread_limit: int = 1,
     artifact_validator: ArtifactValidator | None = None,
     execution_id: str | None = None,
+    orphan_artifact_suffix: str | None = None,
+    orphan_artifact_adopter: OrphanArtifactAdopter | None = None,
 ) -> MPIExecutionReport | None:
     """Execute whole tasks serially or with a rank-zero MPI coordinator.
 
@@ -1253,6 +1281,16 @@ def execute_task_manifest(
         execution_id = _validate_identifier(execution_id, name="execution_id")
         if "/" in execution_id or "\\" in execution_id:
             raise ValueError("execution_id cannot contain path separators.")
+    if (orphan_artifact_suffix is None) != (
+        orphan_artifact_adopter is None
+    ):
+        raise ValueError(
+            "orphan suffix and adopter must be supplied together."
+        )
+    if orphan_artifact_suffix is not None and (
+        _SUFFIX_PATTERN.fullmatch(orphan_artifact_suffix) is None
+    ):
+        raise ValueError("orphan artifact suffix is invalid.")
 
     communicator = _resolve_communicator(comm, require_mpi=require_mpi)
     rank = int(communicator.Get_rank())
@@ -1351,6 +1389,10 @@ def execute_task_manifest(
                     communicator_size=1,
                     thread_limit=thread_limit,
                     artifact_validator=artifact_validator,
+                    orphan_artifact_suffix=orphan_artifact_suffix,
+                    orphan_artifact_adopter=(
+                        orphan_artifact_adopter
+                    ),
                 )
             except Exception as exc:
                 infrastructure_errors.append(
@@ -1364,6 +1406,7 @@ def execute_task_manifest(
                 break
     elif rank != 0:
         mpi = _load_mpi(required=True)
+        protocol_failed = False
         while True:
             status = mpi.Status()
             message = communicator.recv(
@@ -1371,12 +1414,24 @@ def execute_task_manifest(
                 tag=mpi.ANY_TAG,
                 status=status,
             )
-            if status.Get_tag() == _STOP_TAG:
-                return None
-            if status.Get_tag() != _TASK_TAG:
-                raise TaskExecutionError(
-                    f"worker rank {rank} received unexpected MPI tag."
+            tag = int(status.Get_tag())
+            if tag == _STOP_TAG:
+                break
+            if protocol_failed:
+                continue
+            if tag != _TASK_TAG:
+                communicator.send(
+                    (
+                        "",
+                        "infrastructure_failure",
+                        "UnexpectedMPITag",
+                        f"worker rank {rank} received MPI tag {tag}.",
+                    ),
+                    dest=0,
+                    tag=_RESULT_TAG,
                 )
+                protocol_failed = True
+                continue
             task_id = str(message)
             try:
                 task = manifest.task(task_id)
@@ -1391,6 +1446,10 @@ def execute_task_manifest(
                     communicator_size=size,
                     thread_limit=thread_limit,
                     artifact_validator=artifact_validator,
+                    orphan_artifact_suffix=orphan_artifact_suffix,
+                    orphan_artifact_adopter=(
+                        orphan_artifact_adopter
+                    ),
                 )
             except Exception as exc:
                 communicator.send(
@@ -1413,7 +1472,15 @@ def execute_task_manifest(
         mpi = _load_mpi(required=True)
         queue = deque(task.task_id for task in pending)
         active: dict[int, str] = {}
+        stopped: set[int] = set()
         abort_scheduling = False
+
+        def stop_worker(worker_rank: int) -> None:
+            if worker_rank not in stopped:
+                communicator.send(
+                    None, dest=worker_rank, tag=_STOP_TAG
+                )
+                stopped.add(worker_rank)
 
         for worker_rank in range(1, size):
             if queue:
@@ -1421,19 +1488,36 @@ def execute_task_manifest(
                 communicator.send(task_id, dest=worker_rank, tag=_TASK_TAG)
                 active[worker_rank] = task_id
             else:
-                communicator.send(None, dest=worker_rank, tag=_STOP_TAG)
+                stop_worker(worker_rank)
 
         while active:
             status = mpi.Status()
             message = communicator.recv(
                 source=mpi.ANY_SOURCE,
-                tag=_RESULT_TAG,
+                tag=mpi.ANY_TAG,
                 status=status,
             )
             worker_rank = int(status.Get_source())
-            expected_task = active.pop(worker_rank)
+            expected_task = active.pop(worker_rank, None)
+            if expected_task is None:
+                infrastructure_errors.append(
+                    {
+                        "task_id": "<protocol>",
+                        "rank": worker_rank,
+                        "error_type": "UnexpectedWorkerMessage",
+                        "error_message": (
+                            "received a message from a worker with no "
+                            "active assignment"
+                        ),
+                    }
+                )
+                abort_scheduling = True
+                stop_worker(worker_rank)
+                continue
             valid_message = (
-                isinstance(message, (tuple, list)) and len(message) == 4
+                status.Get_tag() == _RESULT_TAG
+                and isinstance(message, (tuple, list))
+                and len(message) == 4
             )
             if valid_message:
                 task_id, state, error_type, error_message = message
@@ -1479,48 +1563,80 @@ def execute_task_manifest(
                 communicator.send(next_task, dest=worker_rank, tag=_TASK_TAG)
                 active[worker_rank] = next_task
             else:
-                communicator.send(None, dest=worker_rank, tag=_STOP_TAG)
+                stop_worker(worker_rank)
 
-    if rank != 0:
-        return None
+        for worker_rank in range(1, size):
+            stop_worker(worker_rank)
 
-    checkpoints = collect_task_checkpoints(
-        manifest,
-        checkpoint_directory,
-        artifact_root,
-        artifact_validator=artifact_validator,
-        require_complete=False,
-    )
-    report = _build_report(
-        manifest,
-        execution_id=selected_execution_id,
-        communicator_size=size,
-        coordinator_hostname=coordinator_hostname,
-        started_utc=started_utc,
-        started_clock=started_clock,
-        thread_limit=thread_limit,
-        checkpoints=checkpoints,
-        checkpoint_directory=checkpoint_directory,
-        initially_complete=initial_ids,
-        infrastructure_errors=infrastructure_errors,
-    )
-    execution_path = root / "executions" / f"{selected_execution_id}.json"
-    write_execution_manifest(execution_path, report)
-    if not report.complete:
-        raise TaskExecutionError(
-            "task execution stopped before every manifest task produced a "
-            "validated terminal checkpoint.",
-            report=report,
+    report: MPIExecutionReport | None = None
+    terminal_error: Exception | None = None
+    if rank == 0:
+        try:
+            checkpoints = collect_task_checkpoints(
+                manifest,
+                checkpoint_directory,
+                artifact_root,
+                artifact_validator=artifact_validator,
+                require_complete=False,
+            )
+            report = _build_report(
+                manifest,
+                execution_id=selected_execution_id,
+                communicator_size=size,
+                coordinator_hostname=coordinator_hostname,
+                started_utc=started_utc,
+                started_clock=started_clock,
+                thread_limit=thread_limit,
+                checkpoints=checkpoints,
+                checkpoint_directory=checkpoint_directory,
+                initially_complete=initial_ids,
+                infrastructure_errors=infrastructure_errors,
+            )
+            execution_path = (
+                root / "executions" / f"{selected_execution_id}.json"
+            )
+            write_execution_manifest(execution_path, report)
+            if not report.complete:
+                raise TaskExecutionError(
+                    "task execution stopped before every manifest task "
+                    "produced a validated terminal checkpoint.",
+                    report=report,
+                )
+            # A final strict merge is the success boundary.
+            collect_task_checkpoints(
+                manifest,
+                checkpoint_directory,
+                artifact_root,
+                artifact_validator=artifact_validator,
+                require_complete=True,
+            )
+        except Exception as exc:
+            terminal_error = exc
+
+    terminal = {
+        "ok": terminal_error is None,
+        "error_type": (
+            None
+            if terminal_error is None
+            else type(terminal_error).__name__
+        ),
+        "error_message": (
+            None if terminal_error is None else str(terminal_error)
+        ),
+    }
+    if size > 1:
+        terminal = communicator.bcast(
+            terminal if rank == 0 else None,
+            root=0,
         )
-    # A final strict merge is the success boundary.
-    collect_task_checkpoints(
-        manifest,
-        checkpoint_directory,
-        artifact_root,
-        artifact_validator=artifact_validator,
-        require_complete=True,
-    )
-    return report
+    if not terminal["ok"]:
+        if rank == 0 and terminal_error is not None:
+            raise terminal_error
+        raise TaskExecutionError(
+            "rank-zero task-phase finalization failed: "
+            f"{terminal['error_type']}: {terminal['error_message']}"
+        )
+    return report if rank == 0 else None
 
 
 __all__ = [
@@ -1530,6 +1646,7 @@ __all__ = [
     "MPIDependencyError",
     "MissingTaskCheckpointError",
     "TaskAssignment",
+    "OrphanArtifactAdopter",
     "TaskCheckpoint",
     "TaskCheckpointCorruptionError",
     "TaskCheckpointError",

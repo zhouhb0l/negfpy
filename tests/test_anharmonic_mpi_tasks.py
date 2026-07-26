@@ -483,3 +483,57 @@ def test_invalid_manifest_inputs_and_worker_artifact_escape_are_rejected(
     assert captured.value.report.infrastructure_errors[0]["error_type"] == (
         "TaskCheckpointCorruptionError"
     )
+
+
+def test_invalid_orphan_artifact_is_rejected_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(("orphan",))
+
+    def crash_after_publish(
+        task: TaskSpec, context: mpi_tasks.TaskContext
+    ) -> TaskResult:
+        context.write_artifact_bytes(
+            (task.task_id + "\n").encode("ascii"),
+            suffix=".txt",
+        )
+        raise RuntimeError("crash before task checkpoint publication")
+
+    with pytest.raises(TaskExecutionError):
+        execute_task_manifest(
+            manifest,
+            crash_after_publish,
+            tmp_path,
+            comm=serial_task_communicator(),
+            artifact_validator=_validator,
+            execution_id="publish-then-crash",
+        )
+    artifact = next((tmp_path / "task-artifacts").glob("*.txt"))
+    artifact.write_bytes(b"identity-mismatch\n")
+    damaged_bytes = artifact.read_bytes()
+    worker_called = False
+
+    def forbidden_worker(
+        task: TaskSpec, context: mpi_tasks.TaskContext
+    ) -> TaskResult:
+        nonlocal worker_called
+        worker_called = True
+        return _worker(task, context)
+
+    def adopter(path, task, evidence):
+        return TaskResult.completed(path)
+
+    with pytest.raises(TaskExecutionError) as captured:
+        execute_task_manifest(
+            manifest,
+            forbidden_worker,
+            tmp_path,
+            comm=serial_task_communicator(),
+            artifact_validator=_validator,
+            execution_id="reject-invalid-orphan",
+            orphan_artifact_suffix=".txt",
+            orphan_artifact_adopter=adopter,
+        )
+    assert not worker_called
+    assert artifact.read_bytes() == damaged_bytes
+    assert captured.value.report is not None

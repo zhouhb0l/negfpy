@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
 
@@ -17,6 +18,7 @@ from negfpy.anharmonic._mpi_tasks import (
     serial_task_communicator,
 )
 from negfpy.anharmonic.grid import SignedFrequencyGrid
+from negfpy.anharmonic.toy import _mpi_production_gate as mpi_campaign
 from negfpy.anharmonic.toy._mpi_production_gate import (
     ProductionToyCaseResult,
     ProductionToyMPICampaign,
@@ -388,3 +390,83 @@ def test_serial_fallback_without_mpi_and_bounded_protocol_builder(
     assert bounded.manifest.metadata["open_system_case_count"] == 1
     assert bounded.waves[0] == bounded.preflight_task_ids
     assert bounded.waves[1] == (bounded.gate_task_id,)
+
+
+def test_atomic_case_artifact_orphan_is_adopted_without_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = _campaign()
+    original_writer = mpi_campaign._write_case_artifact
+    crash_task = campaign.preflight_task_ids[0]
+    crashed = False
+
+    def crash_after_publish(campaign_, task, context, result):
+        nonlocal crashed
+        path = original_writer(campaign_, task, context, result)
+        if task.task_id == crash_task and not crashed:
+            crashed = True
+            raise RuntimeError(
+                "deterministic crash after artifact publication"
+            )
+        return path
+
+    monkeypatch.setattr(
+        mpi_campaign,
+        "_write_case_artifact",
+        crash_after_publish,
+    )
+    with pytest.raises(
+        mpi_tasks.TaskExecutionError,
+        match="validated terminal checkpoint",
+    ):
+        execute_production_toy_mpi_campaign(
+            campaign,
+            _successful_executor([]),
+            tmp_path,
+            comm=serial_task_communicator(),
+            execution_id="crash-window",
+        )
+
+    orphan_paths = tuple(tmp_path.glob("phases/*/task-artifacts/*.h5"))
+    assert len(orphan_paths) == 1
+    orphan = orphan_paths[0]
+    original_bytes = orphan.read_bytes()
+    original_mtime_ns = orphan.stat().st_mtime_ns
+    assert not tuple(tmp_path.glob("phases/*/task-outcomes/*.task.json"))
+
+    monkeypatch.setattr(
+        mpi_campaign,
+        "_write_case_artifact",
+        original_writer,
+    )
+    resumed_calls: list[str] = []
+
+    def resume_executor(task, context):
+        if task.task_id == crash_task:
+            raise AssertionError("validated orphan task was recomputed")
+        return _successful_executor(resumed_calls)(task, context)
+
+    report = execute_production_toy_mpi_campaign(
+        campaign,
+        resume_executor,
+        tmp_path,
+        comm=serial_task_communicator(),
+        execution_id="resume-orphan",
+    )
+    assert report is not None and report.complete
+    assert crash_task not in resumed_calls
+    assert orphan.read_bytes() == original_bytes
+    assert orphan.stat().st_mtime_ns == original_mtime_ns
+
+    outcome = next(
+        item for item in report.outcomes if item.task_id == crash_task
+    )
+    checkpoint = json.loads(
+        (tmp_path / outcome.checkpoint_relative_path).read_text(
+            encoding="ascii"
+        )
+    )
+    assert checkpoint["payload"]["execution"][
+        "orphan_artifact_adopted"
+    ] is True

@@ -783,6 +783,44 @@ def _artifact_validator(
     return validate
 
 
+def _orphan_artifact_adopter(
+    campaign: ProductionToyMPICampaign,
+) -> mpi_tasks.OrphanArtifactAdopter:
+    def adopt(
+        path: Path,
+        task: TaskSpec,
+        evidence: Mapping[str, Any],
+    ) -> TaskResult:
+        expected_identity = campaign.manifest.task_identity_sha256(task)
+        if (
+            evidence.get("campaign_manifest_sha256")
+            != campaign.campaign_manifest_sha256
+            or evidence.get("campaign_task_identity_sha256")
+            != expected_identity
+        ):
+            raise TaskCheckpointMismatchError(
+                "orphan case artifact identity does not match the campaign."
+            )
+        status = str(evidence.get("case_status"))
+        if status not in _TERMINAL_CASE_STATUSES:
+            raise TaskCheckpointMismatchError(
+                "orphan case artifact has no terminal scientific status."
+            )
+        return TaskResult(
+            status=status,
+            artifact_path=path,
+            metadata={
+                "campaign_manifest_sha256": (
+                    campaign.campaign_manifest_sha256
+                ),
+                "campaign_task_identity_sha256": expected_identity,
+                "case_status": status,
+            },
+        )
+
+    return adopt
+
+
 def _write_case_artifact(
     campaign: ProductionToyMPICampaign,
     task: TaskSpec,
@@ -1216,23 +1254,56 @@ def execute_production_toy_mpi_campaign(
     for wave_index, task_ids in enumerate(campaign.waves):
         phase = _phase_manifest(campaign, wave_index)
         phase_root = root / "phases" / _phase_slug(wave_index, task_ids)
+        prepare_error: Exception | None = None
+        action: Mapping[str, str] | None = None
         if rank == 0:
-            action = {
-                task_id: (
-                    "run"
-                    if all(
-                        statuses.get(dependency) == "completed"
-                        for dependency in _task_dependencies(
-                            campaign.manifest.task(task_id)
+            try:
+                action = {
+                    task_id: (
+                        "run"
+                        if all(
+                            statuses.get(dependency) == "completed"
+                            for dependency in _task_dependencies(
+                                campaign.manifest.task(task_id)
+                            )
                         )
+                        else "block"
                     )
-                    else "block"
-                )
-                for task_id in task_ids
+                    for task_id in task_ids
+                }
+            except Exception as exc:
+                prepare_error = exc
+        phase_start = _broadcast(
+            communicator,
+            {
+                "ok": prepare_error is None,
+                "action": action,
+                "error_type": (
+                    None
+                    if prepare_error is None
+                    else type(prepare_error).__name__
+                ),
+                "error_message": (
+                    None if prepare_error is None else str(prepare_error)
+                ),
             }
-        else:
-            action = None
-        action = _broadcast(communicator, action, rank=rank)
+            if rank == 0
+            else None,
+            rank=rank,
+        )
+        if not phase_start["ok"]:
+            if rank == 0 and prepare_error is not None:
+                raise prepare_error
+            raise TaskManifestError(
+                "campaign phase preparation failed on rank zero: "
+                f"{phase_start['error_type']}: "
+                f"{phase_start['error_message']}"
+            )
+        action = phase_start["action"]
+        if not isinstance(action, Mapping):
+            raise TaskManifestError(
+                "campaign phase action record is not a mapping."
+            )
 
         def worker(task: TaskSpec, context: TaskContext) -> TaskResult:
             dependencies = _task_dependencies(task)
@@ -1308,73 +1379,136 @@ def execute_production_toy_mpi_campaign(
             require_mpi=require_mpi,
             thread_limit=thread_limit,
             artifact_validator=validator,
+            orphan_artifact_suffix=".h5",
+            orphan_artifact_adopter=_orphan_artifact_adopter(
+                campaign
+            ),
             execution_id=(
                 f"{selected_execution_id}.phase-{wave_index:03d}"
             ),
         )
+        phase_error: Exception | None = None
+        wave_statuses: Mapping[str, str] | None = None
         if rank == 0:
-            assert phase_report is not None
-            phase_reports.append(phase_report)
-            checkpoints = collect_task_checkpoints(
-                phase,
-                phase_root / "task-outcomes",
-                phase_root / "task-artifacts",
-                artifact_validator=validator,
-                require_complete=True,
-            )
-            wave_statuses = {
-                checkpoint.task_id: checkpoint.status
-                for checkpoint in checkpoints
-            }
-        else:
-            wave_statuses = None
-        wave_statuses = _broadcast(
+            try:
+                assert phase_report is not None
+                checkpoints = collect_task_checkpoints(
+                    phase,
+                    phase_root / "task-outcomes",
+                    phase_root / "task-artifacts",
+                    artifact_validator=validator,
+                    require_complete=True,
+                )
+                wave_statuses = {
+                    checkpoint.task_id: checkpoint.status
+                    for checkpoint in checkpoints
+                }
+                phase_reports.append(phase_report)
+            except Exception as exc:
+                phase_error = exc
+        phase_terminal = _broadcast(
             communicator,
-            wave_statuses,
+            {
+                "ok": phase_error is None,
+                "statuses": wave_statuses,
+                "error_type": (
+                    None
+                    if phase_error is None
+                    else type(phase_error).__name__
+                ),
+                "error_message": (
+                    None if phase_error is None else str(phase_error)
+                ),
+            }
+            if rank == 0
+            else None,
             rank=rank,
         )
+        if not phase_terminal["ok"]:
+            if rank == 0 and phase_error is not None:
+                raise phase_error
+            raise mpi_tasks.TaskExecutionError(
+                "campaign phase finalization failed on rank zero: "
+                f"{phase_terminal['error_type']}: "
+                f"{phase_terminal['error_message']}"
+            )
+        wave_statuses = phase_terminal["statuses"]
+        if not isinstance(wave_statuses, Mapping):
+            raise mpi_tasks.TaskExecutionError(
+                "campaign phase terminal record lacks statuses."
+            )
         statuses.update(
             {str(key): str(value) for key, value in wave_statuses.items()}
         )
 
-    if rank != 0:
-        return None
-
-    outcomes = _collect_campaign_outcomes(
-        root,
-        campaign,
-        validator=validator,
-        phase_reports=phase_reports,
+    report: ProductionToyMPIExecutionReport | None = None
+    final_error: Exception | None = None
+    if rank == 0:
+        try:
+            outcomes = _collect_campaign_outcomes(
+                root,
+                campaign,
+                validator=validator,
+                phase_reports=phase_reports,
+            )
+            finished_utc = datetime.now(timezone.utc).isoformat().replace(
+                "+00:00",
+                "Z",
+            )
+            report = ProductionToyMPIExecutionReport(
+                execution_id=selected_execution_id,
+                campaign_manifest_sha256=(
+                    campaign.campaign_manifest_sha256
+                ),
+                mode="serial" if size == 1 else "mpi",
+                communicator_size=size,
+                coordinator_hostname=socket.gethostname(),
+                started_utc=started_utc,
+                finished_utc=finished_utc,
+                elapsed_seconds=time.perf_counter() - started_clock,
+                phase_execution_sha256=tuple(
+                    phase.execution_sha256 for phase in phase_reports
+                ),
+                outcomes=outcomes,
+            )
+            destination = (
+                root
+                / "campaign-executions"
+                / f"{selected_execution_id}.json"
+            )
+            mpi_tasks._publish_immutable(  # private-to-private
+                destination,
+                _canonical_bytes(report.as_dict()),
+                conflict_type=TaskManifestError,
+            )
+        except Exception as exc:
+            final_error = exc
+    final_terminal = _broadcast(
+        communicator,
+        {
+            "ok": final_error is None,
+            "error_type": (
+                None
+                if final_error is None
+                else type(final_error).__name__
+            ),
+            "error_message": (
+                None if final_error is None else str(final_error)
+            ),
+        }
+        if rank == 0
+        else None,
+        rank=rank,
     )
-    finished_utc = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00",
-        "Z",
-    )
-    report = ProductionToyMPIExecutionReport(
-        execution_id=selected_execution_id,
-        campaign_manifest_sha256=campaign.campaign_manifest_sha256,
-        mode="serial" if size == 1 else "mpi",
-        communicator_size=size,
-        coordinator_hostname=socket.gethostname(),
-        started_utc=started_utc,
-        finished_utc=finished_utc,
-        elapsed_seconds=time.perf_counter() - started_clock,
-        phase_execution_sha256=tuple(
-            phase.execution_sha256 for phase in phase_reports
-        ),
-        outcomes=outcomes,
-    )
-    destination = (
-        root
-        / "campaign-executions"
-        / f"{selected_execution_id}.json"
-    )
-    mpi_tasks._publish_immutable(  # private-to-private
-        destination,
-        _canonical_bytes(report.as_dict()),
-        conflict_type=TaskManifestError,
-    )
-    return report
+    if not final_terminal["ok"]:
+        if rank == 0 and final_error is not None:
+            raise final_error
+        raise mpi_tasks.TaskExecutionError(
+            "campaign finalization failed on rank zero: "
+            f"{final_terminal['error_type']}: "
+            f"{final_terminal['error_message']}"
+        )
+    return report if rank == 0 else None
 
 
 __all__ = [
