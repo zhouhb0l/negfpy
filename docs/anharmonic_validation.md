@@ -1,6 +1,6 @@
 # Anharmonic NEGF validation and release checklist
 
-Status: executable `0.1.0.dev0` validation contract and implementation snapshot,
+Status: executable `0.1.0rc1` validation contract and implementation snapshot,
 2026-07-25. Protocol v2 has produced one provisional failed endpoint, but the
 corrected contract has not yet completed a clean full-graph remote rerun.
 

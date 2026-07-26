@@ -405,9 +405,9 @@ def test_result_records_reproducible_numerical_and_input_provenance() -> None:
     assert metadata["temperature_left"] == 0.8
     assert metadata["retarded_strategy"] == "causal_hilbert"
     assert metadata["source_tree_sha256"]
-    assert metadata["package_version"] == "0.1.0.dev0"
-    assert metadata["declared_package_version"] == "0.1.0.dev0"
-    assert metadata["installed_package_version"] == "0.1.0.dev0"
+    assert metadata["package_version"] == "0.1.0rc1"
+    assert metadata["declared_package_version"] == "0.1.0rc1"
+    assert metadata["installed_package_version"] == "0.1.0rc1"
     assert metadata["package_version_consistent"]
     assert isinstance(metadata["git_dirty"], bool)
     hashes = metadata["input_hashes"]
