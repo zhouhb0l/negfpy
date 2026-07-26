@@ -69,7 +69,12 @@
   MPIBaselineWallSeconds,MPICandidateWallSeconds,MPICandidateSpeedup,%
   MPIMaxMemoryFractionObserved,MPISocketCount,MPIScalingPhysicsSHA,%
   MPIReleasePhysicsSHA,MPIScalingManifestSHA,MPIRunnerManifestSHA,%
-  MPIExecutionManifestSHA,ArtifactSHA256SUMSRawSHA,ArtifactFetchReceiptSHA,%
+  MPIExecutionManifestSHA,CurrentAttemptSHA,AttemptPublicationSHA,%
+  MPIReleaseLaunchIntentSHA,MPIReleaseLaunchIntentPayloadSHA,%
+  MPIReleaseLaunchSHA,MPIReleaseLaunchPayloadSHA,%
+  MPIExecutionSourceIdentitySHA,MPIEnvironmentPrefixManifestSHA,%
+  MPILaunchEnvironmentSHA,%
+  ArtifactSHA256SUMSRawSHA,ArtifactFetchReceiptSHA,%
   StagingSHA256SUMSRawSHA,StagingImportReceiptSHA,%
   ProductionFiguresSHA256SUMSRawSHA,ProductionFiguresReceiptSHA,%
   HistoricalFiguresSHA256SUMSRawSHA,HistoricalFiguresReceiptSHA,%
@@ -1193,6 +1198,19 @@ Release-runner file: \\[-1mm]
 \quad{\scriptsize\texttt{\MPIRunnerManifestSHA}} \\[1mm]
 MPI execution-manifest file: \\[-1mm]
 \quad{\scriptsize\texttt{\MPIExecutionManifestSHA}} \\[1mm]
+Current-attempt pointer / selected immutable publication: \\[-1mm]
+\quad{\scriptsize\texttt{\CurrentAttemptSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\AttemptPublicationSHA}} \\[1mm]
+MPI release-launch intent file / canonical payload: \\[-1mm]
+\quad{\scriptsize\texttt{\MPIReleaseLaunchIntentSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\MPIReleaseLaunchIntentPayloadSHA}} \\[1mm]
+MPI release-launch receipt file / canonical payload: \\[-1mm]
+\quad{\scriptsize\texttt{\MPIReleaseLaunchSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\MPIReleaseLaunchPayloadSHA}} \\[1mm]
+Execution-source / environment-prefix / scrubbed-launch environment: \\[-1mm]
+\quad{\scriptsize\texttt{\MPIExecutionSourceIdentitySHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\MPIEnvironmentPrefixManifestSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\MPILaunchEnvironmentSHA}} \\[1mm]
 Fetched artifact raw \code{SHA256SUMS}: \\[-1mm]
 \quad{\scriptsize\texttt{\ArtifactSHA256SUMSRawSHA}} \\[1mm]
 Local fetch receipt: \\[-1mm]

@@ -10,16 +10,91 @@ production figures, and the separately labeled historical Wang/Mingo figure.
 Missing or noncertifying evidence raises a named `NEGFPy toy-gate report`
 error before the manuscript body is processed.
 
+## Reproducible artifact pipeline
+
+The report transformations are maintained in `scripts/` and execute no
+physics. They are fail-closed, atomic consumers of an already fetched remote
+publication:
+
+1. `import_production_toy_gate.py` accepts only the dc60+ remote
+   `current-attempt.json` publication whose state is `completed`. It requires
+   the selected attempt to be the newest immutable attempt, permits an exact
+   retry to reuse a checksum-bound scaling selection from a prior attempt,
+   and reopens the status, report, launch intent/receipt and logs, runner result,
+   execution manifest, campaign manifest, report facts, and checkpoints.
+2. The importer preserves the raw source `SHA256SUMS`, fetch receipt, current
+   pointer, and selected publication. It also stages a deterministic
+   `source/fetched-artifact-index.json` containing the path, byte count, and
+   SHA256 of every fetched artifact. Large HDF5 files remain in the externally
+   anchored fetched tree rather than being duplicated.
+3. `render_production_toy_gate_figures.py` re-derives every plotted CSV and
+   manuscript TeX input from the raw strict report, then emits three native
+   vector-PDF/450-DPI-RGB-PNG pairs.
+4. `render_historical_paper_benchmarks.py` consumes only the five pinned CSVs
+   in `historical-data/`. It emits the explicitly noncertifying Wang/Mingo
+   figure and `historical_paper_benchmarks_metrics.json`, which binds the
+   recomputed numerical metrics, selected input hashes, and renderer identity.
+
+Every importer/renderer receipt records an explicit implementation version
+and SHA256 of its source file. Every output directory contains an exhaustive,
+path-sorted `SHA256SUMS` and is published with no-replace semantics.
+
+Typical commands after `remote_heavy_cli.py fetch` are:
+
+```bash
+python3 scripts/import_production_toy_gate.py \
+  /verified/artifacts production-staging-<exact-commit> \
+  --expected-commit <exact-commit> \
+  --expected-environment-lock-sha256 <external-lock-sha256> \
+  --expected-fetch-receipt-sha256 <external-fetch-receipt-sha256> \
+  --expected-sha256sums-sha256 <external-fetched-SHA256SUMS-sha256>
+
+python3 scripts/render_production_toy_gate_figures.py \
+  production-staging-<exact-commit> production-figures-<exact-commit> \
+  --expected-import-receipt-sha256 <external-import-receipt-sha256>
+
+python3 scripts/render_historical_paper_benchmarks.py \
+  --data-dir historical-data \
+  --benchmark-manifest historical-data/benchmark_manifest.json \
+  --expected-benchmark-manifest-sha256 <external-manifest-sha256> \
+  --regular-font-path /path/to/sans-regular.ttf \
+  --bold-font-path /path/to/sans-bold.ttf \
+  --output-dir historical-figures
+```
+
+Caller anchors must be captured outside the directory being validated; do not
+derive an expected hash from a possibly modified input in the same command.
+The production renderer structurally rejects raster image records and
+unembedded/Type-3 fonts in its PDFs. Both renderers fully decode their PNGs
+and require `(3150, 2250)`, RGB, and 450-DPI metadata.
+
+Run the complete artifact tests with:
+
+```bash
+make artifact-test
+```
+
+The historical metrics manifest is already checksum-covered. The
+release-config generator must additionally validate its schema, canonical
+body hash, input hashes, and noncertifying status before the manuscript cites
+individual historical error metrics; until that integration hook is added,
+the report may use the historical figure but not promote its numerical
+metrics to release evidence.
+
 ## Generate the release configuration
 
 `generate_release_config.py` is standard-library only. It consumes the
-checksum-complete fetched artifact root, the canonical hashed
-`scaling-selection.json` from the complete 1/2/4/8/16 rank ladder, and the
-canonical hashed release-runner result from the locked production campaign.
+checksum-complete fetched artifact root and its byte-identical
+`current-attempt.json` / immutable selected publication. The caller-supplied
+scaling selection and release-runner paths must exactly equal the paths named
+by that publication; a manifest-listed alternate or stale success is rejected.
 Four raw `SHA256SUMS` hashes must be supplied independently by the caller: the
 fetched artifacts, imported staging, production figures, and historical
 figures. The generator independently checks:
 
+- byte-identical current/selected publication records, a completed current
+  attempt, matching successful root and attempt status (`returncode=0`), and
+  every checksum-bound publication reference;
 - identical source revision, source-tree hash, and environment hash;
 - exhaustive path-sorted checksum coverage with no symlinks, traversal,
   special files, unlisted files, or stale entries;
@@ -31,8 +106,14 @@ figures. The generator independently checks:
 - one distinct physical core per rank, equal socket distribution for even
   multi-rank launches, all BLAS/OpenMP thread limits fixed to one, and the
   recorded runner-validated aggregate 70% RAM preflight;
-- the selected release rank, complete outcome topology and scientific digest,
-  nested strict-report body, and `release_certified=true`; and
+- the selected release rank, complete outcome topology, exact per-task
+  artifact-validation schema/identity/completed status, all mandatory strict
+  summary gates, an empty failure list, and `release_certified=true`;
+- the immutable pre-launch intent and terminal MPI launch-v2 envelope,
+  deployed launcher/Python/runner identities, exact argv and Open MPI binding,
+  the clean tracked/full-worktree/orchestration manifests, exhaustive environment
+  prefix manifest, exact scrubbed child environment, post-run revalidation,
+  thread caps, stdout/stderr hashes, and equality with terminal facts; and
 - receipt-bound exact coverage of every generated TeX row and every PDF/PNG
   figure byte used by the manuscript.
 
@@ -42,8 +123,8 @@ Example:
 python3 generate_release_config.py \
   --artifact-root /verified/artifacts \
   --expected-artifact-sha256sums-sha256 <external-raw-sha256> \
-  --scaling-selection-relative mpi-scaling/scaling-selection.json \
-  --release-runner-relative mpi-release/runner-results/release.json \
+  --scaling-selection-relative attempts/attempt-001/mpi-scaling/scaling-selection.json \
+  --release-runner-relative attempts/attempt-001/mpi-release-runner-result.json \
   --staging-dir production-staging-<exact-commit> \
   --expected-staging-sha256sums-sha256 <external-raw-sha256> \
   --production-figure-dir production-figures-<exact-commit> \
@@ -57,8 +138,12 @@ python3 generate_release_config.py \
 The three evidence-directory arguments are normalized paths relative to the
 output configuration's directory; the artifact references are normalized
 paths inside the caller-anchored artifact root. The generator writes
-`release_config.tex` atomically. Do not hand-edit it.
-`release_config.example.tex` is only a macro inventory; its
+`release_config.tex` atomically. It includes exact SHA256 macros for the
+current pointer, selected publication, pre-launch intent, terminal launch-v2
+envelope, execution-source identity, environment-prefix manifest, and scrubbed
+launch environment, in addition to report, execution, scaling, staging, and
+figure anchors.
+Do not hand-edit it. `release_config.example.tex` is only a macro inventory; its
 false gates are deliberately noncompilable.
 
 ## Imported evidence

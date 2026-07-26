@@ -30,6 +30,58 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DATE_RE = re.compile(r"^[0-9]{1,2} [A-Za-z]+ [0-9]{4}$")
 SAFE_TEX_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 SUM_LINE_RE = re.compile(r"([0-9a-f]{64})  (.+)")
+ORCHESTRATION_SCRIPT_PATHS = (
+    "scripts/remote_heavy_cli.py",
+    "scripts/remote_heavy_explicit.py",
+    "scripts/remote_heavy_identity.py",
+    "scripts/remote_heavy_lock.py",
+    "scripts/remote_heavy_runtime.py",
+    "scripts/remote_heavy_security.py",
+    "scripts/remote_heavy_validation.py",
+    "scripts/remote_mpi_scaling.py",
+    "scripts/remote_toy_mpi_runner.py",
+)
+REMOTE_EXPECTED_USER = "hangbo"
+REMOTE_TOOLS_BIN = "/home/hangbo/micromamba/envs/negf-tools/bin"
+
+
+REQUIRED_SUMMARY_GATES = frozenset(
+    {
+        "code_identity_consistent",
+        "exact_release_revision_passed",
+        "cross_platform_identity_consistent",
+        "environment_lock_consistent",
+        "fixture_contract_passed",
+        "full_locked_base_coverage",
+        "multidimensional_release_certified",
+        "multidimensional_harmonic_preflight_passed",
+        "multidimensional_backend_validation_passed",
+        "multidimensional_outcome_certification_passed",
+        "multidimensional_contract_passed",
+        "multidimensional_static_configuration_passed",
+        "multidimensional_runtime_evidence_passed",
+        "multidimensional_comparison_coverage",
+        "multidimensional_underlying_evidence_complete",
+        "multidimensional_provenance_passed",
+        "multidimensional_weak_coupling_passed",
+        "open_three_mode_agreement_passed",
+        "open_three_mode_oracle_method_passed",
+        "open_three_mode_passivity_passed",
+        "open_three_mode_production_completed",
+        "open_three_mode_provenance_complete",
+        "open_three_mode_weak_coupling_passed",
+        "oracle_gate_passed",
+        "refinement_coverage",
+        "refinement_passed",
+        "release_certified",
+        "scaling_coverage",
+        "scaling_passed",
+        "sign_coverage",
+        "sign_invariance_passed",
+        "spontaneous_decay_coverage",
+        "spontaneous_decay_passed",
+    }
+)
 PHYSICS_EXCLUDED_KEYS = frozenset(
     {
         "asymptotic_dense_time",
@@ -479,7 +531,7 @@ def _campaign(
     commit: str,
     tree_sha: str,
     environment_sha: str,
-) -> tuple[list[str], str]:
+) -> tuple[list[str], dict[str, str], str]:
     payload = _mapping(document.get("payload"), "campaign payload")
     expected = {
         "schema_name": "negfpy_task_manifest",
@@ -526,6 +578,7 @@ def _campaign(
     tasks = payload.get("tasks")
     _require(isinstance(tasks, list) and len(tasks) == 28, "campaign lacks 28 tasks")
     task_ids: list[str] = []
+    task_identities: dict[str, str] = {}
     kind_counts: dict[str, int] = {}
     for ordinal, raw_task in enumerate(tasks):
         task = _mapping(raw_task, f"campaign task {ordinal}")
@@ -540,6 +593,10 @@ def _campaign(
             f"campaign task {ordinal} identity is invalid",
         )
         task_ids.append(task_id)
+        task_identities[task_id] = _sha(
+            task.get("task_identity_sha256"),
+            f"campaign task {task_id} identity SHA256",
+        )
         kind = task_payload.get("kind")
         _require(isinstance(kind, str), f"campaign task {task_id} lacks kind")
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
@@ -622,7 +679,7 @@ def _campaign(
         ],
         "campaign task-kind ordering changed",
     )
-    return task_ids, str(document["payload_sha256"])
+    return task_ids, task_identities, str(document["payload_sha256"])
 
 
 def _execution(
@@ -631,6 +688,7 @@ def _execution(
     tree: ChecksumTree,
     worker_root: Path,
     task_ids: Sequence[str],
+    task_identities: Mapping[str, str],
     campaign_sha: str,
     execution_id: str,
     rank_count: int,
@@ -663,6 +721,30 @@ def _execution(
         task_id = str(outcome["task_id"])
         validation = _mapping(
             outcome.get("artifact_validation"), f"{task_id} artifact validation"
+        )
+        array_sha256 = _mapping(
+            validation.get("array_sha256"), f"{task_id} artifact array SHA256"
+        )
+        _require(
+            set(validation)
+            == {
+                "schema_name",
+                "schema_version",
+                "campaign_manifest_sha256",
+                "campaign_task_identity_sha256",
+                "case_status",
+                "evidence_sha256",
+                "array_sha256",
+            }
+            and validation.get("schema_name") == "negfpy_protocol_v2_toy_case"
+            and validation.get("schema_version") == 1
+            and validation.get("campaign_manifest_sha256") == campaign_sha
+            and validation.get("campaign_task_identity_sha256")
+            == task_identities.get(task_id)
+            and validation.get("case_status") == "completed"
+            and SHA_RE.fullmatch(str(validation.get("evidence_sha256"))) is not None
+            and all(SHA_RE.fullmatch(str(value)) is not None for value in array_sha256.values()),
+            f"{task_id} artifact validation failed or changed schema",
         )
         expected_wave = (
             0
@@ -817,15 +899,11 @@ def _report(
     )
     if expected_release:
         _require(
-            summary.get("validation_tier") == "release"
+            set(summary) == REQUIRED_SUMMARY_GATES | {"failures", "validation_tier"}
+            and summary.get("validation_tier") == "release"
             and summary.get("failures") == []
-            and all(
-                value is True
-                for key, value in summary.items()
-                if key not in {"failures", "validation_tier"}
-                and isinstance(value, bool)
-            ),
-            "strict release summary contains a failed gate",
+            and all(summary.get(key) is True for key in REQUIRED_SUMMARY_GATES),
+            "strict release summary is missing, failed, or has an unexpected gate",
         )
     _identity(
         report,
@@ -866,16 +944,22 @@ def _worker(
     tree_sha: str,
     environment_sha: str,
     expected_execution_id: str,
+    nested_root: Path | None = None,
 ) -> dict[str, Any]:
     worker_path = _tree_file(tree, worker_relative, f"{profile} worker result")
     worker_document = _read_envelope(worker_path, f"{profile} worker result")
     payload = _mapping(worker_document.get("payload"), f"{profile} worker payload")
-    worker_root = worker_path.parent.parent
-    _require(
-        worker_path
-        == worker_root / "runner-results" / f"{expected_execution_id}.json",
-        f"{profile} worker result path is not canonical",
+    worker_root = (
+        worker_path.parent.parent
+        if nested_root is None
+        else _absolute_no_symlinks(nested_root, f"{profile} nested root", directory=True)
     )
+    if nested_root is None:
+        _require(
+            worker_path
+            == worker_root / "runner-results" / f"{expected_execution_id}.json",
+            f"{profile} worker result path is not canonical",
+        )
     expected = {
         "schema": "negfpy.remote_toy_mpi.physics_result.v1",
         "profile": profile,
@@ -923,7 +1007,7 @@ def _worker(
         f"{profile} worker nested paths are not canonical",
     )
     campaign_document = _read_envelope(campaign_path, "campaign manifest")
-    task_ids, campaign_sha = _campaign(
+    task_ids, task_identities, campaign_sha = _campaign(
         campaign_document,
         profile=profile,
         commit=commit,
@@ -940,6 +1024,7 @@ def _worker(
         tree=tree,
         worker_root=worker_root,
         task_ids=task_ids,
+        task_identities=task_identities,
         campaign_sha=campaign_sha,
         execution_id=expected_execution_id,
         rank_count=rank_count,
@@ -987,6 +1072,7 @@ def _worker(
         "execution_file_sha256": _file_sha256(execution_path),
         "execution_payload_sha256": execution_payload_sha,
         "report_file_sha256": report_file_sha,
+        "report_path": report_path,
         "report_body_sha256": _strict_json(
             report_path, "strict report", style="indent-utf8"
         )["report_sha256"],
@@ -1091,6 +1177,7 @@ def _selection(
     scaling_root = selection_path.parent
     observed: set[int] = set()
     maximum_memory = 0.0
+    terminal_rank_evidence: list[dict[str, Any]] = []
     for row_value in rows:
         row = _mapping(row_value, "rank evidence")
         rank = row.get("rank_count")
@@ -1133,8 +1220,19 @@ def _selection(
             "thread_limits": THREAD_LIMITS,
         }
         _require(
-            all(rank_payload.get(key) == value for key, value in expected_rank_payload.items()),
-            f"rank-{rank} repetition payload changed",
+            all(
+                rank_payload.get(key) == value
+                for key, value in expected_rank_payload.items()
+            )
+            and isinstance(rank_payload.get("outer_wall_seconds"), (int, float))
+            and not isinstance(rank_payload.get("outer_wall_seconds"), bool)
+            and math.isclose(
+                float(rank_payload["outer_wall_seconds"]),
+                wall[rank],
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            ),
+            f"rank-{rank} repetition payload or selected timing changed",
         )
         worker_relative = _relative(
             rank_payload.get("worker_result_relative_path"),
@@ -1197,10 +1295,31 @@ def _selection(
             and row.get("worker_memory_preflight")
             == worker["payload"].get("memory_preflight")
             and row.get("rank_runtime") == worker["payload"].get("rank_runtime")
-            and isinstance(row.get("harmonic_preflight"), Mapping),
+            and isinstance(row.get("harmonic_preflight"), Mapping)
+            and row["harmonic_preflight"].get("passed") is True
+            and row["harmonic_preflight"].get("real_physics_executed") is True,
             f"rank-{rank} selection evidence differs from worker evidence",
         )
         maximum_memory = max(maximum_memory, launcher_memory, worker["memory_fraction"])
+        terminal_rank_evidence.append(
+            {
+                "rank_count": rank,
+                "manifest_file_sha256": row["manifest_file_sha256"],
+                "manifest_payload_sha256": row["manifest_payload_sha256"],
+                "worker_result_file_sha256": row["worker_result_file_sha256"],
+                "campaign_manifest_file_sha256": row[
+                    "campaign_manifest_file_sha256"
+                ],
+                "execution_manifest_file_sha256": row[
+                    "execution_manifest_file_sha256"
+                ],
+                "strict_report_file_sha256": row["strict_report_file_sha256"],
+                "launcher_memory_preflight_passed": True,
+                "worker_memory_preflight_passed": True,
+                "harmonic_preflight_passed": True,
+                "rank_runtime_count": rank,
+            }
+        )
     _require(observed == set(RANK_LADDER), "rank evidence ladder is incomplete")
     return (
         {
@@ -1218,12 +1337,1127 @@ def _selection(
             "mpi_enabled": mpi_enabled,
             "scaling_physics_sha": common_physics,
             "maximum_memory": maximum_memory,
+            "physical_core_count": cores,
+            "rank_evidence": terminal_rank_evidence,
         },
         {
             "file_sha256": _file_sha256(selection_path),
             "payload_sha256": document["payload_sha256"],
         },
     )
+
+
+
+def _publication_record(
+    tree: ChecksumTree,
+    publication: Mapping[str, Any],
+    *,
+    path_key: str,
+    sha_key: str,
+    name: str,
+    expected_relative: str,
+) -> Path:
+    relative = _relative(publication.get(path_key), f"{name} publication path").as_posix()
+    _require(relative == expected_relative, f"{name} publication path is not canonical")
+    return _tree_file(
+        tree,
+        relative,
+        name,
+        expected_sha256=_sha(publication.get(sha_key), f"{name} publication SHA256"),
+    )
+
+
+def _current_publication(tree: ChecksumTree) -> dict[str, Any]:
+    _require(not (tree.root / "job.lock").exists(), "fetched artifact root has an active job lock")
+    current_path = _tree_file(tree, "current-attempt.json", "current attempt publication")
+    current = _strict_json(current_path, "current attempt publication", style="indent-ascii")
+    expected_publication_keys = {
+        "schema",
+        "attempt",
+        "state",
+        "commit",
+        "attempt_path",
+        "status",
+        "status_sha256",
+        "log",
+        "log_sha256",
+        "report",
+        "report_sha256",
+        "report_facts",
+        "scaling_selection",
+        "scaling_selection_sha256",
+        "mpi_release_launch_intent",
+        "mpi_release_launch_intent_sha256",
+        "mpi_release_launch",
+        "mpi_release_launch_sha256",
+        "mpi_release_stdout",
+        "mpi_release_stdout_sha256",
+        "mpi_release_stderr",
+        "mpi_release_stderr_sha256",
+        "mpi_runner_result",
+        "mpi_runner_result_sha256",
+        "mpi_execution_manifest",
+        "mpi_execution_manifest_sha256",
+        "mpi_campaign_manifest",
+        "mpi_campaign_manifest_sha256",
+    }
+    attempt = current.get("attempt")
+    commit = _commit(current.get("commit"), "current publication commit")
+    _require(
+        set(current) == expected_publication_keys
+        and current.get("schema") == "negfpy.remote_validation.attempt_publication.v1"
+        and current.get("state") == "completed"
+        and isinstance(attempt, int)
+        and not isinstance(attempt, bool)
+        and attempt > 0,
+        "current attempt publication is not an exact completed publication",
+    )
+    attempt_relative = f"attempts/attempt-{attempt:03d}"
+    _require(
+        current.get("attempt_path") == attempt_relative,
+        "current publication attempt path changed",
+    )
+    publication_path = _tree_file(
+        tree,
+        f"{attempt_relative}/publication.json",
+        "selected attempt publication",
+    )
+    publication = _strict_json(
+        publication_path, "selected attempt publication", style="indent-ascii"
+    )
+    _require(
+        publication == current and publication_path.read_bytes() == current_path.read_bytes(),
+        "current-attempt.json is not byte-identical to the selected publication",
+    )
+
+    published_scaling_relative = str(current.get("scaling_selection"))
+    _require(
+        re.fullmatch(
+            r"attempts/attempt-[0-9]{3}/mpi-scaling/scaling-selection\.json",
+            published_scaling_relative,
+        )
+        is not None,
+        "published scaling selection path is not canonical",
+    )
+    paths = {
+        "status": _publication_record(
+            tree,
+            current,
+            path_key="status",
+            sha_key="status_sha256",
+            name="attempt status",
+            expected_relative=f"{attempt_relative}/status.json",
+        ),
+        "log": _publication_record(
+            tree,
+            current,
+            path_key="log",
+            sha_key="log_sha256",
+            name="attempt log",
+            expected_relative=f"{attempt_relative}/production_toy_gate.log",
+        ),
+        "report": _publication_record(
+            tree,
+            current,
+            path_key="report",
+            sha_key="report_sha256",
+            name="published strict report",
+            expected_relative=f"{attempt_relative}/production_toy_gate.json",
+        ),
+        "scaling": _publication_record(
+            tree,
+            current,
+            path_key="scaling_selection",
+            sha_key="scaling_selection_sha256",
+            name="published scaling selection",
+            expected_relative=published_scaling_relative,
+        ),
+        "intent": _publication_record(
+            tree,
+            current,
+            path_key="mpi_release_launch_intent",
+            sha_key="mpi_release_launch_intent_sha256",
+            name="published MPI release launch intent",
+            expected_relative=f"{attempt_relative}/mpi-release-launch-intent.json",
+        ),
+        "launch": _publication_record(
+            tree,
+            current,
+            path_key="mpi_release_launch",
+            sha_key="mpi_release_launch_sha256",
+            name="published MPI release launch",
+            expected_relative=f"{attempt_relative}/mpi-release-launch.json",
+        ),
+        "stdout": _publication_record(
+            tree,
+            current,
+            path_key="mpi_release_stdout",
+            sha_key="mpi_release_stdout_sha256",
+            name="published MPI release stdout",
+            expected_relative=f"{attempt_relative}/mpi-release.stdout.log",
+        ),
+        "stderr": _publication_record(
+            tree,
+            current,
+            path_key="mpi_release_stderr",
+            sha_key="mpi_release_stderr_sha256",
+            name="published MPI release stderr",
+            expected_relative=f"{attempt_relative}/mpi-release.stderr.log",
+        ),
+        "runner": _publication_record(
+            tree,
+            current,
+            path_key="mpi_runner_result",
+            sha_key="mpi_runner_result_sha256",
+            name="published MPI runner result",
+            expected_relative=f"{attempt_relative}/mpi-release-runner-result.json",
+        ),
+        "execution": _publication_record(
+            tree,
+            current,
+            path_key="mpi_execution_manifest",
+            sha_key="mpi_execution_manifest_sha256",
+            name="published MPI execution manifest",
+            expected_relative=f"{attempt_relative}/mpi-execution-manifest.json",
+        ),
+        "campaign": _publication_record(
+            tree,
+            current,
+            path_key="mpi_campaign_manifest",
+            sha_key="mpi_campaign_manifest_sha256",
+            name="published MPI campaign manifest",
+            expected_relative=f"{attempt_relative}/mpi-campaign-manifest.json",
+        ),
+    }
+    status = _strict_json(paths["status"], "attempt terminal status", style="indent-ascii")
+    expected_status_keys = {
+        "schema",
+        "state",
+        "commit",
+        "attempt",
+        "attempt_path",
+        "started_utc",
+        "finished_utc",
+        "returncode",
+        "identity_bundle",
+        "report_facts",
+        "scaling_facts",
+        "mpi_execution_facts",
+    }
+    _require(
+        set(status) == expected_status_keys
+        and status.get("schema") == "negfpy.remote_validation.job_status.v2"
+        and status.get("state") == "completed"
+        and status.get("returncode") == 0
+        and status.get("commit") == commit
+        and status.get("attempt") == attempt
+        and status.get("attempt_path") == attempt_relative
+        and isinstance(status.get("started_utc"), str)
+        and isinstance(status.get("finished_utc"), str)
+        and status["started_utc"] <= status["finished_utc"],
+        "selected attempt terminal status is not an exact successful status",
+    )
+    root_status_path = _tree_file(tree, "job-status.json", "root terminal status")
+    root_status = _strict_json(root_status_path, "root terminal status", style="indent-ascii")
+    _require(root_status == status, "root and selected-attempt terminal statuses differ")
+
+    report_facts_path = _tree_file(
+        tree, f"{attempt_relative}/report-facts.json", "report facts sidecar"
+    )
+    report_facts = _strict_json(report_facts_path, "report facts sidecar", style="indent-ascii")
+    _require(
+        report_facts == _mapping(current.get("report_facts"), "publication report facts")
+        and report_facts == _mapping(status.get("report_facts"), "status report facts"),
+        "publication, status, and sidecar report facts differ",
+    )
+    checkpoint_index_path = _tree_file(
+        tree, f"{attempt_relative}/checkpoint-index.json", "checkpoint index"
+    )
+    checkpoint_index = _strict_json(
+        checkpoint_index_path, "checkpoint index", style="indent-ascii"
+    )
+    records = checkpoint_index.get("records")
+    _require(
+        checkpoint_index.get("schema")
+        == "negfpy.remote_validation.checkpoint_index.v1"
+        and checkpoint_index.get("attempt") == attempt
+        and checkpoint_index.get("count") == 13
+        and isinstance(records, list)
+        and len(records) == 13,
+        "published checkpoint index is incomplete or mismatched",
+    )
+    return {
+        "attempt": attempt,
+        "attempt_relative": attempt_relative,
+        "commit": commit,
+        "current_path": current_path,
+        "publication_path": publication_path,
+        "publication": current,
+        "paths": paths,
+        "status": status,
+        "report_facts": report_facts,
+        "checkpoint_index": checkpoint_index,
+    }
+
+
+def _remote_absolute(value: Any, name: str) -> PurePosixPath:
+    _require(isinstance(value, str) and value, f"{name} is not text")
+    path = PurePosixPath(value)
+    _require(
+        path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in path.parts)
+        and "\\" not in value,
+        f"{name} is not a canonical absolute POSIX path",
+    )
+    return path
+
+
+def _expected_binding(rank_count: int, physical_cores: int, socket_count: int) -> list[str]:
+    _require(
+        0 < rank_count <= physical_cores and socket_count > 0,
+        "release launch topology is invalid",
+    )
+    binding = ["--nooversubscribe", "--bind-to", "core"]
+    if rank_count >= socket_count and rank_count % socket_count == 0:
+        binding.extend(("--map-by", f"ppr:{rank_count // socket_count}:socket:PE=1"))
+    else:
+        binding.extend(("--map-by", "core:PE=1"))
+    binding.append("--report-bindings")
+    return binding
+
+
+def _embedded_manifest(
+    value: Any,
+    *,
+    name: str,
+    schema: str,
+) -> Mapping[str, Any]:
+    manifest = _mapping(value, name)
+    digest = _sha(manifest.get("manifest_sha256"), f"{name} SHA256")
+    body = {key: item for key, item in manifest.items() if key != "manifest_sha256"}
+    _require(
+        manifest.get("schema") == schema
+        and hmac.compare_digest(_hash_document(body), digest),
+        f"{name} schema or canonical SHA256 changed",
+    )
+    return manifest
+
+
+def _source_record_map(
+    value: Any,
+    *,
+    name: str,
+    require_tracked: bool | None,
+) -> dict[str, Mapping[str, Any]]:
+    _require(isinstance(value, list), f"{name} is not a list")
+    records: dict[str, Mapping[str, Any]] = {}
+    ordered: list[str] = []
+    for index, raw in enumerate(value):
+        record = _mapping(raw, f"{name} record {index}")
+        relative = _relative(record.get("path"), f"{name} record {index} path")
+        path = relative.as_posix()
+        kind = record.get("kind")
+        tracked = record.get("git_tracked")
+        _require(
+            path not in records
+            and isinstance(tracked, bool)
+            and (require_tracked is None or tracked is require_tracked)
+            and isinstance(record.get("mode"), int)
+            and not isinstance(record.get("mode"), bool)
+            and 0 <= record["mode"] <= 0o7777
+            and kind in {"regular_file", "symlink"},
+            f"{name} record {index} shape changed",
+        )
+        if kind == "regular_file":
+            _require(
+                set(record)
+                == {"path", "git_tracked", "kind", "size", "mode", "sha256"}
+                and isinstance(record.get("size"), int)
+                and not isinstance(record.get("size"), bool)
+                and record["size"] >= 0
+                and SHA_RE.fullmatch(str(record.get("sha256"))) is not None,
+                f"{name} regular-file record {path} changed",
+            )
+        else:
+            _require(
+                set(record)
+                == {"path", "git_tracked", "kind", "target", "mode"}
+                and isinstance(record.get("target"), str)
+                and record["target"],
+                f"{name} symlink record {path} changed",
+            )
+        records[path] = record
+        ordered.append(path)
+    _require(ordered == sorted(ordered), f"{name} records are not path-sorted")
+    return records
+
+
+def _remote_source_manifests(
+    tree: ChecksumTree,
+    status: Mapping[str, Any],
+    *,
+    commit: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    environment_prefix: PurePosixPath,
+) -> dict[str, Any]:
+    bundle = _mapping(status.get("identity_bundle"), "terminal identity bundle")
+    expected_bundle_keys = {
+        "schema",
+        "commit",
+        "git_tree",
+        "source_tree_sha256",
+        "explicit_lock",
+        "explicit_lock_sha256",
+        "remote_environment",
+        "remote_environment_sha256",
+        "verified_incoming_files",
+        "archived_files",
+    }
+    git_tree = _commit(bundle.get("git_tree"), "identity Git tree")
+    archived = _mapping(bundle.get("archived_files"), "identity archived files")
+    _require(
+        set(bundle) == expected_bundle_keys
+        and bundle.get("schema")
+        == "negfpy.remote_validation.identity_bundle.v1"
+        and bundle.get("commit") == commit
+        and bundle.get("source_tree_sha256") == source_tree_sha256
+        and bundle.get("explicit_lock") == "environment-explicit.lock"
+        and bundle.get("explicit_lock_sha256") == environment_sha256
+        and bundle.get("remote_environment") == "remote-environment.json"
+        and bundle.get("verified_incoming_files")
+        == [
+            "deployment-manifest.json",
+            "environment-explicit.lock",
+            "environment-manifest.json",
+            "negfpy.bundle",
+        ]
+        and set(archived)
+        == {
+            "deployment-manifest.json",
+            "environment-explicit.lock",
+            "environment-manifest.json",
+            "incoming-SHA256SUMS",
+        }
+        and all(SHA_RE.fullmatch(str(item)) is not None for item in archived.values())
+        and archived.get("environment-explicit.lock") == environment_sha256,
+        "terminal identity bundle shape or source/environment identity changed",
+    )
+    for name, digest in archived.items():
+        _tree_file(
+            tree,
+            f"identity/{name}",
+            f"archived identity file {name}",
+            expected_sha256=_sha(digest, f"archived identity file {name} SHA256"),
+        )
+    identity_manifest_path = _tree_file(
+        tree, "identity/identity-manifest.json", "identity manifest"
+    )
+    identity_manifest = _strict_json(
+        identity_manifest_path, "identity manifest", style="indent-ascii"
+    )
+    _require(identity_manifest == bundle, "status and archived identity bundle differ")
+    remote_path = _tree_file(
+        tree,
+        "identity/remote-environment.json",
+        "archived remote environment",
+        expected_sha256=_sha(
+            bundle.get("remote_environment_sha256"),
+            "remote environment SHA256",
+        ),
+    )
+    remote = _strict_json(remote_path, "archived remote environment", style="indent-ascii")
+    _require(
+        remote.get("schema")
+        == "negfpy.remote_validation.remote_environment.v1"
+        and remote.get("commit") == commit
+        and remote.get("tree") == git_tree
+        and remote.get("source_tree_sha256") == source_tree_sha256
+        and remote.get("explicit_lock_sha256") == environment_sha256
+        and remote.get("thread_limits") == THREAD_LIMITS,
+        "archived remote environment identity changed",
+    )
+    source = _embedded_manifest(
+        remote.get("execution_source_identity"),
+        name="execution source identity",
+        schema="negfpy.remote_validation.execution_source.v1",
+    )
+    tracked = source.get("tracked_files")
+    worktree = source.get("worktree_files")
+    orchestration = source.get("orchestration_scripts")
+    tracked_map = _source_record_map(
+        tracked, name="tracked source files", require_tracked=True
+    )
+    worktree_map = _source_record_map(
+        worktree, name="full worktree files", require_tracked=None
+    )
+    orchestration_map = _source_record_map(
+        orchestration,
+        name="orchestration source files",
+        require_tracked=True,
+    )
+    _require(
+        set(source)
+        == {
+            "schema",
+            "git_revision",
+            "git_tree",
+            "package_source_sha256",
+            "tracked_file_count",
+            "tracked_files_manifest_sha256",
+            "tracked_files",
+            "worktree_file_count",
+            "worktree_files_manifest_sha256",
+            "worktree_files",
+            "orchestration_manifest_sha256",
+            "orchestration_scripts",
+            "manifest_sha256",
+        }
+        and source.get("git_revision") == commit
+        and source.get("git_tree") == git_tree
+        and source.get("package_source_sha256") == source_tree_sha256
+        and source.get("tracked_file_count") == len(tracked_map)
+        and source.get("worktree_file_count") == len(worktree_map)
+        and all(worktree_map.get(path) == record for path, record in tracked_map.items())
+        and list(orchestration_map) == list(ORCHESTRATION_SCRIPT_PATHS)
+        and all(path in tracked_map for path in orchestration_map)
+        and all(
+            orchestration_map[path] == tracked_map[path] == worktree_map[path]
+            for path in orchestration_map
+        )
+        and source.get("tracked_files_manifest_sha256")
+        == _hash_document(
+            {
+                "schema": "negfpy.remote_validation.tracked_worktree.v1",
+                "records": tracked,
+            }
+        )
+        and source.get("worktree_files_manifest_sha256")
+        == _hash_document(
+            {
+                "schema": "negfpy.remote_validation.full_worktree.v1",
+                "records": worktree,
+            }
+        )
+        and source.get("orchestration_manifest_sha256")
+        == _hash_document(
+            {
+                "schema": "negfpy.remote_validation.orchestration_sources.v1",
+                "records": orchestration,
+            }
+        ),
+        "execution source manifests or orchestration source set changed",
+    )
+    prefix = _embedded_manifest(
+        remote.get("environment_prefix_manifest"),
+        name="environment prefix manifest",
+        schema="negfpy.remote_validation.environment_prefix.v1",
+    )
+    regular = prefix.get("regular_files")
+    symlinks = prefix.get("symlinks")
+    _require(
+        set(prefix)
+        == {
+            "schema",
+            "prefix",
+            "directory_count",
+            "regular_file_count",
+            "symlink_count",
+            "regular_files",
+            "symlinks",
+            "manifest_sha256",
+        }
+        and isinstance(regular, list)
+        and isinstance(symlinks, list)
+        and prefix.get("prefix") == str(environment_prefix)
+        and prefix.get("regular_file_count") == len(regular)
+        and prefix.get("symlink_count") == len(symlinks)
+        and isinstance(prefix.get("directory_count"), int)
+        and prefix["directory_count"] > 0,
+        "environment prefix manifest counts or root changed",
+    )
+    regular_by_path: dict[str, Mapping[str, Any]] = {}
+    regular_order: list[str] = []
+    for index, raw in enumerate(regular):
+        record = _mapping(raw, f"environment regular file {index}")
+        path = _relative(
+            record.get("path"), f"environment regular file {index} path"
+        ).as_posix()
+        _require(
+            set(record) == {"path", "size", "sha256"}
+            and path not in regular_by_path
+            and isinstance(record.get("size"), int)
+            and not isinstance(record.get("size"), bool)
+            and record["size"] >= 0
+            and SHA_RE.fullmatch(str(record.get("sha256"))) is not None,
+            f"environment regular-file record {path} changed",
+        )
+        regular_by_path[path] = record
+        regular_order.append(path)
+    symlink_order: list[str] = []
+    for index, raw in enumerate(symlinks):
+        record = _mapping(raw, f"environment symlink {index}")
+        path = _relative(
+            record.get("path"), f"environment symlink {index} path"
+        ).as_posix()
+        _require(
+            set(record)
+            == {"path", "target", "resolved_path", "target_kind", "link_size"}
+            and isinstance(record.get("target"), str)
+            and record["target"]
+            and not PurePosixPath(record["target"]).is_absolute()
+            and _relative(
+                record.get("resolved_path"),
+                f"environment symlink {index} resolved path",
+            )
+            and record.get("target_kind") in {"regular_file", "directory"}
+            and isinstance(record.get("link_size"), int)
+            and not isinstance(record.get("link_size"), bool)
+            and record["link_size"] >= 0,
+            f"environment symlink record {path} changed",
+        )
+        symlink_order.append(path)
+    _require(
+        regular_order == sorted(regular_order)
+        and len(regular_order) == len(set(regular_order))
+        and symlink_order == sorted(symlink_order)
+        and len(symlink_order) == len(set(symlink_order))
+        and not (set(regular_order) & set(symlink_order)),
+        "environment prefix records are duplicated or not path-sorted",
+    )
+    return {
+        "source": source,
+        "source_records": worktree_map,
+        "prefix": prefix,
+        "prefix_regular": regular_by_path,
+        "remote_environment_file_sha256": _file_sha256(remote_path),
+    }
+
+
+def _validate_publication_chain(
+    tree: ChecksumTree,
+    context: Mapping[str, Any],
+    *,
+    scaling: Mapping[str, Any],
+    scaling_record: Mapping[str, Any],
+    release: Mapping[str, Any],
+) -> dict[str, str]:
+    publication = _mapping(context.get("publication"), "current publication")
+    paths = _mapping(context.get("paths"), "publication paths")
+    status = _mapping(context.get("status"), "publication terminal status")
+    mpi_facts = _mapping(status.get("mpi_execution_facts"), "terminal MPI facts")
+    execution_id = mpi_facts.get("execution_id")
+    _require(
+        isinstance(execution_id, str)
+        and execution_id
+        and execution_id == release["payload"].get("execution_id"),
+        "terminal MPI execution identifier differs from the release runner",
+    )
+
+    launch_path = Path(paths["launch"])
+    launch_document = _read_envelope(launch_path, "MPI release launch receipt")
+    launch = _mapping(launch_document.get("payload"), "MPI release launch payload")
+    expected_launch_keys = {
+        "schema",
+        "launch_binding",
+        "intent",
+        "intent_payload_sha256",
+        "started_utc",
+        "finished_utc",
+        "returncode",
+        "post_run_verification",
+        "stdout",
+        "stderr",
+    }
+    _require(
+        set(launch) == expected_launch_keys
+        and launch.get("schema") == "negfpy.remote_validation.release_launch.v2",
+        "MPI release launch v2 payload shape changed",
+    )
+    launch_binding = _mapping(launch.get("launch_binding"), "release launch binding")
+    expected_binding_keys = {
+        "schema",
+        "source_revision",
+        "source_tree_sha256",
+        "environment_sha256",
+        "execution_id",
+        "selected_rank_count",
+        "argv",
+        "binding_arguments",
+        "thread_limits",
+        "launcher",
+        "python",
+        "runner",
+        "execution_source_identity_sha256",
+        "tracked_files_manifest_sha256",
+        "worktree_files_manifest_sha256",
+        "orchestration_manifest_sha256",
+        "orchestration_scripts",
+        "environment_prefix_manifest_sha256",
+        "environment_regular_file_count",
+        "environment_symlink_count",
+        "launch_environment",
+        "launch_environment_sha256",
+    }
+    _require(
+        set(launch_binding) == expected_binding_keys
+        and launch_binding.get("schema")
+        == "negfpy.remote_validation.release_launch_binding.v1",
+        "MPI release launch-binding shape changed",
+    )
+    rank_count = int(scaling["toy_rank"])
+    physical_cores = int(scaling["physical_core_count"])
+    socket_count = int(scaling["socket_count"])
+    binding = _expected_binding(rank_count, physical_cores, socket_count)
+    launcher = _mapping(launch_binding.get("launcher"), "release launcher identity")
+    python = _mapping(launch_binding.get("python"), "release Python identity")
+    runner = _mapping(launch_binding.get("runner"), "release runner identity")
+    _require(
+        set(launcher) == {"path", "resolved_path", "sha256"}
+        and set(python) == {"path", "resolved_path", "sha256"}
+        and set(runner) == {"path", "resolved_path", "size", "sha256"},
+        "MPI release executable/source record shape changed",
+    )
+    launcher_path = _remote_absolute(launcher.get("path"), "MPI release launcher path")
+    launcher_target = _remote_absolute(
+        launcher.get("resolved_path"), "MPI release launcher target"
+    )
+    python_path = _remote_absolute(python.get("path"), "MPI release Python path")
+    python_target = _remote_absolute(python.get("resolved_path"), "MPI release Python target")
+    prefix = launcher_path.parent.parent
+    deployment_root = prefix.parent
+    remote_runner = deployment_root / "worktree" / "scripts" / "remote_toy_mpi_runner.py"
+    runner_path = _remote_absolute(runner.get("path"), "MPI release runner path")
+    runner_target = _remote_absolute(
+        runner.get("resolved_path"), "MPI release runner target"
+    )
+    _require(
+        launcher_path == prefix / "bin" / "mpiexec"
+        and launcher_target.is_relative_to(prefix)
+        and python_path == prefix / "bin" / "python"
+        and python_target.is_relative_to(prefix)
+        and runner_path == runner_target == remote_runner
+        and deployment_root.name == context["commit"]
+        and isinstance(runner.get("size"), int)
+        and not isinstance(runner.get("size"), bool)
+        and runner["size"] > 0,
+        "MPI release executables/runner are not from the exact deployment",
+    )
+    launcher_sha = _sha(launcher.get("sha256"), "MPI release launcher SHA256")
+    python_sha = _sha(python.get("sha256"), "MPI release Python SHA256")
+    runner_sha = _sha(runner.get("sha256"), "MPI release runner SHA256")
+    remote_release_root = deployment_root / "artifacts" / "toy-release"
+    program = [
+        str(python_path),
+        str(remote_runner),
+        "release",
+        "--run-directory",
+        str(remote_release_root),
+        "--source-revision",
+        str(context["commit"]),
+        "--source-tree-sha256",
+        str(scaling["tree_sha"]),
+        "--environment-sha256",
+        str(scaling["environment_sha"]),
+        "--execution-id",
+        execution_id,
+        "--expected-ranks",
+        str(rank_count),
+    ]
+    expected_argv = [str(launcher_path), *binding, "-n", str(rank_count), *program]
+    attempt_remote = (
+        deployment_root
+        / "artifacts"
+        / "attempts"
+        / ("attempt-%03d" % int(context["attempt"]))
+    )
+    expected_environment = {
+        "BLIS_NUM_THREADS": "1",
+        "HOME": f"/home/{REMOTE_EXPECTED_USER}",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "LOGNAME": REMOTE_EXPECTED_USER,
+        "MKL_NUM_THREADS": "1",
+        "MPLCONFIGDIR": str(attempt_remote / "runtime-config" / "matplotlib"),
+        "NUMEXPR_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "PATH": os.pathsep.join(
+            (str(prefix / "bin"), REMOTE_TOOLS_BIN, "/usr/bin", "/bin")
+        ),
+        "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": str(deployment_root / "worktree" / "src"),
+        "PYTHONPYCACHEPREFIX": str(attempt_remote / "runtime-cache" / "pycache"),
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": str(attempt_remote / "runtime-tmp"),
+        "TZ": "UTC",
+        "USER": REMOTE_EXPECTED_USER,
+        "VECLIB_MAXIMUM_THREADS": "1",
+        "XDG_CACHE_HOME": str(attempt_remote / "runtime-cache"),
+    }
+    launch_environment = _mapping(
+        launch_binding.get("launch_environment"), "scientific launch environment"
+    )
+    _require(
+        launch_binding.get("source_revision") == context["commit"]
+        and launch_binding.get("source_tree_sha256") == scaling["tree_sha"]
+        and launch_binding.get("environment_sha256") == scaling["environment_sha"]
+        and launch_binding.get("execution_id") == execution_id
+        and launch_binding.get("selected_rank_count") == rank_count
+        and launch_binding.get("thread_limits") == THREAD_LIMITS
+        and launch_binding.get("binding_arguments") == binding
+        and launch_binding.get("argv") == expected_argv
+        and launch_environment == expected_environment
+        and launch_binding.get("launch_environment_sha256")
+        == _hash_document(expected_environment),
+        "MPI release launch identity, argv, binding, or scrubbed environment changed",
+    )
+
+    identities = _remote_source_manifests(
+        tree,
+        status,
+        commit=str(context["commit"]),
+        source_tree_sha256=str(scaling["tree_sha"]),
+        environment_sha256=str(scaling["environment_sha"]),
+        environment_prefix=prefix,
+    )
+    source = identities["source"]
+    prefix_manifest = identities["prefix"]
+    source_records = identities["source_records"]
+    runner_record = source_records.get("scripts/remote_toy_mpi_runner.py")
+    _require(
+        launch_binding.get("execution_source_identity_sha256")
+        == source.get("manifest_sha256")
+        and launch_binding.get("tracked_files_manifest_sha256")
+        == source.get("tracked_files_manifest_sha256")
+        and launch_binding.get("worktree_files_manifest_sha256")
+        == source.get("worktree_files_manifest_sha256")
+        and launch_binding.get("orchestration_manifest_sha256")
+        == source.get("orchestration_manifest_sha256")
+        and launch_binding.get("orchestration_scripts")
+        == source.get("orchestration_scripts")
+        and launch_binding.get("environment_prefix_manifest_sha256")
+        == prefix_manifest.get("manifest_sha256")
+        and launch_binding.get("environment_regular_file_count")
+        == prefix_manifest.get("regular_file_count")
+        and launch_binding.get("environment_symlink_count")
+        == prefix_manifest.get("symlink_count")
+        and isinstance(runner_record, Mapping)
+        and runner_record.get("kind") == "regular_file"
+        and runner_record.get("git_tracked") is True
+        and runner_record.get("size") == runner.get("size")
+        and runner_record.get("sha256") == runner_sha,
+        "launch binding differs from archived source/environment manifests",
+    )
+    prefix_regular = identities["prefix_regular"]
+    for name, target, digest in (
+        ("launcher", launcher_target, launcher_sha),
+        ("Python", python_target, python_sha),
+    ):
+        relative_target = target.relative_to(prefix).as_posix()
+        prefix_record = prefix_regular.get(relative_target)
+        _require(
+            isinstance(prefix_record, Mapping)
+            and prefix_record.get("sha256") == digest,
+            f"{name} bytes differ from the environment-prefix manifest",
+        )
+
+    intent_path = Path(paths["intent"])
+    intent_document = _read_envelope(intent_path, "MPI release launch intent")
+    intent = _mapping(intent_document.get("payload"), "MPI release launch intent payload")
+    _require(
+        set(intent)
+        == {
+            "schema",
+            "launch_binding",
+            "stdout_relative_path",
+            "stderr_relative_path",
+        }
+        and intent.get("schema")
+        == "negfpy.remote_validation.release_launch_intent.v1"
+        and intent.get("launch_binding") == launch_binding
+        and intent.get("stdout_relative_path") == "mpi-release.stdout.log"
+        and intent.get("stderr_relative_path") == "mpi-release.stderr.log",
+        "immutable MPI launch intent differs from terminal launch binding",
+    )
+    intent_record = _mapping(launch.get("intent"), "terminal launch intent record")
+    _require(
+        set(intent_record) == {"relative_path", "sha256"}
+        and intent_record.get("relative_path") == "mpi-release-launch-intent.json"
+        and intent_record.get("sha256") == _file_sha256(intent_path)
+        and intent_record.get("sha256")
+        == publication.get("mpi_release_launch_intent_sha256")
+        and launch.get("intent_payload_sha256")
+        == intent_document["payload_sha256"],
+        "terminal launch receipt is not bound to the immutable intent",
+    )
+    post_run = _mapping(
+        launch.get("post_run_verification"),
+        "post-run source/environment verification",
+    )
+    _require(
+        set(post_run)
+        == {
+            "passed",
+            "checked_utc",
+            "execution_source_identity_sha256",
+            "environment_prefix_manifest_sha256",
+        }
+        and post_run.get("passed") is True
+        and isinstance(post_run.get("checked_utc"), str)
+        and post_run.get("execution_source_identity_sha256")
+        == source.get("manifest_sha256")
+        and post_run.get("environment_prefix_manifest_sha256")
+        == prefix_manifest.get("manifest_sha256")
+        and launch.get("returncode") == 0
+        and isinstance(launch.get("started_utc"), str)
+        and isinstance(launch.get("finished_utc"), str)
+        and launch["started_utc"] <= post_run["checked_utc"] <= launch["finished_utc"],
+        "post-run source/environment verification is incomplete or failed",
+    )
+    for key, publication_key, expected_name in (
+        ("stdout", "mpi_release_stdout_sha256", "mpi-release.stdout.log"),
+        ("stderr", "mpi_release_stderr_sha256", "mpi-release.stderr.log"),
+    ):
+        record = _mapping(launch.get(key), f"release {key} record")
+        _require(
+            set(record) == {"relative_path", "sha256"}
+            and record.get("relative_path") == expected_name
+            and record.get("sha256") == publication.get(publication_key)
+            and record.get("sha256") == _file_sha256(Path(paths[key])),
+            f"MPI release {key} receipt/publication binding changed",
+        )
+    launch_facts = {
+        "schema": "negfpy.remote_validation.release_launch_facts.v1",
+        "receipt_relative_path": "mpi-release-launch.json",
+        "receipt_file_sha256": _file_sha256(launch_path),
+        "receipt_payload_sha256": launch_document["payload_sha256"],
+        "intent_relative_path": "mpi-release-launch-intent.json",
+        "intent_file_sha256": _file_sha256(intent_path),
+        "intent_payload_sha256": intent_document["payload_sha256"],
+        "launcher_file_sha256": launcher_sha,
+        "python_file_sha256": python_sha,
+        "runner_file_sha256": runner_sha,
+        "execution_source_identity_sha256": source["manifest_sha256"],
+        "tracked_files_manifest_sha256": source["tracked_files_manifest_sha256"],
+        "worktree_files_manifest_sha256": source["worktree_files_manifest_sha256"],
+        "orchestration_manifest_sha256": source["orchestration_manifest_sha256"],
+        "environment_prefix_manifest_sha256": prefix_manifest["manifest_sha256"],
+        "launch_environment_sha256": launch_binding["launch_environment_sha256"],
+        "stdout_relative_path": "mpi-release.stdout.log",
+        "stdout_file_sha256": _file_sha256(Path(paths["stdout"])),
+        "stderr_relative_path": "mpi-release.stderr.log",
+        "stderr_file_sha256": _file_sha256(Path(paths["stderr"])),
+        "selected_rank_count": rank_count,
+        "binding_arguments": binding,
+        "post_run_verified": True,
+        "returncode": 0,
+    }
+    _require(
+        _mapping(mpi_facts.get("launch_receipt"), "terminal launch facts")
+        == launch_facts,
+        "terminal MPI facts differ from the independently rederived launch receipt",
+    )
+
+    canonical_runner = _tree_file(
+        tree,
+        f"toy-release/runner-results/{execution_id}.json",
+        "canonical release runner result",
+        expected_sha256=release["file_sha256"],
+    )
+    _require(
+        Path(paths["runner"]).read_bytes() == canonical_runner.read_bytes()
+        and _file_sha256(Path(paths["runner"])) == release["file_sha256"]
+        and _file_sha256(Path(paths["campaign"]))
+        == release["campaign_file_sha256"]
+        and _file_sha256(Path(paths["execution"]))
+        == release["execution_file_sha256"]
+        and _file_sha256(Path(paths["report"])) == release["report_file_sha256"]
+        and _file_sha256(Path(release["report_path"]))
+        == release["report_file_sha256"],
+        "published runner/campaign/execution/report copies differ from reopened release evidence",
+    )
+    runtime = release["payload"].get("rank_runtime")
+    _require(
+        isinstance(runtime, list) and len(runtime) == rank_count,
+        "release rank runtime is incomplete",
+    )
+    for record_value in runtime:
+        record = _mapping(record_value, "release rank runtime")
+        runtime_python = _mapping(record.get("python"), "release rank Python")
+        _require(
+            runtime_python.get("sha256") == python_sha
+            and _remote_absolute(runtime_python.get("path"), "rank Python path")
+            == python_target
+            and record.get("python_argv") == program[1:],
+            "release rank Python identity or argv differs from the outer launch",
+        )
+    expected_mpi = {
+        "schema": "negfpy.remote_validation.mpi_execution_facts.v1",
+        "runner_result_file_sha256": release["file_sha256"],
+        "runner_result_payload_sha256": release["document"]["payload_sha256"],
+        "campaign_manifest_file_sha256": release["campaign_file_sha256"],
+        "campaign_manifest_payload_sha256": release["payload"]["campaign_manifest_sha256"],
+        "execution_manifest_file_sha256": release["execution_file_sha256"],
+        "execution_manifest_payload_sha256": release["execution_payload_sha256"],
+        "execution_scientific_sha256": release["payload"]["execution_scientific_sha256"],
+        "production_toy_physics_sha256": release["physics_sha256"],
+        "execution_id": execution_id,
+        "rank_runtime": runtime,
+        "python_file_sha256": python_sha,
+        "harmonic_preflight": mpi_facts.get("harmonic_preflight"),
+        "memory_preflight": release["payload"].get("memory_preflight"),
+        "phase_evidence": mpi_facts.get("phase_evidence"),
+        "communicator_size": rank_count,
+        "mode": "serial" if rank_count == 1 else "mpi",
+        "directory_mode": release["payload"].get("directory_mode"),
+        "task_count": 28,
+        "release_certified": True,
+        "launch_receipt": launch_facts,
+    }
+    harmonic = _mapping(expected_mpi["harmonic_preflight"], "terminal harmonic preflight")
+    phase_evidence = expected_mpi["phase_evidence"]
+    _require(
+        harmonic.get("schema")
+        == "negfpy.remote_toy_mpi.real_harmonic_preflight.v1"
+        and harmonic.get("point_count") == 7
+        and harmonic.get("real_physics_executed") is True
+        and harmonic.get("passed") is True
+        and _sha(harmonic.get("artifact_file_sha256"), "harmonic artifact SHA256")
+        and _sha(harmonic.get("evidence_sha256"), "harmonic evidence SHA256")
+        and isinstance(phase_evidence, list)
+        and len(phase_evidence) == 8,
+        "terminal harmonic or phase execution evidence is incomplete",
+    )
+    assert isinstance(phase_evidence, list)
+    _require(
+        all(
+            isinstance(item, Mapping)
+            and set(item)
+            == {
+                "wave_index",
+                "task_manifest_file_sha256",
+                "execution_manifest_file_sha256",
+                "execution_payload_sha256",
+                "task_count",
+            }
+            and item.get("wave_index") == index
+            and isinstance(item.get("task_count"), int)
+            and not isinstance(item.get("task_count"), bool)
+            and item["task_count"] > 0
+            and all(
+                SHA_RE.fullmatch(str(item.get(key))) is not None
+                for key in (
+                    "task_manifest_file_sha256",
+                    "execution_manifest_file_sha256",
+                    "execution_payload_sha256",
+                )
+            )
+            for index, item in enumerate(phase_evidence)
+        )
+        and sum(item["task_count"] for item in phase_evidence) == 28,
+        "terminal harmonic or phase execution evidence is incomplete",
+    )
+    _require(mpi_facts == expected_mpi, "terminal MPI execution facts changed")
+
+    terminal_scaling = _mapping(
+        status.get("scaling_facts"), "terminal scaling facts"
+    )
+    reused = terminal_scaling.get("reused_for_exact_retry")
+    source_attempt = terminal_scaling.get("source_attempt")
+    published_scaling = str(publication.get("scaling_selection"))
+    selected_attempt = published_scaling.split("/", 2)[1]
+    _require(
+        isinstance(reused, bool)
+        and isinstance(source_attempt, str)
+        and re.fullmatch(r"attempt-[0-9]{3}", source_attempt) is not None
+        and source_attempt == selected_attempt
+        and (reused or source_attempt == "attempt-%03d" % int(context["attempt"])),
+        "terminal scaling retry/source-attempt facts are inconsistent",
+    )
+    scaling_facts = {
+        "schema": "negfpy.remote_validation.scaling_facts.v1",
+        "selection_relative_path": published_scaling,
+        "selection_file_sha256": scaling_record["file_sha256"],
+        "selection_payload_sha256": scaling_record["payload_sha256"],
+        "production_toy_physics_sha256": scaling["scaling_physics_sha"],
+        "physics_equal_across_all_ranks": True,
+        "toy_rank_count": rank_count,
+        "toy_mpi_enabled": scaling["mpi_enabled"],
+        "silicon_rank_count": scaling["silicon_rank"],
+        "candidate_speedup": scaling["candidate_speedup"],
+        "rank_ladder": list(RANK_LADDER),
+        "rank_evidence": scaling["rank_evidence"],
+        "reused_for_exact_retry": reused,
+        "source_attempt": source_attempt,
+    }
+    _require(
+        terminal_scaling == scaling_facts,
+        "terminal scaling facts differ from independently reopened rank evidence",
+    )
+
+    report_facts = _mapping(context.get("report_facts"), "published report facts")
+    expected_report_keys = {
+        "schema",
+        "report_relative_path",
+        "report_file_sha256",
+        "report_body_sha256",
+        "schema_version",
+        "protocol",
+        "protocol_version",
+        "release_certified",
+        "multidimensional_outcome_count",
+        "multidimensional_backend",
+        "harmonic_preflight_point_count",
+        "bounded_backends",
+        "open_system_run_count",
+        "checkpoint_count",
+        "commit",
+        "git_tree",
+        "source_tree_sha256",
+        "environment_sha256",
+        "mpi_execution",
+        "mpi_scaling",
+    }
+    _require(
+        set(report_facts) == expected_report_keys
+        and report_facts.get("schema")
+        == "negfpy.remote_validation.report_facts.v1"
+        and report_facts.get("report_relative_path") == publication.get("report")
+        and report_facts.get("report_file_sha256") == release["report_file_sha256"]
+        and report_facts.get("report_body_sha256") == release["report_body_sha256"]
+        and report_facts.get("schema_version") == 4
+        and report_facts.get("protocol") == "multidimensional_toy_gate_v2"
+        and report_facts.get("protocol_version") == 2
+        and report_facts.get("release_certified") is True
+        and report_facts.get("multidimensional_outcome_count") == 13
+        and report_facts.get("multidimensional_backend") == "fft"
+        and report_facts.get("harmonic_preflight_point_count") == 7
+        and report_facts.get("bounded_backends") == ["serial", "threaded", "fft"]
+        and report_facts.get("open_system_run_count") == 13
+        and report_facts.get("checkpoint_count") == 13
+        and report_facts.get("commit") == context["commit"]
+        and report_facts.get("git_tree")
+        == _mapping(status.get("identity_bundle"), "terminal identity bundle").get("git_tree")
+        and report_facts.get("source_tree_sha256") == scaling["tree_sha"]
+        and report_facts.get("environment_sha256") == scaling["environment_sha"]
+        and report_facts.get("mpi_execution") == expected_mpi
+        and report_facts.get("mpi_scaling") == scaling_facts,
+        "published report facts are not fully derived from the selected release chain",
+    )
+    return {
+        "publication_file_sha256": _file_sha256(Path(context["publication_path"])),
+        "current_file_sha256": _file_sha256(Path(context["current_path"])),
+        "intent_file_sha256": _file_sha256(intent_path),
+        "intent_payload_sha256": intent_document["payload_sha256"],
+        "launch_file_sha256": _file_sha256(launch_path),
+        "launch_payload_sha256": launch_document["payload_sha256"],
+        "execution_source_identity_sha256": source["manifest_sha256"],
+        "environment_prefix_manifest_sha256": prefix_manifest["manifest_sha256"],
+        "launch_environment_sha256": launch_binding["launch_environment_sha256"],
+    }
 
 
 def _validate_staging(
@@ -1434,6 +2668,10 @@ def generate_config(
         "fetched artifact root",
         fetched=True,
     )
+    publication_context = _current_publication(artifact_tree)
+    publication = _mapping(
+        publication_context.get("publication"), "current attempt publication"
+    )
     selection_relative = _relative(
         scaling_selection_relative, "scaling selection relative path"
     ).as_posix()
@@ -1445,7 +2683,16 @@ def generate_config(
         and release_relative in artifact_tree.entries,
         "scaling selection or release runner is not fetched-manifest listed",
     )
+    _require(
+        selection_relative == publication.get("scaling_selection")
+        and release_relative == publication.get("mpi_runner_result"),
+        "caller-supplied scaling/runner paths do not equal current publication selections",
+    )
     scaling, scaling_record = _selection(artifact_tree, selection_relative)
+    _require(
+        scaling["commit"] == publication_context["commit"],
+        "published attempt commit differs from scaling identity",
+    )
     fetch_receipt = _strict_json(
         artifact_tree.root / "fetch-receipt.json",
         "fetch receipt",
@@ -1454,6 +2701,17 @@ def generate_config(
     _require(
         fetch_receipt.get("commit") == scaling["commit"],
         "fetch receipt commit differs from scaling identity",
+    )
+    terminal_facts = _mapping(
+        _mapping(
+            publication_context["status"], "published terminal status"
+        ).get("mpi_execution_facts"),
+        "published terminal MPI facts",
+    )
+    execution_id = terminal_facts.get("execution_id")
+    _require(
+        isinstance(execution_id, str) and execution_id,
+        "published terminal MPI execution identifier is absent",
     )
     release = _worker(
         artifact_tree,
@@ -1464,7 +2722,15 @@ def generate_config(
         commit=scaling["commit"],
         tree_sha=scaling["tree_sha"],
         environment_sha=scaling["environment_sha"],
-        expected_execution_id=Path(release_relative).stem,
+        expected_execution_id=execution_id,
+        nested_root=artifact_tree.root / "toy-release",
+    )
+    publication_chain = _validate_publication_chain(
+        artifact_tree,
+        publication_context,
+        scaling=scaling,
+        scaling_record=scaling_record,
+        release=release,
     )
 
     target = output.expanduser().absolute()
@@ -1538,6 +2804,33 @@ def generate_config(
         ("MPIScalingManifestSHA", scaling_record["file_sha256"]),
         ("MPIRunnerManifestSHA", release["file_sha256"]),
         ("MPIExecutionManifestSHA", release["execution_file_sha256"]),
+        ("CurrentAttemptSHA", publication_chain["current_file_sha256"]),
+        ("AttemptPublicationSHA", publication_chain["publication_file_sha256"]),
+        (
+            "MPIReleaseLaunchIntentSHA",
+            publication_chain["intent_file_sha256"],
+        ),
+        (
+            "MPIReleaseLaunchIntentPayloadSHA",
+            publication_chain["intent_payload_sha256"],
+        ),
+        ("MPIReleaseLaunchSHA", publication_chain["launch_file_sha256"]),
+        (
+            "MPIReleaseLaunchPayloadSHA",
+            publication_chain["launch_payload_sha256"],
+        ),
+        (
+            "MPIExecutionSourceIdentitySHA",
+            publication_chain["execution_source_identity_sha256"],
+        ),
+        (
+            "MPIEnvironmentPrefixManifestSHA",
+            publication_chain["environment_prefix_manifest_sha256"],
+        ),
+        (
+            "MPILaunchEnvironmentSHA",
+            publication_chain["launch_environment_sha256"],
+        ),
         ("ArtifactSHA256SUMSRawSHA", artifact_tree.raw_manifest_sha256),
         ("ArtifactFetchReceiptSHA", str(artifact_tree.local_receipt_sha256)),
         ("StagingSHA256SUMSRawSHA", staging_tree.raw_manifest_sha256),

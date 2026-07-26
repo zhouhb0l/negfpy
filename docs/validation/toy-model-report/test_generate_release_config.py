@@ -22,8 +22,22 @@ SPEC.loader.exec_module(MODULE)
 
 COMMIT = "1" * 40
 TREE_SHA = "2" * 64
-ENVIRONMENT_SHA = "3" * 64
+ENVIRONMENT_LOCK_BYTES = b"fixture explicit environment lock\n"
+ENVIRONMENT_SHA = hashlib.sha256(ENVIRONMENT_LOCK_BYTES).hexdigest()
 THREADS = dict(MODULE.THREAD_LIMITS)
+REMOTE_ROOT = f"/validation/{COMMIT}"
+REMOTE_PREFIX = f"{REMOTE_ROOT}/environment"
+REMOTE_MPI = f"{REMOTE_PREFIX}/bin/mpiexec"
+REMOTE_MPI_TARGET = f"{REMOTE_PREFIX}/bin/mpiexec"
+REMOTE_PYTHON = f"{REMOTE_PREFIX}/bin/python"
+REMOTE_PYTHON_TARGET = f"{REMOTE_PREFIX}/bin/python3.10"
+REMOTE_RUNNER = f"{REMOTE_ROOT}/worktree/scripts/remote_toy_mpi_runner.py"
+REMOTE_RELEASE_ROOT = f"{REMOTE_ROOT}/artifacts/toy-release"
+MPI_SHA = "a" * 64
+PYTHON_SHA = "b" * 64
+RUNNER_SOURCE_SHA = "5" * 64
+RUNNER_SOURCE_SIZE = 4096
+GIT_TREE = "4" * 40
 
 
 def _compact(value, *, ensure_ascii: bool = True) -> bytes:
@@ -51,6 +65,127 @@ def _indented(value, *, ensure_ascii: bool = True) -> bytes:
 
 def _hash(value) -> str:
     return hashlib.sha256(_compact(value)).hexdigest()
+
+
+def _manifest(body: dict) -> dict:
+    return {**body, "manifest_sha256": _hash(body)}
+
+
+def _execution_source_identity() -> dict:
+    records = []
+    for path in MODULE.ORCHESTRATION_SCRIPT_PATHS:
+        records.append(
+            {
+                "path": path,
+                "git_tracked": True,
+                "kind": "regular_file",
+                "size": (
+                    RUNNER_SOURCE_SIZE
+                    if path == "scripts/remote_toy_mpi_runner.py"
+                    else 1024
+                ),
+                "mode": 0o755,
+                "sha256": (
+                    RUNNER_SOURCE_SHA
+                    if path == "scripts/remote_toy_mpi_runner.py"
+                    else _hash({"source": path})
+                ),
+            }
+        )
+    tracked_sha = _hash(
+        {
+            "schema": "negfpy.remote_validation.tracked_worktree.v1",
+            "records": records,
+        }
+    )
+    worktree_sha = _hash(
+        {
+            "schema": "negfpy.remote_validation.full_worktree.v1",
+            "records": records,
+        }
+    )
+    orchestration_sha = _hash(
+        {
+            "schema": "negfpy.remote_validation.orchestration_sources.v1",
+            "records": records,
+        }
+    )
+    return _manifest(
+        {
+            "schema": "negfpy.remote_validation.execution_source.v1",
+            "git_revision": COMMIT,
+            "git_tree": GIT_TREE,
+            "package_source_sha256": TREE_SHA,
+            "tracked_file_count": len(records),
+            "tracked_files_manifest_sha256": tracked_sha,
+            "tracked_files": records,
+            "worktree_file_count": len(records),
+            "worktree_files_manifest_sha256": worktree_sha,
+            "worktree_files": records,
+            "orchestration_manifest_sha256": orchestration_sha,
+            "orchestration_scripts": records,
+        }
+    )
+
+
+def _environment_prefix_manifest() -> dict:
+    regular = [
+        {"path": "bin/mpiexec", "size": 2048, "sha256": MPI_SHA},
+        {
+            "path": "bin/python3.10",
+            "size": 8192,
+            "sha256": PYTHON_SHA,
+        },
+    ]
+    symlinks = [
+        {
+            "path": "bin/python",
+            "target": "python3.10",
+            "resolved_path": "bin/python3.10",
+            "target_kind": "regular_file",
+            "link_size": 10,
+        }
+    ]
+    return _manifest(
+        {
+            "schema": "negfpy.remote_validation.environment_prefix.v1",
+            "prefix": REMOTE_PREFIX,
+            "directory_count": 2,
+            "regular_file_count": len(regular),
+            "symlink_count": len(symlinks),
+            "regular_files": regular,
+            "symlinks": symlinks,
+        }
+    )
+
+
+def _launch_environment() -> dict[str, str]:
+    attempt = f"{REMOTE_ROOT}/artifacts/attempts/attempt-001"
+    return dict(
+        sorted(
+            {
+                "HOME": "/home/hangbo",
+                "USER": "hangbo",
+                "LOGNAME": "hangbo",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "TZ": "UTC",
+                "PATH": (
+                    f"{REMOTE_PREFIX}/bin:"
+                    "/home/hangbo/micromamba/envs/negf-tools/bin:/usr/bin:/bin"
+                ),
+                "PYTHONPATH": f"{REMOTE_ROOT}/worktree/src",
+                "PYTHONHASHSEED": "0",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPYCACHEPREFIX": f"{attempt}/runtime-cache/pycache",
+                "TMPDIR": f"{attempt}/runtime-tmp",
+                "XDG_CACHE_HOME": f"{attempt}/runtime-cache",
+                "MPLCONFIGDIR": f"{attempt}/runtime-config/matplotlib",
+                **THREADS,
+            }.items()
+        )
+    )
 
 
 def _file_hash(path: Path) -> str:
@@ -99,24 +234,52 @@ def _memory(profile: str, rank_count: int) -> dict:
     }
 
 
-def _runtime(rank_count: int) -> list[dict]:
+def _release_program(execution_id: str, rank_count: int) -> list[str]:
+    return [
+        REMOTE_PYTHON,
+        REMOTE_RUNNER,
+        "release",
+        "--run-directory",
+        REMOTE_RELEASE_ROOT,
+        "--source-revision",
+        COMMIT,
+        "--source-tree-sha256",
+        TREE_SHA,
+        "--environment-sha256",
+        ENVIRONMENT_SHA,
+        "--execution-id",
+        execution_id,
+        "--expected-ranks",
+        str(rank_count),
+    ]
+
+
+def _runtime(rank_count: int, *, execution_id: str | None = None) -> list[dict]:
     rows: list[dict] = []
     for rank in range(rank_count):
         package = rank % 2 if rank_count >= 2 else 0
-        rows.append(
-            {
-                "rank": rank,
-                "hostname": "fixture-host",
-                "physical_cores": [
-                    {
-                        "physical_package_id": package,
-                        "core_id": rank // 2,
-                    }
-                ],
-                "one_physical_core": True,
-                "thread_limits": THREADS,
+        record = {
+            "rank": rank,
+            "hostname": "fixture-host",
+            "physical_cores": [
+                {
+                    "physical_package_id": package,
+                    "core_id": rank // 2,
+                }
+            ],
+            "one_physical_core": True,
+            "thread_limits": THREADS,
+        }
+        if execution_id is not None:
+            record["python"] = {
+                "path": REMOTE_PYTHON_TARGET,
+                "resolved_path": REMOTE_PYTHON_TARGET,
+                "sha256": PYTHON_SHA,
             }
-        )
+            record["python_argv"] = _release_program(
+                execution_id, rank_count
+            )[1:]
+        rows.append(record)
     return rows
 
 
@@ -234,18 +397,14 @@ def _wave_index(ordinal: int) -> int:
     return 7
 
 
-def _summary(release: bool) -> dict:
-    return {
-        "code_identity_consistent": True,
-        "environment_lock_consistent": True,
-        "failures": [],
-        "fixture_contract_passed": True,
-        "multidimensional_release_certified": True,
-        "open_three_mode_agreement_passed": True,
-        "refinement_passed": True,
-        "release_certified": release,
-        "validation_tier": "release" if release else "scaling",
-    }
+def _summary(release: bool, *, omitted_gate: str | None = None) -> dict:
+    summary = {key: True for key in MODULE.REQUIRED_SUMMARY_GATES}
+    summary["release_certified"] = release
+    summary["failures"] = []
+    summary["validation_tier"] = "release" if release else "scaling"
+    if release and omitted_gate is not None:
+        summary.pop(omitted_gate)
+    return summary
 
 
 def _strict_report(
@@ -258,12 +417,13 @@ def _strict_report(
     execution_file_sha: str,
     execution_payload_sha: str,
     scientific_sha: str,
+    omitted_summary_gate: str | None = None,
 ) -> dict:
     release = profile == "release"
     core = {
         "schema": "negfpy.anharmonic.production_toy_gate",
         "schema_version": 4,
-        "summary": _summary(release),
+        "summary": _summary(release, omitted_gate=omitted_summary_gate),
         "environment_lock": {
             "passed": True,
             "multidimensional_environment_sha256": ENVIRONMENT_SHA,
@@ -332,14 +492,37 @@ def _refresh_checksums(root: Path, *, excluded: set[str] | None = None) -> tuple
 
 
 class CanonicalFixture:
-    def __init__(self, root: Path, *, artifact_nonce: bytes | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        artifact_nonce: bytes | None = None,
+        artifact_validation_status: str = "completed",
+        omitted_summary_gate: str | None = None,
+        bad_launch_argv: bool = False,
+        bad_launch_executable: bool = False,
+        bad_launch_log_hash: bool = False,
+        bad_source_manifest: bool = False,
+        bad_launch_environment: bool = False,
+        failed_post_run: bool = False,
+    ) -> None:
         self.root = root
         self.artifact_nonce = artifact_nonce
+        self.artifact_validation_status = artifact_validation_status
+        self.omitted_summary_gate = omitted_summary_gate
+        self.bad_launch_argv = bad_launch_argv
+        self.bad_launch_executable = bad_launch_executable
+        self.bad_launch_log_hash = bad_launch_log_hash
+        self.bad_source_manifest = bad_source_manifest
+        self.bad_launch_environment = bad_launch_environment
+        self.failed_post_run = failed_post_run
         self.artifacts = root / "artifacts"
         self.report = root / "report"
-        self.scaling_root = self.artifacts / "scaling"
-        self.release_root = self.artifacts / "release"
-        self.release_execution_id = "release-fixture"
+        self.attempt = 1
+        self.attempt_root = self.artifacts / "attempts" / "attempt-001"
+        self.scaling_root = self.attempt_root / "mpi-scaling"
+        self.release_root = self.artifacts / "toy-release"
+        self.release_execution_id = "release-attempt-001"
         self.release_report: Path | None = None
         self.release_runner: Path | None = None
         self._build_artifacts()
@@ -369,9 +552,21 @@ class CanonicalFixture:
                     "artifact_relative_path": artifact.relative_to(worker_root).as_posix(),
                     "artifact_sha256": _file_hash(artifact),
                     "artifact_validation": {
-                        "schema": "fixture.case.v1",
-                        "task_identity_sha256": task["task_identity_sha256"],
-                        "passed": True,
+                        "schema_name": "negfpy_protocol_v2_toy_case",
+                        "schema_version": 1,
+                        "campaign_manifest_sha256": campaign_sha,
+                        "campaign_task_identity_sha256": task[
+                            "task_identity_sha256"
+                        ],
+                        "case_status": self.artifact_validation_status,
+                        "evidence_sha256": _hash(
+                            {"profile": profile, "task_id": task_id}
+                        ),
+                        "array_sha256": {
+                            "green_retarded": _hash(
+                                {"task_id": task_id, "array": "green_retarded"}
+                            )
+                        },
                     },
                 }
             )
@@ -412,6 +607,9 @@ class CanonicalFixture:
             execution_file_sha=_file_hash(execution_path),
             execution_payload_sha=execution["payload_sha256"],
             scientific_sha=scientific,
+            omitted_summary_gate=(
+                self.omitted_summary_gate if profile == "release" else None
+            ),
         )
         _write_json(report_path, report, ensure_ascii=False)
         worker_payload = {
@@ -440,7 +638,10 @@ class CanonicalFixture:
             "execution_manifest": _record(worker_root, execution_path),
             "strict_report": _record(worker_root, report_path),
             "memory_preflight": _memory(profile, rank_count),
-            "rank_runtime": _runtime(rank_count),
+            "rank_runtime": _runtime(
+                rank_count,
+                execution_id=execution_id if profile == "release" else None,
+            ),
             "thread_limits": THREADS,
         }
         worker_path = worker_root / "runner-results" / f"{execution_id}.json"
@@ -453,6 +654,442 @@ class CanonicalFixture:
             "execution_path": execution_path,
             "report_path": report_path,
         }
+
+    def _build_publication(
+        self,
+        *,
+        release: dict,
+        selection_document: dict,
+        common_physics: str,
+        rank_evidence: list[dict],
+    ) -> None:
+        attempt_relative = self.attempt_root.relative_to(self.artifacts).as_posix()
+        published_report = self.attempt_root / "production_toy_gate.json"
+        published_runner = self.attempt_root / "mpi-release-runner-result.json"
+        published_execution = self.attempt_root / "mpi-execution-manifest.json"
+        published_campaign = self.attempt_root / "mpi-campaign-manifest.json"
+        shutil.copyfile(release["report_path"], published_report)
+        shutil.copyfile(release["path"], published_runner)
+        shutil.copyfile(release["execution_path"], published_execution)
+        shutil.copyfile(release["campaign_path"], published_campaign)
+
+        stdout_path = self.attempt_root / "mpi-release.stdout.log"
+        stderr_path = self.attempt_root / "mpi-release.stderr.log"
+        _write_bytes(stdout_path, b"synthetic release stdout\n")
+        _write_bytes(stderr_path, b"")
+        rank_count = 8
+        binding = MODULE._expected_binding(rank_count, 76, 2)
+        program = _release_program(self.release_execution_id, rank_count)
+        source_identity = _execution_source_identity()
+        prefix_manifest = _environment_prefix_manifest()
+        launch_environment = _launch_environment()
+
+        identity_root = self.artifacts / "identity"
+        archived_files = {}
+        for name in (
+            "deployment-manifest.json",
+            "environment-manifest.json",
+            "environment-explicit.lock",
+            "incoming-SHA256SUMS",
+        ):
+            path = identity_root / name
+            _write_bytes(
+                path,
+                (
+                    ENVIRONMENT_LOCK_BYTES
+                    if name == "environment-explicit.lock"
+                    else f"fixture identity: {name}\n".encode("ascii")
+                ),
+            )
+            archived_files[name] = _file_hash(path)
+        remote_environment = {
+            "schema": "negfpy.remote_validation.remote_environment.v1",
+            "created_utc": "2026-07-26T00:00:00Z",
+            "commit": COMMIT,
+            "source_tree_sha256": TREE_SHA,
+            "execution_source_identity": source_identity,
+            "environment_prefix_manifest": prefix_manifest,
+            "explicit_lock_sha256": ENVIRONMENT_SHA,
+            "tree": GIT_TREE,
+            "hostname": "fixture-host",
+            "thread_limits": THREADS,
+        }
+        remote_environment_path = identity_root / "remote-environment.json"
+        _write_json(remote_environment_path, remote_environment)
+        identity_bundle = {
+            "schema": "negfpy.remote_validation.identity_bundle.v1",
+            "commit": COMMIT,
+            "git_tree": GIT_TREE,
+            "source_tree_sha256": TREE_SHA,
+            "explicit_lock": "environment-explicit.lock",
+            "explicit_lock_sha256": ENVIRONMENT_SHA,
+            "remote_environment": "remote-environment.json",
+            "remote_environment_sha256": _file_hash(remote_environment_path),
+            "verified_incoming_files": [
+                "deployment-manifest.json",
+                "environment-explicit.lock",
+                "environment-manifest.json",
+                "negfpy.bundle",
+            ],
+            "archived_files": archived_files,
+        }
+        _write_json(identity_root / "identity-manifest.json", identity_bundle)
+
+        launch_binding = {
+            "schema": "negfpy.remote_validation.release_launch_binding.v1",
+            "source_revision": COMMIT,
+            "source_tree_sha256": TREE_SHA,
+            "environment_sha256": ENVIRONMENT_SHA,
+            "execution_id": self.release_execution_id,
+            "selected_rank_count": rank_count,
+            "argv": [REMOTE_MPI, *binding, "-n", str(rank_count), *program],
+            "binding_arguments": binding,
+            "thread_limits": THREADS,
+            "launcher": {
+                "path": REMOTE_MPI,
+                "resolved_path": REMOTE_MPI_TARGET,
+                "sha256": MPI_SHA,
+            },
+            "python": {
+                "path": REMOTE_PYTHON,
+                "resolved_path": REMOTE_PYTHON_TARGET,
+                "sha256": PYTHON_SHA,
+            },
+            "runner": {
+                "path": REMOTE_RUNNER,
+                "resolved_path": REMOTE_RUNNER,
+                "size": RUNNER_SOURCE_SIZE,
+                "sha256": RUNNER_SOURCE_SHA,
+            },
+            "execution_source_identity_sha256": source_identity[
+                "manifest_sha256"
+            ],
+            "tracked_files_manifest_sha256": source_identity[
+                "tracked_files_manifest_sha256"
+            ],
+            "worktree_files_manifest_sha256": source_identity[
+                "worktree_files_manifest_sha256"
+            ],
+            "orchestration_manifest_sha256": source_identity[
+                "orchestration_manifest_sha256"
+            ],
+            "orchestration_scripts": source_identity["orchestration_scripts"],
+            "environment_prefix_manifest_sha256": prefix_manifest[
+                "manifest_sha256"
+            ],
+            "environment_regular_file_count": prefix_manifest[
+                "regular_file_count"
+            ],
+            "environment_symlink_count": prefix_manifest["symlink_count"],
+            "launch_environment": launch_environment,
+            "launch_environment_sha256": _hash(launch_environment),
+        }
+        if self.bad_launch_argv:
+            launch_binding["argv"][-1] = "7"
+        if self.bad_launch_executable:
+            launch_binding["launcher"] = {
+                "path": "/usr/bin/mpiexec",
+                "resolved_path": "/usr/bin/mpiexec",
+                "sha256": MPI_SHA,
+            }
+        if self.bad_source_manifest:
+            launch_binding["tracked_files_manifest_sha256"] = "f" * 64
+        if self.bad_launch_environment:
+            changed_environment = dict(launch_binding["launch_environment"])
+            changed_environment.pop("PYTHONNOUSERSITE")
+            launch_binding["launch_environment"] = changed_environment
+            launch_binding["launch_environment_sha256"] = _hash(
+                changed_environment
+            )
+        intent_payload = {
+            "schema": "negfpy.remote_validation.release_launch_intent.v1",
+            "launch_binding": launch_binding,
+            "stdout_relative_path": stdout_path.name,
+            "stderr_relative_path": stderr_path.name,
+        }
+        intent_path = self.attempt_root / "mpi-release-launch-intent.json"
+        intent_document = _write_envelope(intent_path, intent_payload)
+        launch_payload = {
+            "schema": "negfpy.remote_validation.release_launch.v2",
+            "launch_binding": launch_binding,
+            "intent": {
+                "relative_path": intent_path.name,
+                "sha256": _file_hash(intent_path),
+            },
+            "intent_payload_sha256": intent_document["payload_sha256"],
+            "started_utc": "2026-07-26T00:00:00Z",
+            "finished_utc": "2026-07-26T00:00:02Z",
+            "returncode": 0,
+            "post_run_verification": {
+                "passed": not self.failed_post_run,
+                "checked_utc": "2026-07-26T00:00:01Z",
+                "execution_source_identity_sha256": source_identity[
+                    "manifest_sha256"
+                ],
+                "environment_prefix_manifest_sha256": prefix_manifest[
+                    "manifest_sha256"
+                ],
+            },
+            "stdout": {
+                "relative_path": stdout_path.name,
+                "sha256": _file_hash(stdout_path),
+            },
+            "stderr": {
+                "relative_path": stderr_path.name,
+                "sha256": _file_hash(stderr_path),
+            },
+        }
+        if self.bad_launch_log_hash:
+            launch_payload["stdout"]["sha256"] = "e" * 64
+        launch_path = self.attempt_root / "mpi-release-launch.json"
+        launch_document = _write_envelope(launch_path, launch_payload)
+        launch_facts = {
+            "schema": "negfpy.remote_validation.release_launch_facts.v1",
+            "receipt_relative_path": launch_path.name,
+            "receipt_file_sha256": _file_hash(launch_path),
+            "receipt_payload_sha256": launch_document["payload_sha256"],
+            "intent_relative_path": intent_path.name,
+            "intent_file_sha256": _file_hash(intent_path),
+            "intent_payload_sha256": intent_document["payload_sha256"],
+            "launcher_file_sha256": MPI_SHA,
+            "python_file_sha256": PYTHON_SHA,
+            "runner_file_sha256": RUNNER_SOURCE_SHA,
+            "execution_source_identity_sha256": source_identity[
+                "manifest_sha256"
+            ],
+            "tracked_files_manifest_sha256": source_identity[
+                "tracked_files_manifest_sha256"
+            ],
+            "worktree_files_manifest_sha256": source_identity[
+                "worktree_files_manifest_sha256"
+            ],
+            "orchestration_manifest_sha256": source_identity[
+                "orchestration_manifest_sha256"
+            ],
+            "environment_prefix_manifest_sha256": prefix_manifest[
+                "manifest_sha256"
+            ],
+            "launch_environment_sha256": _hash(launch_environment),
+            "stdout_relative_path": stdout_path.name,
+            "stdout_file_sha256": _file_hash(stdout_path),
+            "stderr_relative_path": stderr_path.name,
+            "stderr_file_sha256": _file_hash(stderr_path),
+            "selected_rank_count": rank_count,
+            "binding_arguments": binding,
+            "post_run_verified": True,
+            "returncode": 0,
+        }
+        terminal_rank_evidence = [
+            {
+                "rank_count": row["rank_count"],
+                **{
+                    key: row[key]
+                    for key in (
+                        "manifest_file_sha256",
+                        "manifest_payload_sha256",
+                        "worker_result_file_sha256",
+                        "campaign_manifest_file_sha256",
+                        "execution_manifest_file_sha256",
+                        "strict_report_file_sha256",
+                    )
+                },
+                "launcher_memory_preflight_passed": True,
+                "worker_memory_preflight_passed": True,
+                "harmonic_preflight_passed": True,
+                "rank_runtime_count": row["rank_count"],
+            }
+            for row in rank_evidence
+        ]
+        scaling_facts = {
+            "schema": "negfpy.remote_validation.scaling_facts.v1",
+            "selection_relative_path": self.scaling_selection.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "selection_file_sha256": _file_hash(self.scaling_selection),
+            "selection_payload_sha256": selection_document["payload_sha256"],
+            "production_toy_physics_sha256": common_physics,
+            "physics_equal_across_all_ranks": True,
+            "toy_rank_count": rank_count,
+            "toy_mpi_enabled": True,
+            "silicon_rank_count": rank_count,
+            "candidate_speedup": 100.0 / 25.5,
+            "rank_ladder": list(MODULE.RANK_LADDER),
+            "rank_evidence": terminal_rank_evidence,
+            "reused_for_exact_retry": False,
+            "source_attempt": "attempt-001",
+        }
+        harmonic = {
+            "schema": "negfpy.remote_toy_mpi.real_harmonic_preflight.v1",
+            "point_count": 7,
+            "real_physics_executed": True,
+            "passed": True,
+            "artifact_file_sha256": "c" * 64,
+            "evidence_sha256": "d" * 64,
+        }
+        phase_evidence = [
+            {
+                "wave_index": index,
+                "task_manifest_file_sha256": _hash(
+                    {"phase": index, "kind": "task"}
+                ),
+                "execution_manifest_file_sha256": _hash(
+                    {"phase": index, "kind": "execution"}
+                ),
+                "execution_payload_sha256": _hash(
+                    {"phase": index, "kind": "payload"}
+                ),
+                "task_count": (2 if index == 0 else 20 if index == 7 else 1),
+            }
+            for index in range(8)
+        ]
+        mpi_facts = {
+            "schema": "negfpy.remote_validation.mpi_execution_facts.v1",
+            "runner_result_file_sha256": _file_hash(published_runner),
+            "runner_result_payload_sha256": release["document"][
+                "payload_sha256"
+            ],
+            "campaign_manifest_file_sha256": _file_hash(published_campaign),
+            "campaign_manifest_payload_sha256": release["payload"][
+                "campaign_manifest_sha256"
+            ],
+            "execution_manifest_file_sha256": _file_hash(published_execution),
+            "execution_manifest_payload_sha256": _read_json(
+                published_execution
+            )["payload_sha256"],
+            "execution_scientific_sha256": release["payload"][
+                "execution_scientific_sha256"
+            ],
+            "production_toy_physics_sha256": release["payload"][
+                "production_toy_physics_sha256"
+            ],
+            "execution_id": self.release_execution_id,
+            "rank_runtime": release["payload"]["rank_runtime"],
+            "python_file_sha256": PYTHON_SHA,
+            "harmonic_preflight": harmonic,
+            "memory_preflight": release["payload"]["memory_preflight"],
+            "phase_evidence": phase_evidence,
+            "communicator_size": rank_count,
+            "mode": "mpi",
+            "directory_mode": "fresh",
+            "task_count": 28,
+            "release_certified": True,
+            "launch_receipt": launch_facts,
+        }
+        report = _read_json(published_report)
+        report_facts = {
+            "schema": "negfpy.remote_validation.report_facts.v1",
+            "report_relative_path": published_report.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "report_file_sha256": _file_hash(published_report),
+            "report_body_sha256": report["report_sha256"],
+            "schema_version": 4,
+            "protocol": "multidimensional_toy_gate_v2",
+            "protocol_version": 2,
+            "release_certified": True,
+            "multidimensional_outcome_count": 13,
+            "multidimensional_backend": "fft",
+            "harmonic_preflight_point_count": 7,
+            "bounded_backends": ["serial", "threaded", "fft"],
+            "open_system_run_count": 13,
+            "checkpoint_count": 13,
+            "commit": COMMIT,
+            "git_tree": GIT_TREE,
+            "source_tree_sha256": TREE_SHA,
+            "environment_sha256": ENVIRONMENT_SHA,
+            "mpi_execution": mpi_facts,
+            "mpi_scaling": scaling_facts,
+        }
+        report_facts_path = self.attempt_root / "report-facts.json"
+        _write_json(report_facts_path, report_facts)
+        checkpoint_records = [
+            {"name": f"outcome-{index:02d}", "sha256": _hash({"i": index})}
+            for index in range(13)
+        ]
+        _write_json(
+            self.attempt_root / "checkpoint-index.json",
+            {
+                "schema": "negfpy.remote_validation.checkpoint_index.v1",
+                "attempt": self.attempt,
+                "checkpoint_root": "toy-release/scientific-checkpoints",
+                "count": 13,
+                "records": checkpoint_records,
+            },
+        )
+        log_path = self.attempt_root / "production_toy_gate.log"
+        _write_bytes(log_path, b"attempt=1\nreturncode=0\n")
+        terminal = {
+            "schema": "negfpy.remote_validation.job_status.v2",
+            "state": "completed",
+            "commit": COMMIT,
+            "attempt": self.attempt,
+            "attempt_path": attempt_relative,
+            "started_utc": "2026-07-26T00:00:00Z",
+            "finished_utc": "2026-07-26T00:00:02Z",
+            "returncode": 0,
+            "identity_bundle": identity_bundle,
+            "report_facts": report_facts,
+            "scaling_facts": scaling_facts,
+            "mpi_execution_facts": mpi_facts,
+        }
+        status_path = self.attempt_root / "status.json"
+        _write_json(status_path, terminal)
+        _write_json(self.artifacts / "job-status.json", terminal)
+        publication = {
+            "schema": "negfpy.remote_validation.attempt_publication.v1",
+            "attempt": self.attempt,
+            "state": "completed",
+            "commit": COMMIT,
+            "attempt_path": attempt_relative,
+            "status": status_path.relative_to(self.artifacts).as_posix(),
+            "status_sha256": _file_hash(status_path),
+            "log": log_path.relative_to(self.artifacts).as_posix(),
+            "log_sha256": _file_hash(log_path),
+            "report": published_report.relative_to(self.artifacts).as_posix(),
+            "report_sha256": _file_hash(published_report),
+            "report_facts": report_facts,
+            "scaling_selection": self.scaling_selection.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "scaling_selection_sha256": _file_hash(self.scaling_selection),
+            "mpi_release_launch_intent": intent_path.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_release_launch_intent_sha256": _file_hash(intent_path),
+            "mpi_release_launch": launch_path.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_release_launch_sha256": _file_hash(launch_path),
+            "mpi_release_stdout": stdout_path.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_release_stdout_sha256": _file_hash(stdout_path),
+            "mpi_release_stderr": stderr_path.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_release_stderr_sha256": _file_hash(stderr_path),
+            "mpi_runner_result": published_runner.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_runner_result_sha256": _file_hash(published_runner),
+            "mpi_execution_manifest": published_execution.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_execution_manifest_sha256": _file_hash(published_execution),
+            "mpi_campaign_manifest": published_campaign.relative_to(
+                self.artifacts
+            ).as_posix(),
+            "mpi_campaign_manifest_sha256": _file_hash(published_campaign),
+        }
+        publication_path = self.attempt_root / "publication.json"
+        _write_json(publication_path, publication)
+        _write_json(self.artifacts / "current-attempt.json", publication)
+        self.release_runner = published_runner
+        self.release_report = published_report
+        self.publication_path = publication_path
+        self.current_path = self.artifacts / "current-attempt.json"
+        self.intent_path = intent_path
+        self.launch_path = launch_path
 
     def _build_artifacts(self) -> None:
         walls = {1: 100.0, 2: 60.0, 4: 30.0, 8: 25.5, 16: 25.0}
@@ -561,15 +1198,21 @@ class CanonicalFixture:
             "rank_evidence": rank_evidence,
         }
         self.scaling_selection = self.scaling_root / "scaling-selection.json"
-        _write_envelope(self.scaling_selection, selection_payload)
+        selection_document = _write_envelope(
+            self.scaling_selection, selection_payload
+        )
         release = self._build_worker(
             self.release_root,
             profile="release",
             rank_count=8,
             execution_id=self.release_execution_id,
         )
-        self.release_runner = release["path"]
-        self.release_report = release["report_path"]
+        self._build_publication(
+            release=release,
+            selection_document=selection_document,
+            common_physics=common_physics,
+            rank_evidence=rank_evidence,
+        )
         if self.artifact_nonce is not None:
             _write_bytes(self.artifacts / "fixture-nonce.bin", self.artifact_nonce)
         self.artifact_anchor, entries = _refresh_checksums(
@@ -726,6 +1369,32 @@ class ReleaseConfigTests(unittest.TestCase):
             f"\\newcommand{{\\StagingSHA256SUMSRawSHA}}{{{self.fixture.staging_anchor}}}",
             text,
         )
+        self.assertIn(
+            f"\\newcommand{{\\CurrentAttemptSHA}}{{{_file_hash(self.fixture.current_path)}}}",
+            text,
+        )
+        self.assertIn(
+            f"\\newcommand{{\\AttemptPublicationSHA}}{{{_file_hash(self.fixture.publication_path)}}}",
+            text,
+        )
+        self.assertIn(
+            f"\\newcommand{{\\MPIReleaseLaunchSHA}}{{{_file_hash(self.fixture.launch_path)}}}",
+            text,
+        )
+        self.assertIn(
+            f"\\newcommand{{\\MPIReleaseLaunchIntentSHA}}{{{_file_hash(self.fixture.intent_path)}}}",
+            text,
+        )
+        source_identity_sha = _execution_source_identity()["manifest_sha256"]
+        prefix_manifest_sha = _environment_prefix_manifest()["manifest_sha256"]
+        self.assertIn(
+            f"\\newcommand{{\\MPIExecutionSourceIdentitySHA}}{{{source_identity_sha}}}",
+            text,
+        )
+        self.assertIn(
+            f"\\newcommand{{\\MPIEnvironmentPrefixManifestSHA}}{{{prefix_manifest_sha}}}",
+            text,
+        )
         self.assertFalse(any(self.fixture.report.glob(".release_config.tex.*.tmp")))
 
     def test_projection_matches_exact_installed_production_function(self) -> None:
@@ -754,7 +1423,7 @@ class ReleaseConfigTests(unittest.TestCase):
             MODULE.generate_config(**kwargs)
 
     def test_rejects_listed_byte_tamper(self) -> None:
-        target = next((self.fixture.artifacts / "release" / "checkpoints").glob("*.h5"))
+        target = next((self.fixture.artifacts / "toy-release" / "checkpoints").glob("*.h5"))
         target.write_bytes(target.read_bytes() + b"tamper")
         with self.assertRaisesRegex(MODULE.ReleaseConfigError, "SHA256 mismatch"):
             MODULE.generate_config(**self.fixture.kwargs())
@@ -789,22 +1458,145 @@ class ReleaseConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.ReleaseConfigError, "caller anchor mismatch"):
                     MODULE.generate_config(**kwargs)
 
-    def test_rejects_nested_forged_release_report_even_after_rehash(self) -> None:
-        assert self.fixture.release_report is not None
-        assert self.fixture.release_runner is not None
-        report = _read_json(self.fixture.release_report)
-        report["summary"]["release_certified"] = False
-        core = {key: value for key, value in report.items() if key != "report_sha256"}
-        report["report_sha256"] = hashlib.sha256(_compact(core, ensure_ascii=False)).hexdigest()
-        _write_json(self.fixture.release_report, report, ensure_ascii=False)
-        worker_document = _read_json(self.fixture.release_runner)
-        worker = worker_document["payload"]
-        worker["strict_report"]["sha256"] = _file_hash(self.fixture.release_report)
-        worker["production_toy_physics_sha256"] = MODULE._physics_sha256(report)
-        _write_envelope(self.fixture.release_runner, worker)
+    def test_rejects_fully_rehashed_release_report_missing_mandatory_gate(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "missing-gate",
+            omitted_summary_gate="multidimensional_runtime_evidence_passed",
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError,
+            "summary is missing, failed, or has an unexpected gate",
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+
+    def test_rejects_stale_success_when_current_attempt_failed(self) -> None:
+        stale_publication = _read_json(self.fixture.publication_path)
+        failed_root = self.fixture.artifacts / "attempts" / "attempt-002"
+        failed_status = _read_json(self.fixture.attempt_root / "status.json")
+        failed_status.update(
+            {
+                "state": "failed",
+                "attempt": 2,
+                "attempt_path": "attempts/attempt-002",
+                "returncode": 2,
+            }
+        )
+        status_path = failed_root / "status.json"
+        _write_json(status_path, failed_status)
+        _write_json(self.fixture.artifacts / "job-status.json", failed_status)
+        failed_publication = dict(stale_publication)
+        failed_publication.update(
+            {
+                "attempt": 2,
+                "state": "failed",
+                "attempt_path": "attempts/attempt-002",
+                "status": "attempts/attempt-002/status.json",
+                "status_sha256": _file_hash(status_path),
+            }
+        )
+        _write_json(failed_root / "publication.json", failed_publication)
+        _write_json(
+            self.fixture.artifacts / "current-attempt.json", failed_publication
+        )
         self.fixture.refresh_artifact_anchor()
-        with self.assertRaisesRegex(MODULE.ReleaseConfigError, "release certification state"):
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "not an exact completed publication"
+        ):
             MODULE.generate_config(**self.fixture.kwargs())
+
+    def test_rejects_absent_published_launch_receipt(self) -> None:
+        self.fixture.launch_path.unlink()
+        self.fixture.refresh_artifact_anchor()
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "published MPI release launch is not SHA256SUMS-listed"
+        ):
+            MODULE.generate_config(**self.fixture.kwargs())
+
+    def test_rejects_fully_rehashed_failed_artifact_validation(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "failed-artifact",
+            artifact_validation_status="scientific_failure",
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "artifact validation failed or changed schema"
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_fully_rehashed_bad_launch_argv(self) -> None:
+        forged = CanonicalFixture(self.root / "bad-argv", bad_launch_argv=True)
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "launch identity, argv, binding"
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_fully_rehashed_bad_launch_executable(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "bad-executable", bad_launch_executable=True
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "executables/runner are not from the exact deployment"
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_fully_rehashed_bad_launch_log_hash(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "bad-log-hash", bad_launch_log_hash=True
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "stdout receipt/publication binding changed"
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_manifest_listed_runner_not_selected_by_publication(self) -> None:
+        kwargs = self.fixture.kwargs()
+        kwargs["release_runner_relative"] = (
+            self.fixture.release_root
+            / "runner-results"
+            / f"{self.fixture.release_execution_id}.json"
+        ).relative_to(self.fixture.artifacts).as_posix()
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "do not equal current publication selections"
+        ):
+            MODULE.generate_config(**kwargs)
+
+    def test_rejects_absent_published_launch_intent(self) -> None:
+        self.fixture.intent_path.unlink()
+        self.fixture.refresh_artifact_anchor()
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError,
+            "published MPI release launch intent is not SHA256SUMS-listed",
+        ):
+            MODULE.generate_config(**self.fixture.kwargs())
+
+    def test_rejects_fully_rehashed_source_manifest_drift(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "bad-source-manifest", bad_source_manifest=True
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError,
+            "launch binding differs from archived source/environment manifests",
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_fully_rehashed_unscrubbed_launch_environment(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "bad-launch-environment", bad_launch_environment=True
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "scrubbed environment changed"
+        ):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_failed_post_run_source_environment_verification(self) -> None:
+        forged = CanonicalFixture(
+            self.root / "failed-post-run", failed_post_run=True
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError,
+            "post-run source/environment verification is incomplete or failed",
+        ):
+            MODULE.generate_config(**forged.kwargs())
 
     def test_rejects_noncanonical_checksum_manifest(self) -> None:
         manifest = self.fixture.artifacts / "SHA256SUMS"
