@@ -31,8 +31,9 @@
     "n_layers": 30,
     "principal_layer_size": 2,
     "auto_principal_layer_enlargement": true,
-    "infer_fc01_from_negative_dx": true,
-    "enforce_hermitian_fc00": true,
+    "infer_fc01_from_negative_dx": false,
+    "enforce_hermitian_fc00": false,
+    "dtype": "complex128",
     "mass_mode": "ifc",
     "drop_nyquist_transverse": false,
     "onsite_pinning": 0.0

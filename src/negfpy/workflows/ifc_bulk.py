@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.integrate import trapezoid
 
 from negfpy.core import (
     heat_current_cumulants_from_k_moments,
@@ -246,6 +247,95 @@ def _periodic_kmesh_has_duplicates(kpoints: list[tuple[float, ...]]) -> bool:
     return len(set(canonical)) != len(canonical)
 
 
+def _validated_eta_controls(
+    solver_cfg: dict[str, Any],
+) -> tuple[str, float, tuple[float, ...]]:
+    """Validate causal lead regulators before any harmonic solve."""
+
+    eta_scheme = str(
+        solver_cfg.get("eta_scheme", "adaptive_global")
+    ).lower().replace("-", "_")
+
+    eta_fixed_raw = solver_cfg.get("eta_fixed", 1.0e-4)
+    if isinstance(eta_fixed_raw, (bool, np.bool_)):
+        raise ValueError("solver.eta_fixed must be a finite positive number.")
+    try:
+        eta_fixed = float(eta_fixed_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "solver.eta_fixed must be a finite positive number."
+        ) from exc
+    if not np.isfinite(eta_fixed) or eta_fixed <= 0.0:
+        raise ValueError("solver.eta_fixed must be a finite positive number.")
+
+    eta_values_raw = solver_cfg.get("eta_values", DEFAULT_ETA_VALUES)
+    if isinstance(eta_values_raw, (str, bytes)) or not hasattr(
+        eta_values_raw, "__iter__"
+    ):
+        raise ValueError(
+            "solver.eta_values must be a non-empty sequence of finite "
+            "positive, nonduplicate values."
+        )
+    try:
+        eta_values = tuple(float(value) for value in eta_values_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "solver.eta_values must be a non-empty sequence of finite "
+            "positive, nonduplicate values."
+        ) from exc
+    if (
+        not eta_values
+        or any(not np.isfinite(value) or value <= 0.0 for value in eta_values)
+        or len(set(eta_values)) != len(eta_values)
+    ):
+        raise ValueError(
+            "solver.eta_values must be a non-empty sequence of finite "
+            "positive, nonduplicate values."
+        )
+
+    eta_device_raw = solver_cfg.get("eta_device", None)
+    if eta_device_raw is not None:
+        if isinstance(eta_device_raw, (bool, np.bool_)):
+            raise ValueError(
+                "solver.eta_device must be null or a finite non-negative "
+                "number."
+            )
+        try:
+            eta_device = float(eta_device_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "solver.eta_device must be null or a finite non-negative "
+                "number."
+            ) from exc
+        if not np.isfinite(eta_device) or eta_device < 0.0:
+            raise ValueError(
+                "solver.eta_device must be null or a finite non-negative "
+                "number."
+            )
+
+    return eta_scheme, eta_fixed, eta_values
+
+
+def _source_geometry_contract(ifc: IFCData) -> dict[str, Any]:
+    """Describe whether the source reader promises complete crystal geometry."""
+
+    metadata = dict(ifc.metadata) if isinstance(ifc.metadata, dict) else {}
+    source_format = str(metadata.get("source_format", "")).strip()
+    promised_formats = {
+        "qe_q2r_fc",
+        "phonopy_force_constants",
+    }
+    explicitly_promised = metadata.get("geometry_promised", None)
+    if explicitly_promised is None:
+        geometry_promised = source_format in promised_formats
+    else:
+        geometry_promised = bool(explicitly_promised)
+    return {
+        "source_format": source_format,
+        "geometry_promised": bool(geometry_promised),
+    }
+
+
 def _harmonic_release_preflight(
     cfg: dict[str, Any],
     *,
@@ -253,6 +343,7 @@ def _harmonic_release_preflight(
     kmesh: dict[str, Any] | None,
     results: dict[str, Any] | None = None,
     ifc_audit: dict[str, Any] | None = None,
+    operator_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Enforce and document the release-safe harmonic transport contract.
 
@@ -312,6 +403,24 @@ def _harmonic_release_preflight(
         success="one eta is shared by the complete q grid at each frequency",
     )
 
+    try:
+        validated_scheme, eta_fixed, eta_values = _validated_eta_controls(
+            solver_cfg
+        )
+        causal_eta_controls = validated_scheme == eta_scheme
+        eta_failure = ""
+    except ValueError as exc:
+        eta_fixed = np.nan
+        eta_values = ()
+        causal_eta_controls = False
+        eta_failure = str(exc)
+    record(
+        "causal_eta_controls",
+        causal_eta_controls,
+        failure=eta_failure or "solver eta controls are invalid",
+        success="lead eta controls are finite, positive, and nonduplicate",
+    )
+
     min_fraction_raw = solver_cfg.get("min_success_fraction", 1.0)
     try:
         min_fraction = float(min_fraction_raw)
@@ -359,17 +468,181 @@ def _harmonic_release_preflight(
         success="transverse q meshes contain each periodic point exactly once",
     )
 
-    if ifc_audit is not None:
-        final_ifc_audit = dict(ifc_audit.get("final", {}))
-        record(
-            "final_ifc_audit",
-            final_ifc_audit.get("passed") is True,
-            failure=(
-                "the final IFC dataset failed the mandatory reciprocal, ASR, "
-                "rotational, mapping, Hermiticity, or stability audit"
-            ),
-            success="the final IFC dataset passed every mandatory audit",
-        )
+    audit_present = bool(
+        isinstance(ifc_audit, dict)
+        and isinstance(ifc_audit.get("final"), dict)
+    )
+    record(
+        "ifc_audit_present",
+        audit_present,
+        failure="the mandatory final IFC audit payload is absent",
+        success="the mandatory final IFC audit payload is present",
+    )
+    final_ifc_audit = (
+        dict(ifc_audit.get("final", {})) if audit_present else {}
+    )
+    record(
+        "final_ifc_audit",
+        final_ifc_audit.get("passed") is True,
+        failure=(
+            "the final IFC dataset failed the mandatory reciprocal, ASR, "
+            "rotational, mapping, Hermiticity, or stability audit"
+        ),
+        success="the final IFC dataset passed every mandatory audit",
+    )
+
+    source_contract = (
+        dict(ifc_audit.get("source", {})) if audit_present else {}
+    )
+    geometry_promised = source_contract.get("geometry_promised") is True
+    final_metrics = dict(final_ifc_audit.get("metrics", {}))
+    geometry_complete = bool(
+        final_ifc_audit.get("mapping_valid") is True
+        and final_metrics.get("geometry_metadata_complete") == 1.0
+    )
+    rotational_complete = bool(
+        final_ifc_audit.get("rotational_geometry_complete") is True
+    )
+    rotational_applicable = bool(
+        final_ifc_audit.get("rotational_applicable") is True
+    )
+    rotational_valid = bool(
+        final_ifc_audit.get("rotational_valid") is True
+    )
+    record(
+        "promised_mapping_geometry_complete",
+        (not geometry_promised) or geometry_complete,
+        failure=(
+            "the IFC source format promises crystal geometry, but the final "
+            "mapping geometry is incomplete or invalid"
+        ),
+        success=(
+            "promised source geometry is complete and mapping-valid"
+            if geometry_promised
+            else "the source format does not promise complete geometry"
+        ),
+    )
+    record(
+        "promised_rotational_audit_applicable",
+        (not geometry_promised)
+        or (rotational_complete and rotational_applicable),
+        failure=(
+            "the IFC source format promises Cartesian geometry, but the final "
+            "rotational audit is not applicable"
+        ),
+        success=(
+            "the rotational audit is applicable to the promised geometry"
+            if geometry_promised
+            else "rotational applicability is not required by this source"
+        ),
+    )
+    record(
+        "promised_rotational_audit_valid",
+        (not geometry_promised) or rotational_valid,
+        failure=(
+            "the final IFC rotational audit failed for a source that promises "
+            "Cartesian geometry"
+        ),
+        success=(
+            "the promised-geometry rotational audit passed"
+            if geometry_promised
+            else "rotational validity is governed by the final IFC audit"
+        ),
+    )
+
+    model_cfg = dict(cfg.get("model", {}))
+    ifc_cfg = dict(cfg.get("ifc", {}))
+    try:
+        onsite_pinning = float(model_cfg.get("onsite_pinning", 0.0))
+    except (TypeError, ValueError):
+        onsite_pinning = np.nan
+    record(
+        "zero_onsite_pinning",
+        bool(np.isfinite(onsite_pinning) and onsite_pinning == 0.0),
+        failure="model.onsite_pinning must be exactly zero in a release run",
+        success="the solved operator has no artificial onsite pinning",
+    )
+    record(
+        "no_negative_dx_inference",
+        not bool(model_cfg.get("infer_fc01_from_negative_dx", False)),
+        failure=(
+            "model.infer_fc01_from_negative_dx must be false in a release run"
+        ),
+        success="no missing transport coupling is inferred",
+    )
+    record(
+        "no_fc00_hermitization",
+        not bool(model_cfg.get("enforce_hermitian_fc00", False)),
+        failure=(
+            "model.enforce_hermitian_fc00 must be false in a release run"
+        ),
+        success="the IFC onsite blocks are not silently Hermitized",
+    )
+    record(
+        "ifc_masses",
+        str(model_cfg.get("mass_mode", "ifc")).lower().replace("-", "_")
+        == "ifc",
+        failure="model.mass_mode must be 'ifc' in a release run",
+        success="the final operator uses the audited IFC masses",
+    )
+    record(
+        "no_nyquist_drop",
+        not bool(model_cfg.get("drop_nyquist_transverse", False)),
+        failure=(
+            "model.drop_nyquist_transverse must be false in a release run"
+        ),
+        success="no transverse Nyquist support is removed",
+    )
+    record(
+        "no_builder_nyquist_split",
+        not bool(model_cfg.get("nyquist_split_half", False)),
+        failure="model.nyquist_split_half must be false in a release run",
+        success=(
+            "Nyquist support is accepted only when represented explicitly by "
+            "the source reader"
+        ),
+    )
+    record(
+        "no_transverse_term_cutoff",
+        ifc_cfg.get("dy_cutoff", None) is None
+        and ifc_cfg.get("dz_cutoff", None) is None,
+        failure=(
+            "ifc.dy_cutoff and ifc.dz_cutoff must be null in a release run"
+        ),
+        success="the complete audited transverse IFC support is retained",
+    )
+    dtype_raw = model_cfg.get("dtype", "complex128")
+    try:
+        safe_dtype = np.dtype(dtype_raw) == np.dtype(np.complex128)
+    except (TypeError, ValueError):
+        safe_dtype = False
+    record(
+        "complex128_operator",
+        safe_dtype,
+        failure="model.dtype must be complex128 in a release run",
+        success="the final harmonic operator uses complex128",
+    )
+
+    operator_audit_present = bool(
+        isinstance(operator_audit, dict)
+        and operator_audit.get("schema")
+        == "negfpy.material_kspace_operator_audit"
+    )
+    record(
+        "operator_audit_present",
+        operator_audit_present,
+        failure="the mandatory final MaterialKspace operator audit is absent",
+        success="the final MaterialKspace operator audit is present",
+    )
+    record(
+        "final_operator_matches_ifc",
+        bool(operator_audit_present and operator_audit.get("passed") is True),
+        failure=(
+            "the final MaterialKspace operator differs from the audited IFC "
+            "masses, support, blocks, Hermiticity, or stability contract"
+        ),
+        success="the exact operator solved matches the audited final IFC",
+    )
 
     if results is not None:
         summary = dict(results.get("summary", {}))
@@ -399,7 +672,7 @@ def _harmonic_release_preflight(
     passed = bool(requested and not failures)
     report = {
         "schema": "negfpy.harmonic_release_preflight",
-        "schema_version": 1,
+        "schema_version": 2,
         "requested": requested,
         "enforced": requested,
         "phase": phase,
@@ -411,10 +684,15 @@ def _harmonic_release_preflight(
         "failure_reasons": failures,
         "controls": {
             "eta_scheme": eta_scheme,
+            "eta_fixed": eta_fixed,
+            "eta_values": eta_values,
             "min_success_fraction": min_fraction_raw,
             "eta_device": eta_device_raw,
             "duplicate_qmesh_sections": duplicate_sections,
-            "ifc_audit_present": ifc_audit is not None,
+            "ifc_audit_present": audit_present,
+            "operator_audit_present": operator_audit_present,
+            "source_format": source_contract.get("source_format", ""),
+            "geometry_promised": geometry_promised,
         },
     }
     if requested and failures:
@@ -640,7 +918,9 @@ def _thermal_conductance_from_spectrum(
         denom = (1.0 - y) ** 2
         kernel[mid] = (x[mid] ** 2) * y / denom
         integrand = KB_J_K * tvals * kernel
-        gvals[i] = float((1.0 / (2.0 * np.pi)) * np.trapz(integrand, omega_rad_s))
+        gvals[i] = float(
+            (1.0 / (2.0 * np.pi)) * trapezoid(integrand, omega_rad_s)
+        )
     return gvals
 
 
@@ -1160,6 +1440,304 @@ def _apply_mass_mode(params, mass_mode_raw: str):
     raise ValueError("model.mass_mode must be one of: ifc, unit.")
 
 
+def _grouped_ifc_operator_terms(
+    ifc: IFCData,
+    principal_layer_size: int,
+) -> dict[str, dict[tuple[int, int], np.ndarray]]:
+    """Independently group final IFC terms into exact principal-layer blocks."""
+
+    size = int(principal_layer_size)
+    if size <= 0:
+        raise ValueError("principal_layer_size must be positive.")
+    base_ndof = int(np.asarray(ifc.masses).size) * int(ifc.dof_per_atom)
+    ndof = size * base_ndof
+    grouped: dict[str, dict[tuple[int, int], np.ndarray]] = {
+        "fc00": {},
+        "fc01": {},
+        "fc10": {},
+    }
+
+    for term in ifc.terms:
+        block = np.asarray(term.block, dtype=np.complex128)
+        if block.shape != (base_ndof, base_ndof):
+            raise ValueError("Final IFC term block has an unexpected shape.")
+        for row_cell in range(size):
+            column_absolute = row_cell + int(term.dx)
+            layer_shift = column_absolute // size
+            if layer_shift not in {-1, 0, 1}:
+                raise ValueError(
+                    "Final IFC support exceeds nearest-neighbor principal "
+                    "layers after grouping."
+                )
+            column_cell = column_absolute - layer_shift * size
+            name = {0: "fc00", 1: "fc01", -1: "fc10"}[layer_shift]
+            key = (int(term.dy), int(term.dz))
+            if key not in grouped[name]:
+                grouped[name][key] = np.zeros(
+                    (ndof, ndof), dtype=np.complex128
+                )
+            rows = slice(
+                row_cell * base_ndof, (row_cell + 1) * base_ndof
+            )
+            columns = slice(
+                column_cell * base_ndof, (column_cell + 1) * base_ndof
+            )
+            grouped[name][key][rows, columns] += block
+    return grouped
+
+
+def _operator_map_hash(
+    masses: np.ndarray,
+    maps: dict[str, dict[tuple[int, int], np.ndarray]],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(np.asarray(masses, dtype="<f8").tobytes(order="C"))
+    for name in ("fc00", "fc01", "fc10"):
+        digest.update(name.encode("ascii"))
+        for key in sorted(maps[name]):
+            digest.update(np.asarray(key, dtype="<i8").tobytes(order="C"))
+            digest.update(
+                np.asarray(
+                    maps[name][key], dtype="<c16", order="C"
+                ).tobytes(order="C")
+            )
+    return digest.hexdigest()
+
+
+def _audit_material_kspace_operator(
+    ifc: IFCData,
+    params,
+    device,
+    *,
+    random_seed: int = 20260726,
+    random_q_count: int = 4,
+    rtol: float = 1.0e-10,
+    atol: float = 1.0e-12,
+    stability_atol: float = 1.0e-8,
+) -> dict[str, Any]:
+    """Audit the exact MaterialKspace operator used by the solver.
+
+    This comparison independently regroups the already-audited final IFC.  It
+    detects any post-audit mass replacement, support completion/removal,
+    block Hermitization, pinning, or other builder mutation.
+    """
+
+    base_masses = np.asarray(ifc.masses, dtype=np.float64)
+    params_masses = np.asarray(params.masses, dtype=np.float64)
+    if params_masses.size % base_masses.size:
+        raise ValueError(
+            "MaterialKspace masses do not contain an integer number of final "
+            "IFC cells."
+        )
+    principal_layer_size = int(params_masses.size // base_masses.size)
+    expected_masses = np.tile(base_masses, principal_layer_size)
+    expected = _grouped_ifc_operator_terms(ifc, principal_layer_size)
+    actual = {
+        "fc00": {
+            tuple(map(int, key)): np.asarray(value)
+            for key, value in params.fc00_terms.items()
+        },
+        "fc01": {
+            tuple(map(int, key)): np.asarray(value)
+            for key, value in params.fc01_terms.items()
+        },
+        "fc10": {
+            tuple(map(int, key)): np.asarray(value)
+            for key, value in (
+                {} if params.fc10_terms is None else params.fc10_terms
+            ).items()
+        },
+    }
+
+    support_mismatches: dict[str, dict[str, list[list[int]]]] = {}
+    maximum_block_error = 0.0
+    block_scale = 1.0
+    finite_blocks = True
+    complex128_blocks = True
+    for name in ("fc00", "fc01", "fc10"):
+        expected_keys = set(expected[name])
+        actual_keys = set(actual[name])
+        support_mismatches[name] = {
+            "missing": [list(key) for key in sorted(expected_keys - actual_keys)],
+            "unexpected": [list(key) for key in sorted(actual_keys - expected_keys)],
+        }
+        for key in sorted(expected_keys & actual_keys):
+            expected_block = np.asarray(expected[name][key])
+            actual_block = np.asarray(actual[name][key])
+            if actual_block.shape != expected_block.shape:
+                maximum_block_error = float("inf")
+                continue
+            finite_blocks = bool(
+                finite_blocks
+                and np.all(np.isfinite(actual_block.real))
+                and np.all(np.isfinite(actual_block.imag))
+            )
+            complex128_blocks = bool(
+                complex128_blocks
+                and actual_block.dtype == np.dtype(np.complex128)
+            )
+            block_scale = max(
+                block_scale, float(np.max(np.abs(expected_block)))
+            )
+            maximum_block_error = max(
+                maximum_block_error,
+                float(np.max(np.abs(actual_block - expected_block))),
+            )
+    support_exact = all(
+        not values["missing"] and not values["unexpected"]
+        for values in support_mismatches.values()
+    )
+    block_threshold = float(atol + rtol * block_scale)
+
+    def sum_terms(
+        terms: dict[tuple[int, int], np.ndarray], ky: float, kz: float
+    ) -> np.ndarray:
+        return _sum_k_terms(
+            terms,
+            ky=ky,
+            kz=kz,
+            ndof=int(expected_masses.size * int(ifc.dof_per_atom)),
+        )
+
+    mass_vector = np.repeat(expected_masses, int(ifc.dof_per_atom))
+    inverse_sqrt_mass = 1.0 / np.sqrt(mass_vector)
+
+    def normalize(block: np.ndarray) -> np.ndarray:
+        return (
+            inverse_sqrt_mass[:, None]
+            * np.asarray(block, dtype=np.complex128)
+            * inverse_sqrt_mass[None, :]
+        )
+
+    rng = np.random.default_rng(int(random_seed))
+    qpoints = [
+        (0.0, 0.0, 0.0),
+        (float(np.pi), 0.0, 0.0),
+        (0.0, float(np.pi), 0.0),
+        (0.0, 0.0, float(np.pi)),
+    ]
+    qpoints.extend(
+        tuple(float(value) for value in row)
+        for row in rng.uniform(
+            -np.pi, np.pi, size=(int(random_q_count), 3)
+        )
+    )
+
+    maximum_explicit_error = 0.0
+    maximum_solved_error = 0.0
+    maximum_device_block_error = 0.0
+    maximum_hermiticity_error = 0.0
+    minimum_eigenvalue = float("inf")
+    operator_scale = 1.0
+    for qx, ky, kz in qpoints:
+        expected_d00 = normalize(sum_terms(expected["fc00"], ky, kz))
+        expected_d01 = normalize(sum_terms(expected["fc01"], ky, kz))
+        expected_d10 = normalize(sum_terms(expected["fc10"], ky, kz))
+        expected_dq = (
+            expected_d00
+            + expected_d01 * np.exp(1j * qx)
+            + expected_d10 * np.exp(-1j * qx)
+        )
+
+        actual_d00 = normalize(sum_terms(actual["fc00"], ky, kz))
+        actual_d01 = normalize(sum_terms(actual["fc01"], ky, kz))
+        actual_d10 = normalize(sum_terms(actual["fc10"], ky, kz))
+        actual_explicit = (
+            actual_d00
+            + actual_d01 * np.exp(1j * qx)
+            + actual_d10 * np.exp(-1j * qx)
+        )
+
+        solved_device = device.device((ky, kz))
+        solved_d00 = np.asarray(solved_device.onsite_blocks[0])
+        solved_d01 = (
+            np.asarray(solved_device.coupling_blocks[0])
+            if solved_device.coupling_blocks
+            else actual_d01
+        )
+        solved_dq = (
+            solved_d00
+            + solved_d01 * np.exp(1j * qx)
+            + solved_d01.conj().T * np.exp(-1j * qx)
+        )
+        for onsite in solved_device.onsite_blocks:
+            maximum_device_block_error = max(
+                maximum_device_block_error,
+                float(np.max(np.abs(np.asarray(onsite) - actual_d00))),
+            )
+        for coupling in solved_device.coupling_blocks:
+            maximum_device_block_error = max(
+                maximum_device_block_error,
+                float(np.max(np.abs(np.asarray(coupling) - actual_d01))),
+            )
+
+        operator_scale = max(
+            operator_scale, float(np.max(np.abs(expected_dq)))
+        )
+        maximum_explicit_error = max(
+            maximum_explicit_error,
+            float(np.max(np.abs(actual_explicit - expected_dq))),
+        )
+        maximum_solved_error = max(
+            maximum_solved_error,
+            float(np.max(np.abs(solved_dq - expected_dq))),
+        )
+        maximum_hermiticity_error = max(
+            maximum_hermiticity_error,
+            float(np.max(np.abs(solved_dq - solved_dq.conj().T))),
+        )
+        eigenvalues = np.linalg.eigvalsh(
+            0.5 * (solved_dq + solved_dq.conj().T)
+        )
+        minimum_eigenvalue = min(minimum_eigenvalue, float(eigenvalues[0]))
+
+    operator_threshold = float(atol + rtol * operator_scale)
+    checks = {
+        "masses_exact": bool(np.array_equal(params_masses, expected_masses)),
+        "support_exact": bool(support_exact),
+        "blocks_finite": bool(finite_blocks),
+        "blocks_complex128": bool(complex128_blocks),
+        "blocks_exact": bool(maximum_block_error <= block_threshold),
+        "zero_onsite_pinning": bool(float(params.onsite_pinning) == 0.0),
+        "explicit_operator_matches_ifc": bool(
+            maximum_explicit_error <= operator_threshold
+        ),
+        "solved_operator_matches_ifc": bool(
+            maximum_solved_error <= operator_threshold
+        ),
+        "device_blocks_match_params": bool(
+            maximum_device_block_error <= operator_threshold
+        ),
+        "hermitian": bool(
+            maximum_hermiticity_error <= operator_threshold
+        ),
+        "stable": bool(minimum_eigenvalue >= -float(stability_atol)),
+    }
+    return {
+        "schema": "negfpy.material_kspace_operator_audit",
+        "schema_version": 1,
+        "passed": bool(all(checks.values())),
+        "checks": checks,
+        "random_seed": int(random_seed),
+        "qpoints": [list(qpoint) for qpoint in qpoints],
+        "principal_layer_size": principal_layer_size,
+        "expected_hash": _operator_map_hash(expected_masses, expected),
+        "actual_hash": _operator_map_hash(params_masses, actual),
+        "support_mismatches": support_mismatches,
+        "metrics": {
+            "maximum_block_error": maximum_block_error,
+            "block_threshold": block_threshold,
+            "maximum_explicit_operator_error": maximum_explicit_error,
+            "maximum_solved_operator_error": maximum_solved_error,
+            "maximum_device_block_error": maximum_device_block_error,
+            "maximum_hermiticity_error": maximum_hermiticity_error,
+            "operator_threshold": operator_threshold,
+            "minimum_eigenvalue": minimum_eigenvalue,
+            "stability_floor": -float(stability_atol),
+        },
+    }
+
+
 def _apply_transverse_stability_controls(params, *, ifc_metadata: dict[str, Any], drop_nyquist: bool):
     """Apply optional Nyquist drop and required Nyquist pair-symmetry stabilization."""
     nyquist_info = {"dropped_dy": None, "dropped_dz": None, "n_dropped_fc00": 0, "n_dropped_fc01": 0, "n_dropped_fc10": 0}
@@ -1554,9 +2132,9 @@ def _run_transmission(
 ) -> dict[str, Any]:
     scfg = dict(cfg.get("solver", {}))
     sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
-    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
-    eta_fixed = float(scfg.get("eta_fixed", 1e-4))
-    eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
+    eta_scheme, eta_fixed, eta_values_base = _validated_eta_controls(
+        scfg
+    )
     eta_device_raw = scfg.get("eta_device", None)
     eta_device = None if eta_device_raw is None else float(eta_device_raw)
     min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
@@ -1803,9 +2381,9 @@ def _run_dos(
     dcfg = dict(cfg.get("dos", {}))
 
     sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
-    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
-    eta_fixed = float(scfg.get("eta_fixed", 1e-4))
-    eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
+    eta_scheme, eta_fixed, eta_values_base = _validated_eta_controls(
+        scfg
+    )
     min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
     max_eta_over_omega_raw = scfg.get("max_eta_over_omega", None)
     max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
@@ -2237,8 +2815,9 @@ def _compute_fcs_k_moments(
 ) -> dict[str, np.ndarray]:
     scfg = dict(cfg.get("solver", {}))
     sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
-    eta_fixed = float(scfg.get("eta_fixed", 1e-4))
-    eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
+    eta_scheme, eta_fixed, eta_values_base = _validated_eta_controls(
+        scfg
+    )
     eta_device_raw = scfg.get("eta_device", None)
     eta_device = None if eta_device_raw is None else float(eta_device_raw)
     min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
@@ -2247,7 +2826,6 @@ def _compute_fcs_k_moments(
     max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
     eta_ratio_cm1_min_raw = scfg.get("eta_ratio_cm1_min", None)
     eta_ratio_cm1_min = None if eta_ratio_cm1_min_raw is None else float(eta_ratio_cm1_min_raw)
-    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
     if eta_scheme not in {"fixed", "adaptive_global"}:
         eta_scheme = "adaptive_global"
 
@@ -2531,9 +3109,10 @@ def _default_template() -> dict[str, Any]:
             "n_layers": 30,
             "principal_layer_size": 2,
             "auto_principal_layer_enlargement": True,
-            "infer_fc01_from_negative_dx": True,
-            "enforce_hermitian_fc00": True,
+            "infer_fc01_from_negative_dx": False,
+            "enforce_hermitian_fc00": False,
             "nyquist_split_half": False,
+            "dtype": "complex128",
             "mass_mode": "ifc",
             "drop_nyquist_transverse": False,
             "n1_transport_unwrap": "auto",
@@ -2817,6 +3396,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     git_is_dirty = _git_dirty(workspace_root)
 
     ifc_raw = read_ifc(ifc_path, reader=reader)
+    release_requested = bool(run_cfg.get("release_preflight", False))
     raw_ifc_audit = audit_ifc_data(ifc_raw)
     n_terms_raw = len(ifc_raw.terms)
     asr_residual_max = None
@@ -2845,9 +3425,10 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     ifc_audit = ifc_audit_payload(
         raw=raw_ifc_audit,
         final=final_ifc_audit,
-        release_preflight=bool(run_cfg.get("release_preflight", False)),
+        release_preflight=release_requested,
     )
-    if bool(run_cfg.get("release_preflight", False)) and not final_ifc_audit.passed:
+    ifc_audit["source"] = _source_geometry_contract(ifc_raw)
+    if release_requested and not final_ifc_audit.passed:
         failure_detail = "; ".join(final_ifc_audit.errors)
         if not failure_detail:
             failure_detail = "one or more mandatory IFC checks failed"
@@ -2861,22 +3442,44 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         onsite_pinning=float(mcfg.get("onsite_pinning", 0.0)),
         principal_layer_size=(None if mcfg.get("principal_layer_size", None) is None else int(mcfg["principal_layer_size"])),
         auto_principal_layer_enlargement=bool(mcfg.get("auto_principal_layer_enlargement", True)),
-        infer_fc01_from_negative_dx=bool(mcfg.get("infer_fc01_from_negative_dx", True)),
-        enforce_hermitian_fc00=bool(mcfg.get("enforce_hermitian_fc00", True)),
+        infer_fc01_from_negative_dx=bool(
+            mcfg.get("infer_fc01_from_negative_dx", not release_requested)
+        ),
+        enforce_hermitian_fc00=bool(
+            mcfg.get("enforce_hermitian_fc00", not release_requested)
+        ),
         nyquist_split_half=bool(mcfg.get("nyquist_split_half", False)),
         dtype=str(mcfg.get("dtype", "complex128")),
     )
     params = build_material_kspace_params(ifc=ifc_model, config=build_cfg)
     params, mass_mode = _apply_mass_mode(params, mcfg.get("mass_mode", "ifc"))
     drop_nyquist = bool(mcfg.get("drop_nyquist_transverse", False))
-    params, nyquist_info, pm_sym_info = _apply_transverse_stability_controls(
-        params,
-        ifc_metadata=dict(ifc_model.metadata),
-        drop_nyquist=drop_nyquist,
-    )
+    if release_requested:
+        nyquist_info = {
+            "enabled": False,
+            "reason": "release_exact_audited_operator",
+            "n_dropped_fc00": 0,
+            "n_dropped_fc01": 0,
+            "n_dropped_fc10": 0,
+        }
+        pm_sym_info = {
+            "enabled": False,
+            "reason": "release_exact_audited_operator",
+        }
+    else:
+        params, nyquist_info, pm_sym_info = _apply_transverse_stability_controls(
+            params,
+            ifc_metadata=dict(ifc_model.metadata),
+            drop_nyquist=drop_nyquist,
+        )
 
     lead_left, lead_right, device_to_lead_left, device_to_lead_right = _build_interface_contacts(params)
     device = material_kspace_device(n_layers=n_layers, params=params)
+    operator_audit = _audit_material_kspace_operator(
+        ifc_model,
+        params,
+        device,
+    )
 
     kmesh_info = _prepare_kmesh(cfg)
     _harmonic_release_preflight(
@@ -2885,6 +3488,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         kmesh=kmesh_info,
         results=None,
         ifc_audit=ifc_audit,
+        operator_audit=operator_audit,
     )
     results: dict[str, Any]
     omega_info: dict[str, Any] | None = None
@@ -2942,6 +3546,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         kmesh=kmesh_info,
         results=results,
         ifc_audit=ifc_audit,
+        operator_audit=operator_audit,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3159,6 +3764,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "lattice_vectors": None if ifc_model.lattice_vectors is None else np.asarray(ifc_model.lattice_vectors).tolist(),
             "metadata": dict(ifc_model.metadata),
             "audit": ifc_audit,
+            "operator_audit": operator_audit,
             "correction": {
                 "name": "translational_asr_on_self_term",
                 "requested": bool(enforce_asr),
@@ -3181,7 +3787,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "n1_transport_unwrap": n1_unwrap_mode,
             "n1_transport_unwrap_info": n1_unwrap_info,
             "nyquist_filter": nyquist_info,
-            "enforce_transverse_pm_symmetry": True,
+            "enforce_transverse_pm_symmetry": not release_requested,
             "pm_symmetry": pm_sym_info,
             "onsite_pinning": float(build_cfg.onsite_pinning),
             "thickness_angstrom": thickness_angstrom,
