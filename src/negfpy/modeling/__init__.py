@@ -9,7 +9,15 @@ from .atomic_masses import ATOMIC_MASS_AMU, get_atomic_mass_amu
 from .ifc_tools import enforce_translational_asr_on_self_term
 from .schema import BuildConfig, IFCData, IFCTerm, InterfaceData
 from .units import qe_ev_to_omega, qe_omega_to_cm1, qe_omega_to_ev, qe_omega_to_rad_s, qe_omega_to_thz
-from .validators import validate_ifc_data, validate_material_kspace_params, validate_transport_connectivity
+from .validators import (
+    IFCDynamicalComparison,
+    IFCDynamicalReference,
+    basis_phase_unitary,
+    compare_ifc_dynamical_matrices,
+    validate_ifc_data,
+    validate_material_kspace_params,
+    validate_transport_connectivity,
+)
 
 __all__ = [
     "IFCTerm",
@@ -24,6 +32,10 @@ __all__ = [
     "ATOMIC_MASS_AMU",
     "get_atomic_mass_amu",
     "enforce_translational_asr_on_self_term",
+    "IFCDynamicalComparison",
+    "IFCDynamicalReference",
+    "basis_phase_unitary",
+    "compare_ifc_dynamical_matrices",
     "validate_ifc_data",
     "validate_transport_connectivity",
     "validate_material_kspace_params",
