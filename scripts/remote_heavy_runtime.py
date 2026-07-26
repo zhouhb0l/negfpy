@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from typing import Any
 
@@ -49,6 +50,43 @@ def status(
     return value
 
 
+def _fresh_fetch_destination(
+    *,
+    destination_root: pathlib.Path,
+    commit: str,
+    dry_run: bool,
+) -> pathlib.Path:
+    """Create a fresh lexical destination without following any symlink."""
+
+    root = pathlib.Path(os.path.abspath(os.fspath(destination_root.expanduser())))
+    current = pathlib.Path(root.anchor)
+    for part in root.parts[1:]:
+        current = current / part
+        if os.path.lexists(current):
+            if current.is_symlink():
+                raise core.RemoteValidationError(
+                    f"fetch destination root traverses a symlink: {current}"
+                )
+            if not current.is_dir():
+                raise core.RemoteValidationError(
+                    f"fetch destination root is not a directory: {current}"
+                )
+        elif not dry_run:
+            current.mkdir()
+    destination = root / commit
+    if os.path.lexists(destination):
+        raise core.RemoteValidationError(
+            f"fetch destination already exists: {destination}"
+        )
+    if not dry_run:
+        destination.mkdir()
+        if destination.is_symlink() or not destination.is_dir():
+            raise core.RemoteValidationError(
+                f"fetch destination is not a fresh regular directory: {destination}"
+            )
+    return destination
+
+
 def fetch(
     *,
     commit: str,
@@ -71,13 +109,11 @@ def fetch(
                 "remote terminal status lacks an integer returncode"
             )
 
-    destination = destination_root.resolve() / commit
-    if destination.exists() and any(destination.iterdir()):
-        raise core.RemoteValidationError(
-            f"fetch destination is not empty: {destination}"
-        )
-    if not runner.dry_run:
-        destination.mkdir(parents=True, exist_ok=True)
+    destination = _fresh_fetch_destination(
+        destination_root=destination_root,
+        commit=commit,
+        dry_run=runner.dry_run,
+    )
     runner.run(
         core.scp_argv(
             "-r",
@@ -100,13 +136,23 @@ def fetch(
             raise core.RemoteValidationError(
                 "fetched artifacts contain symlinks: " + ", ".join(symlinks)
             )
+        nested_manifests = sorted(
+            path.relative_to(destination).as_posix()
+            for path in destination.rglob("SHA256SUMS")
+            if path.relative_to(destination).as_posix() != "SHA256SUMS"
+        )
+        if nested_manifests:
+            raise core.RemoteValidationError(
+                "nested SHA256SUMS files are forbidden: "
+                + ", ".join(nested_manifests)
+            )
         verified = core.verify_sha256sums(destination)
         regular = {
             path.relative_to(destination).as_posix()
             for path in destination.rglob("*")
             if path.is_file()
             and not path.is_symlink()
-            and path.name != "SHA256SUMS"
+            and path.relative_to(destination).as_posix() != "SHA256SUMS"
         }
         if set(verified) != regular:
             missing = sorted(regular - set(verified))

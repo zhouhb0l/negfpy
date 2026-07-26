@@ -13,6 +13,7 @@ import platform
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -24,6 +25,19 @@ import remote_heavy_explicit as explicit
 import remote_heavy_validation as core
 import remote_mpi_scaling
 import remote_toy_mpi_runner
+
+
+ORCHESTRATION_SCRIPT_PATHS = (
+    "scripts/remote_heavy_cli.py",
+    "scripts/remote_heavy_explicit.py",
+    "scripts/remote_heavy_identity.py",
+    "scripts/remote_heavy_lock.py",
+    "scripts/remote_heavy_runtime.py",
+    "scripts/remote_heavy_security.py",
+    "scripts/remote_heavy_validation.py",
+    "scripts/remote_mpi_scaling.py",
+    "scripts/remote_toy_mpi_runner.py",
+)
 
 
 def _remote_bootstrap_command(commit: str) -> str:
@@ -216,6 +230,15 @@ def _record_remote_environment(
         raise core.RemoteValidationError(
             "could not compute the deployed NEGFPy source-tree SHA256"
         )
+    execution_source_identity = _execution_source_identity(
+        worktree=worktree,
+        commit=commit,
+        git_tree=tree,
+        package_source_sha256=source_tree_sha256,
+    )
+    environment_prefix_manifest = _environment_prefix_manifest(
+        root / "environment"
+    )
     cpu_model = platform.processor()
     cpuinfo = pathlib.Path("/proc/cpuinfo")
     if cpuinfo.is_file():
@@ -238,6 +261,8 @@ def _record_remote_environment(
             "created_utc": core._utc_now(),
             "commit": commit,
             "source_tree_sha256": source_tree_sha256,
+            "execution_source_identity": execution_source_identity,
+            "environment_prefix_manifest": environment_prefix_manifest,
             "explicit_lock_sha256": lock_sha,
             "tree": tree,
             "hostname": socket.gethostname(),
@@ -339,6 +364,306 @@ def _canonical_digest(
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_manifest(document: Mapping[str, Any]) -> dict[str, Any]:
+    body = dict(document)
+    body["manifest_sha256"] = _canonical_digest(
+        body,
+        excluded_key="manifest_sha256",
+        ensure_ascii=True,
+    )
+    return body
+
+
+def _absolute_directory_without_symlinks(
+    path: pathlib.Path,
+    *,
+    name: str,
+) -> pathlib.Path:
+    absolute = pathlib.Path(os.path.abspath(os.fspath(path.expanduser())))
+    current = pathlib.Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise core.RemoteValidationError(f"{name} traverses a symlink: {current}")
+    if not absolute.is_dir():
+        raise core.RemoteValidationError(f"{name} is not a directory: {absolute}")
+    return absolute
+
+
+def _environment_prefix_manifest(prefix: pathlib.Path) -> dict[str, Any]:
+    """Hash every regular file and safely describe every prefix symlink."""
+
+    root = _absolute_directory_without_symlinks(
+        prefix,
+        name="executed environment prefix",
+    )
+    regular_files: list[dict[str, Any]] = []
+    symlinks: list[dict[str, Any]] = []
+    directory_count = 0
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            directory_count += 1
+            with os.scandir(directory) as stream:
+                entries = sorted(stream, key=lambda item: item.name)
+            for entry in entries:
+                candidate = pathlib.Path(entry.path)
+                relative = candidate.relative_to(root).as_posix()
+                metadata = entry.stat(follow_symlinks=False)
+                mode = metadata.st_mode
+                if stat.S_ISLNK(mode):
+                    target_text = os.readlink(candidate)
+                    if pathlib.PurePath(target_text).is_absolute():
+                        raise core.RemoteValidationError(
+                            "environment prefix contains an absolute symlink: "
+                            f"{relative} -> {target_text}"
+                        )
+                    resolved = candidate.resolve(strict=True)
+                    if not resolved.is_relative_to(root):
+                        raise core.RemoteValidationError(
+                            "environment prefix symlink escapes its prefix: "
+                            f"{relative} -> {target_text}"
+                        )
+                    if resolved.is_file():
+                        target_kind = "regular_file"
+                    elif resolved.is_dir():
+                        target_kind = "directory"
+                    else:
+                        raise core.RemoteValidationError(
+                            f"environment symlink has a special target: {relative}"
+                        )
+                    symlinks.append(
+                        {
+                            "path": relative,
+                            "target": target_text,
+                            "resolved_path": resolved.relative_to(root).as_posix(),
+                            "target_kind": target_kind,
+                            "link_size": int(metadata.st_size),
+                        }
+                    )
+                elif stat.S_ISDIR(mode):
+                    pending.append(candidate)
+                elif stat.S_ISREG(mode):
+                    regular_files.append(
+                        {
+                            "path": relative,
+                            "size": int(metadata.st_size),
+                            "sha256": core._sha256(candidate),
+                        }
+                    )
+                else:
+                    raise core.RemoteValidationError(
+                        f"environment prefix contains a special file: {relative}"
+                    )
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, core.RemoteValidationError):
+            raise
+        raise core.RemoteValidationError(
+            f"cannot inventory executed environment prefix {root}: {error}"
+        ) from error
+    regular_files.sort(key=lambda item: item["path"])
+    symlinks.sort(key=lambda item: item["path"])
+    return _canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.environment_prefix.v1",
+            "prefix": str(root),
+            "directory_count": directory_count,
+            "regular_file_count": len(regular_files),
+            "symlink_count": len(symlinks),
+            "regular_files": regular_files,
+            "symlinks": symlinks,
+        }
+    )
+
+
+def _execution_source_identity(
+    *,
+    worktree: pathlib.Path,
+    commit: str,
+    git_tree: str,
+    package_source_sha256: str,
+) -> dict[str, Any]:
+    """Bind the clean worktree and every imported orchestration script byte."""
+
+    root = _absolute_directory_without_symlinks(worktree, name="worktree")
+    revision = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "rev-parse", "HEAD^{tree}"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if revision != commit or tree != git_tree or dirty:
+        raise core.RemoteValidationError(
+            "executed worktree is not the requested clean Git tree"
+        )
+    listed = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "ls-files", "-z"),
+        check=True,
+        capture_output=True,
+    ).stdout
+    tracked_paths = {
+        pathlib.PurePosixPath(raw.decode("utf-8"))
+        for raw in listed.split(b"\0")
+        if raw
+    }
+    untracked = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "ls-files", "-z", "--others", "--exclude-standard"),
+        check=True,
+        capture_output=True,
+    ).stdout
+    ignored = subprocess.run(
+        (core.REMOTE_GIT, "-C", str(root), "ls-files", "-z", "--others", "--ignored", "--exclude-standard"),
+        check=True,
+        capture_output=True,
+    ).stdout
+    extra_paths = {
+        pathlib.PurePosixPath(raw.decode("utf-8"))
+        for raw in untracked.split(b"\0") + ignored.split(b"\0")
+        if raw
+    }
+    worktree_paths = sorted(tracked_paths | extra_paths, key=lambda value: value.as_posix())
+    records: list[dict[str, Any]] = []
+    for relative in worktree_paths:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise core.RemoteValidationError(f"unsafe worktree source path: {relative}")
+        candidate = root.joinpath(*relative.parts)
+        metadata = candidate.lstat()
+        if stat.S_ISREG(metadata.st_mode):
+            record = {
+                "path": relative.as_posix(),
+                "git_tracked": relative in tracked_paths,
+                "kind": "regular_file",
+                "size": int(metadata.st_size),
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "sha256": core._sha256(candidate),
+            }
+        elif stat.S_ISLNK(metadata.st_mode):
+            target = os.readlink(candidate)
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(root):
+                raise core.RemoteValidationError(
+                    f"tracked source symlink escapes worktree: {relative}"
+                )
+            record = {
+                "path": relative.as_posix(),
+                "git_tracked": relative in tracked_paths,
+                "kind": "symlink",
+                "target": target,
+                "mode": stat.S_IMODE(metadata.st_mode),
+            }
+        else:
+            raise core.RemoteValidationError(
+                f"tracked source is not a regular file or symlink: {relative}"
+            )
+        records.append(record)
+    records.sort(key=lambda item: item["path"])
+    by_path = {str(item["path"]): item for item in records}
+    observed_orchestration = {
+        path
+        for path in by_path
+        if path.startswith("scripts/remote_") and path.endswith(".py")
+    }
+    expected_orchestration = set(ORCHESTRATION_SCRIPT_PATHS)
+    if observed_orchestration != expected_orchestration:
+        raise core.RemoteValidationError(
+            "orchestration source set differs from the locked imported scripts: "
+            f"{sorted(observed_orchestration ^ expected_orchestration)}"
+        )
+    orchestration = [dict(by_path[path]) for path in ORCHESTRATION_SCRIPT_PATHS]
+    if any(item.get("kind") != "regular_file" or item.get("git_tracked") is not True for item in orchestration):
+        raise core.RemoteValidationError("orchestration scripts must be regular files")
+    tracked_records = [item for item in records if item["git_tracked"]]
+    tracked_manifest = _canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.tracked_worktree.v1",
+            "records": tracked_records,
+        }
+    )
+    worktree_manifest = _canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.full_worktree.v1",
+            "records": records,
+        }
+    )
+    orchestration_manifest = _canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.orchestration_sources.v1",
+            "records": orchestration,
+        }
+    )
+    return _canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.execution_source.v1",
+            "git_revision": revision,
+            "git_tree": tree,
+            "package_source_sha256": package_source_sha256,
+            "tracked_file_count": len(tracked_records),
+            "tracked_files_manifest_sha256": tracked_manifest["manifest_sha256"],
+            "tracked_files": tracked_records,
+            "worktree_file_count": len(records),
+            "worktree_files_manifest_sha256": worktree_manifest["manifest_sha256"],
+            "worktree_files": records,
+            "orchestration_manifest_sha256": orchestration_manifest["manifest_sha256"],
+            "orchestration_scripts": orchestration,
+        }
+    )
+
+
+def _scientific_launch_environment(
+    *,
+    root: pathlib.Path,
+    attempt_root: pathlib.Path,
+    environment_prefix: pathlib.Path,
+) -> dict[str, str]:
+    """Return a scrubbed, receipt-bound environment for scientific children."""
+
+    cache = attempt_root / "runtime-cache"
+    environment = {
+        "HOME": f"/home/{core.EXPECTED_USER}",
+        "USER": core.EXPECTED_USER,
+        "LOGNAME": core.EXPECTED_USER,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TZ": "UTC",
+        "PATH": os.pathsep.join((str(environment_prefix / "bin"), core.REMOTE_TOOLS_BIN, "/usr/bin", "/bin")),
+        "PYTHONPATH": str(root / "worktree" / "src"),
+        "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPYCACHEPREFIX": str(cache / "pycache"),
+        "TMPDIR": str(attempt_root / "runtime-tmp"),
+        "XDG_CACHE_HOME": str(cache),
+        "MPLCONFIGDIR": str(attempt_root / "runtime-config" / "matplotlib"),
+        **core.THREAD_LIMIT_ENV,
+    }
+    return dict(sorted(environment.items()))
+
+
+def _launch_environment_sha256(environment: Mapping[str, str]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            dict(sorted(environment.items())),
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
 
 
 def _validate_code_identity(
@@ -813,11 +1138,44 @@ def _attempt_artifact_record(
     }
 
 
-def _write_release_launch_receipt(
+def _regular_file_identity(path: pathlib.Path, *, name: str) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise core.RemoteValidationError(f"cannot identify {name}: {path}") from error
+    _require(
+        stat.S_ISREG(metadata.st_mode) and not path.is_symlink(),
+        f"{name} is not a non-symlink regular file: {path}",
+    )
+    return {
+        "path": str(path),
+        "resolved_path": str(resolved),
+        "size": int(metadata.st_size),
+        "sha256": core._sha256(path),
+    }
+
+
+def _verified_manifest_digest(value: Any, *, name: str) -> str:
+    manifest = _mapping(value, name=name)
+    digest = manifest.get("manifest_sha256")
+    _require(
+        _is_sha256(digest)
+        and _canonical_digest(
+            manifest,
+            excluded_key="manifest_sha256",
+            ensure_ascii=True,
+        )
+        == digest,
+        f"{name} canonical SHA256 is invalid",
+    )
+    return str(digest)
+
+
+def _release_launch_binding(
     *,
-    path: pathlib.Path,
-    attempt_root: pathlib.Path,
     environment_prefix: pathlib.Path,
+    mpi_runner: pathlib.Path,
     argv: Sequence[str],
     binding_arguments: Sequence[str],
     selected_rank: int,
@@ -825,29 +1183,169 @@ def _write_release_launch_receipt(
     source_tree_sha256: str,
     environment_sha256: str,
     execution_id: str,
+    execution_source_identity: Mapping[str, Any],
+    environment_prefix_manifest: Mapping[str, Any],
+    launch_environment: Mapping[str, str],
+) -> dict[str, Any]:
+    source_manifest_sha256 = _verified_manifest_digest(
+        execution_source_identity,
+        name="execution source identity",
+    )
+    prefix_manifest_sha256 = _verified_manifest_digest(
+        environment_prefix_manifest,
+        name="environment prefix manifest",
+    )
+    orchestration = execution_source_identity.get("orchestration_scripts")
+    _require(
+        isinstance(orchestration, list)
+        and [item.get("path") for item in orchestration if isinstance(item, Mapping)]
+        == list(ORCHESTRATION_SCRIPT_PATHS),
+        "execution source identity lacks the exact orchestration source set",
+    )
+    runner = _regular_file_identity(mpi_runner, name="MPI release runner")
+    runner_records = [
+        item
+        for item in orchestration
+        if isinstance(item, Mapping)
+        and item.get("path") == "scripts/remote_toy_mpi_runner.py"
+    ]
+    _require(
+        len(runner_records) == 1
+        and runner_records[0].get("kind") == "regular_file"
+        and runner_records[0].get("size") == runner["size"]
+        and runner_records[0].get("sha256") == runner["sha256"],
+        "executed MPI runner bytes differ from the orchestration manifest",
+    )
+    normalized_environment = dict(sorted(launch_environment.items()))
+    _require(
+        all(isinstance(key, str) and isinstance(value, str) for key, value in normalized_environment.items()),
+        "scientific launch environment must contain only string pairs",
+    )
+    return {
+        "schema": "negfpy.remote_validation.release_launch_binding.v1",
+        "source_revision": source_revision,
+        "source_tree_sha256": source_tree_sha256,
+        "environment_sha256": environment_sha256,
+        "execution_id": execution_id,
+        "selected_rank_count": selected_rank,
+        "argv": [str(value) for value in argv],
+        "binding_arguments": [str(value) for value in binding_arguments],
+        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+        "launcher": _executable_identity(environment_prefix / "bin" / "mpiexec"),
+        "python": _executable_identity(environment_prefix / "bin" / "python"),
+        "runner": runner,
+        "execution_source_identity_sha256": source_manifest_sha256,
+        "tracked_files_manifest_sha256": execution_source_identity.get("tracked_files_manifest_sha256"),
+        "worktree_files_manifest_sha256": execution_source_identity.get("worktree_files_manifest_sha256"),
+        "orchestration_manifest_sha256": execution_source_identity.get("orchestration_manifest_sha256"),
+        "orchestration_scripts": [dict(item) for item in orchestration],
+        "environment_prefix_manifest_sha256": prefix_manifest_sha256,
+        "environment_regular_file_count": environment_prefix_manifest.get("regular_file_count"),
+        "environment_symlink_count": environment_prefix_manifest.get("symlink_count"),
+        "launch_environment": normalized_environment,
+        "launch_environment_sha256": _launch_environment_sha256(normalized_environment),
+    }
+
+
+def _write_release_launch_intent(
+    *,
+    path: pathlib.Path,
+    attempt_root: pathlib.Path,
+    stdout_path: pathlib.Path,
+    stderr_path: pathlib.Path,
+    **binding_arguments: Any,
+) -> dict[str, Any]:
+    for candidate in (stdout_path, stderr_path):
+        _require(
+            candidate.parent.resolve() == attempt_root.resolve()
+            and not candidate.exists(),
+            f"release launch log path is not fresh and canonical: {candidate}",
+        )
+    payload = {
+        "schema": "negfpy.remote_validation.release_launch_intent.v1",
+        "launch_binding": _release_launch_binding(**binding_arguments),
+        "stdout_relative_path": stdout_path.relative_to(attempt_root).as_posix(),
+        "stderr_relative_path": stderr_path.relative_to(attempt_root).as_posix(),
+    }
+    try:
+        return remote_toy_mpi_runner.write_hashed_manifest(path, payload)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"cannot publish immutable MPI release launch intent: {error}"
+        ) from error
+
+
+def _validate_release_launch_intent(
+    *,
+    path: pathlib.Path,
+    attempt_root: pathlib.Path,
+    stdout_path: pathlib.Path,
+    stderr_path: pathlib.Path,
+    **binding_arguments: Any,
+) -> dict[str, Any]:
+    try:
+        document = remote_toy_mpi_runner.read_hashed_manifest(path)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"invalid immutable MPI release launch intent: {error}"
+        ) from error
+    _require(
+        path.resolve() == (attempt_root / "mpi-release-launch-intent.json").resolve()
+        and path.is_file()
+        and not path.is_symlink(),
+        "MPI release launch intent path is not canonical",
+    )
+    expected = {
+        "schema": "negfpy.remote_validation.release_launch_intent.v1",
+        "launch_binding": _release_launch_binding(**binding_arguments),
+        "stdout_relative_path": stdout_path.relative_to(attempt_root).as_posix(),
+        "stderr_relative_path": stderr_path.relative_to(attempt_root).as_posix(),
+    }
+    _require(
+        document.get("payload") == expected,
+        "MPI release launch intent differs from the exact launch",
+    )
+    return document
+
+
+def _write_release_launch_receipt(
+    *,
+    path: pathlib.Path,
+    intent_path: pathlib.Path,
+    attempt_root: pathlib.Path,
+    environment_prefix: pathlib.Path,
+    mpi_runner: pathlib.Path,
+    argv: Sequence[str],
+    binding_arguments: Sequence[str],
+    selected_rank: int,
+    source_revision: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    execution_id: str,
+    execution_source_identity: Mapping[str, Any],
+    environment_prefix_manifest: Mapping[str, Any],
+    launch_environment: Mapping[str, str],
+    post_run_verification: Mapping[str, Any],
     started_utc: str,
     finished_utc: str,
     returncode: int,
     stdout_path: pathlib.Path,
     stderr_path: pathlib.Path,
 ) -> dict[str, Any]:
+    intent = remote_toy_mpi_runner.read_hashed_manifest(intent_path)
+    intent_payload = _mapping(intent.get("payload"), name="release launch intent")
+    launch_binding = dict(
+        _mapping(intent_payload.get("launch_binding"), name="release launch binding")
+    )
     payload = {
-        "schema": "negfpy.remote_validation.release_launch.v1",
-        "source_revision": source_revision,
-        "source_tree_sha256": source_tree_sha256,
-        "environment_sha256": environment_sha256,
-        "execution_id": execution_id,
-        "selected_rank_count": selected_rank,
+        "schema": "negfpy.remote_validation.release_launch.v2",
+        "launch_binding": launch_binding,
+        "intent": _attempt_artifact_record(attempt_root, intent_path),
+        "intent_payload_sha256": intent["payload_sha256"],
         "started_utc": started_utc,
         "finished_utc": finished_utc,
         "returncode": returncode,
-        "argv": [str(value) for value in argv],
-        "binding_arguments": [str(value) for value in binding_arguments],
-        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
-        "launcher": _executable_identity(
-            environment_prefix / "bin" / "mpiexec"
-        ),
-        "python": _executable_identity(environment_prefix / "bin" / "python"),
+        "post_run_verification": dict(post_run_verification),
         "stdout": _attempt_artifact_record(attempt_root, stdout_path),
         "stderr": _attempt_artifact_record(attempt_root, stderr_path),
     }
@@ -862,6 +1360,7 @@ def _write_release_launch_receipt(
 def _validate_release_launch_receipt(
     *,
     path: pathlib.Path,
+    intent_path: pathlib.Path,
     attempt_root: pathlib.Path,
     environment_prefix: pathlib.Path,
     selected_rank: int,
@@ -873,6 +1372,9 @@ def _validate_release_launch_receipt(
     execution_id: str,
     release_root: pathlib.Path,
     mpi_runner: pathlib.Path,
+    execution_source_identity: Mapping[str, Any],
+    environment_prefix_manifest: Mapping[str, Any],
+    launch_environment: Mapping[str, str],
 ) -> dict[str, Any]:
     try:
         document = remote_toy_mpi_runner.read_hashed_manifest(path)
@@ -922,17 +1424,24 @@ def _validate_release_launch_receipt(
             program=program,
         )
     )
+    launch_binding = _release_launch_binding(
+        environment_prefix=environment_prefix,
+        mpi_runner=mpi_runner,
+        argv=expected_argv,
+        binding_arguments=expected_binding,
+        selected_rank=selected_rank,
+        source_revision=source_revision,
+        source_tree_sha256=source_tree_sha256,
+        environment_sha256=environment_sha256,
+        execution_id=execution_id,
+        execution_source_identity=execution_source_identity,
+        environment_prefix_manifest=environment_prefix_manifest,
+        launch_environment=launch_environment,
+    )
     expected = {
-        "schema": "negfpy.remote_validation.release_launch.v1",
-        "source_revision": source_revision,
-        "source_tree_sha256": source_tree_sha256,
-        "environment_sha256": environment_sha256,
-        "execution_id": execution_id,
-        "selected_rank_count": selected_rank,
+        "schema": "negfpy.remote_validation.release_launch.v2",
+        "launch_binding": launch_binding,
         "returncode": 0,
-        "argv": expected_argv,
-        "binding_arguments": expected_binding,
-        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
     }
     changed = {
         key: (payload.get(key), value)
@@ -946,17 +1455,51 @@ def _validate_release_launch_receipt(
         and payload["started_utc"] <= payload["finished_utc"],
         "MPI release launch timestamps are invalid",
     )
+    intent_document = _validate_release_launch_intent(
+        path=intent_path,
+        attempt_root=attempt_root,
+        stdout_path=attempt_root / "mpi-release.stdout.log",
+        stderr_path=attempt_root / "mpi-release.stderr.log",
+        environment_prefix=environment_prefix,
+        mpi_runner=mpi_runner,
+        argv=expected_argv,
+        binding_arguments=expected_binding,
+        selected_rank=selected_rank,
+        source_revision=source_revision,
+        source_tree_sha256=source_tree_sha256,
+        environment_sha256=environment_sha256,
+        execution_id=execution_id,
+        execution_source_identity=execution_source_identity,
+        environment_prefix_manifest=environment_prefix_manifest,
+        launch_environment=launch_environment,
+    )
+    recorded_intent = _recorded_artifact_path(
+        root=attempt_root,
+        record=payload.get("intent"),
+        name="MPI release launch intent",
+    )
     launcher_record = _mapping(
-        payload.get("launcher"), name="MPI release launcher identity"
+        launch_binding.get("launcher"), name="MPI release launcher identity"
     )
     python_record = _mapping(
-        payload.get("python"), name="MPI release Python identity"
+        launch_binding.get("python"), name="MPI release Python identity"
     )
-    expected_launcher = _executable_identity(launcher)
-    expected_python = _executable_identity(python)
     _require(
-        launcher_record == expected_launcher and python_record == expected_python,
-        "MPI release executable identity changed",
+        recorded_intent == intent_path.resolve()
+        and payload.get("intent_payload_sha256") == intent_document["payload_sha256"],
+        "terminal launch receipt is not bound to its immutable intent",
+    )
+    post_run = _mapping(
+        payload.get("post_run_verification"),
+        name="post-run source/environment verification",
+    )
+    _require(
+        post_run.get("passed") is True
+        and post_run.get("execution_source_identity_sha256")
+        == launch_binding["execution_source_identity_sha256"]
+        and post_run.get("environment_prefix_manifest_sha256")
+        == launch_binding["environment_prefix_manifest_sha256"],
+        "post-run source/environment revalidation did not pass",
     )
     stdout = _recorded_artifact_path(
         root=attempt_root,
@@ -973,14 +1516,25 @@ def _validate_release_launch_receipt(
         "receipt_relative_path": path.relative_to(attempt_root).as_posix(),
         "receipt_file_sha256": core._sha256(path),
         "receipt_payload_sha256": document["payload_sha256"],
+        "intent_relative_path": intent_path.relative_to(attempt_root).as_posix(),
+        "intent_file_sha256": core._sha256(intent_path),
+        "intent_payload_sha256": intent_document["payload_sha256"],
         "launcher_file_sha256": launcher_record["sha256"],
         "python_file_sha256": python_record["sha256"],
+        "runner_file_sha256": launch_binding["runner"]["sha256"],
+        "execution_source_identity_sha256": launch_binding["execution_source_identity_sha256"],
+        "tracked_files_manifest_sha256": launch_binding["tracked_files_manifest_sha256"],
+        "worktree_files_manifest_sha256": launch_binding["worktree_files_manifest_sha256"],
+        "orchestration_manifest_sha256": launch_binding["orchestration_manifest_sha256"],
+        "environment_prefix_manifest_sha256": launch_binding["environment_prefix_manifest_sha256"],
+        "launch_environment_sha256": launch_binding["launch_environment_sha256"],
         "stdout_relative_path": stdout.relative_to(attempt_root).as_posix(),
         "stdout_file_sha256": core._sha256(stdout),
         "stderr_relative_path": stderr.relative_to(attempt_root).as_posix(),
         "stderr_file_sha256": core._sha256(stderr),
         "selected_rank_count": selected_rank,
         "binding_arguments": expected_binding,
+        "post_run_verified": True,
         "returncode": 0,
     }
 
@@ -1699,7 +2253,11 @@ def _artifact_files(artifacts: pathlib.Path) -> list[pathlib.PurePath]:
             continue
         if path.is_symlink():
             raise core.RemoteValidationError(f"artifact symlink is forbidden: {path}")
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name == "SHA256SUMS" and relative.as_posix() != "SHA256SUMS":
+            raise core.RemoteValidationError(
+                f"nested SHA256SUMS is forbidden: {relative.as_posix()}"
+            )
+        if path.is_file() and relative.as_posix() != "SHA256SUMS":
             files.append(relative)
     return files
 
@@ -1738,6 +2296,7 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
     archived_runner_path = attempt_root / "mpi-release-runner-result.json"
     archived_execution_path = attempt_root / "mpi-execution-manifest.json"
     archived_campaign_path = attempt_root / "mpi-campaign-manifest.json"
+    release_intent_path = attempt_root / "mpi-release-launch-intent.json"
     release_receipt_path = attempt_root / "mpi-release-launch.json"
     release_stdout_path = attempt_root / "mpi-release.stdout.log"
     release_stderr_path = attempt_root / "mpi-release.stderr.log"
@@ -1805,17 +2364,19 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
             )
 
         lock_sha = str(stored_identity["explicit_lock_sha256"])
-        environment = os.environ.copy()
-        environment.update(core.THREAD_LIMIT_ENV)
-        environment["PATH"] = (
-            core.REMOTE_TOOLS_BIN
-            + os.pathsep
-            + environment.get("PATH", "")
+        environment_prefix = root / "environment"
+        environment = _scientific_launch_environment(
+            root=root,
+            attempt_root=attempt_root,
+            environment_prefix=environment_prefix,
         )
-        environment.update({
-            "PYTHONPATH": str(root / "worktree" / "src"),
-            "PYTHONHASHSEED": "0",
-        })
+        for directory in (
+            pathlib.Path(environment["TMPDIR"]),
+            pathlib.Path(environment["XDG_CACHE_HOME"]),
+            pathlib.Path(environment["MPLCONFIGDIR"]),
+            pathlib.Path(environment["PYTHONPYCACHEPREFIX"]),
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
         source_sha = str(stored_identity["source_tree_sha256"])
         physical_core_count = stored_identity.get("physical_core_count")
         socket_count = stored_identity.get("socket_count")
@@ -1831,7 +2392,6 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
             and socket_count > 0,
             "remote identity has an invalid socket count",
         )
-        environment_prefix = root / "environment"
         python = environment_prefix / "bin" / "python"
         mpi_runner = root / "worktree" / "scripts" / "remote_toy_mpi_runner.py"
         scale_argv = (
@@ -1926,12 +2486,73 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                     "--expected-ranks",
                     str(selected_rank),
                 )
+                release_binding_arguments = tuple(
+                    remote_mpi_scaling.openmpi_binding_arguments(
+                        selected_rank,
+                        physical_core_count=physical_core_count,
+                        socket_count=socket_count,
+                    )
+                )
                 release_argv = remote_mpi_scaling.environment_mpi_argv(
                     environment_prefix,
                     rank_count=selected_rank,
                     physical_core_count=physical_core_count,
                     socket_count=socket_count,
                     program=release_program,
+                )
+                prelaunch_identity = _record_remote_environment(
+                    deployment_dir=root,
+                    commit=commit,
+                    write_manifest=False,
+                )
+                try:
+                    remote_heavy_identity.compare_environment_identity(
+                        stored_identity,
+                        prelaunch_identity,
+                    )
+                except ValueError as error:
+                    raise core.RemoteValidationError(
+                        f"pre-launch identity changed: {error}"
+                    ) from error
+                execution_source_identity = dict(
+                    _mapping(
+                        prelaunch_identity.get("execution_source_identity"),
+                        name="pre-launch execution source identity",
+                    )
+                )
+                environment_prefix_manifest = dict(
+                    _mapping(
+                        prelaunch_identity.get("environment_prefix_manifest"),
+                        name="pre-launch environment prefix manifest",
+                    )
+                )
+                intent_arguments = {
+                    "environment_prefix": environment_prefix,
+                    "mpi_runner": mpi_runner,
+                    "argv": release_argv,
+                    "binding_arguments": release_binding_arguments,
+                    "selected_rank": selected_rank,
+                    "source_revision": commit,
+                    "source_tree_sha256": source_sha,
+                    "environment_sha256": lock_sha,
+                    "execution_id": execution_id,
+                    "execution_source_identity": execution_source_identity,
+                    "environment_prefix_manifest": environment_prefix_manifest,
+                    "launch_environment": environment,
+                }
+                _write_release_launch_intent(
+                    path=release_intent_path,
+                    attempt_root=attempt_root,
+                    stdout_path=release_stdout_path,
+                    stderr_path=release_stderr_path,
+                    **intent_arguments,
+                )
+                _validate_release_launch_intent(
+                    path=release_intent_path,
+                    attempt_root=attempt_root,
+                    stdout_path=release_stdout_path,
+                    stderr_path=release_stderr_path,
+                    **intent_arguments,
                 )
                 log.write(f"release_argv={shlex.join(release_argv)}\n")
                 log.write(
@@ -1959,27 +2580,70 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                         os.fsync(stream.fileno())
                 release_finished = core._utc_now()
                 returncode = int(completed_release.returncode)
+                try:
+                    post_identity = _record_remote_environment(
+                        deployment_dir=root,
+                        commit=commit,
+                        write_manifest=False,
+                    )
+                    remote_heavy_identity.compare_environment_identity(
+                        stored_identity,
+                        post_identity,
+                    )
+                    post_source = _mapping(
+                        post_identity.get("execution_source_identity"),
+                        name="post-run execution source identity",
+                    )
+                    post_prefix = _mapping(
+                        post_identity.get("environment_prefix_manifest"),
+                        name="post-run environment prefix manifest",
+                    )
+                    post_run_verification = {
+                        "passed": True,
+                        "checked_utc": core._utc_now(),
+                        "execution_source_identity_sha256": _verified_manifest_digest(
+                            post_source,
+                            name="post-run execution source identity",
+                        ),
+                        "environment_prefix_manifest_sha256": _verified_manifest_digest(
+                            post_prefix,
+                            name="post-run environment prefix manifest",
+                        ),
+                    }
+                except Exception as error:
+                    post_run_verification = {
+                        "passed": False,
+                        "checked_utc": core._utc_now(),
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
                 _write_release_launch_receipt(
                     path=release_receipt_path,
+                    intent_path=release_intent_path,
                     attempt_root=attempt_root,
                     environment_prefix=environment_prefix,
+                    mpi_runner=mpi_runner,
                     argv=release_argv,
-                    binding_arguments=remote_mpi_scaling.openmpi_binding_arguments(
-                        selected_rank,
-                        physical_core_count=physical_core_count,
-                        socket_count=socket_count,
-                    ),
+                    binding_arguments=release_binding_arguments,
                     selected_rank=selected_rank,
                     source_revision=commit,
                     source_tree_sha256=source_sha,
                     environment_sha256=lock_sha,
                     execution_id=execution_id,
+                    execution_source_identity=execution_source_identity,
+                    environment_prefix_manifest=environment_prefix_manifest,
+                    launch_environment=environment,
+                    post_run_verification=post_run_verification,
                     started_utc=release_started,
                     finished_utc=release_finished,
                     returncode=returncode,
                     stdout_path=release_stdout_path,
                     stderr_path=release_stderr_path,
                 )
+                if post_run_verification.get("passed") is not True:
+                    raise core.RemoteValidationError(
+                        "post-run source/environment identity changed"
+                    )
                 if returncode != 0:
                     raise core.RemoteValidationError(
                         f"locked MPI toy release returned {returncode}"
@@ -1991,6 +2655,7 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                 )
         launch_facts = _validate_release_launch_receipt(
             path=release_receipt_path,
+            intent_path=release_intent_path,
             attempt_root=attempt_root,
             environment_prefix=environment_prefix,
             selected_rank=int(scaling_facts["toy_rank_count"]),
@@ -2002,6 +2667,9 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
             execution_id=execution_id,
             release_root=release_root,
             mpi_runner=mpi_runner,
+            execution_source_identity=execution_source_identity,
+            environment_prefix_manifest=environment_prefix_manifest,
+            launch_environment=environment,
         )
         runner_result_path = (
             release_root / "runner-results" / f"{execution_id}.json"
@@ -2110,6 +2778,16 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
             "scaling_selection_sha256": (
                 core._sha256(selection_path)
                 if selection_path is not None and selection_path.is_file()
+                else None
+            ),
+            "mpi_release_launch_intent": (
+                release_intent_path.relative_to(artifacts).as_posix()
+                if release_intent_path.is_file()
+                else None
+            ),
+            "mpi_release_launch_intent_sha256": (
+                core._sha256(release_intent_path)
+                if release_intent_path.is_file()
                 else None
             ),
             "mpi_release_launch": (

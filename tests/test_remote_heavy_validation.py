@@ -274,6 +274,43 @@ def test_checksum_round_trip_detects_tamper_and_traversal(
         core.verify_sha256sums(tmp_path)
 
 
+def test_environment_prefix_manifest_detects_dependency_mutation_and_unsafe_symlink(
+    tmp_path: pathlib.Path,
+) -> None:
+    prefix = tmp_path / "environment"
+    library = prefix / "lib" / "dependency.bin"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"dependency-v1\n")
+    executable = prefix / "bin" / "dependency-link"
+    executable.parent.mkdir()
+    executable.symlink_to("../lib/dependency.bin")
+
+    before = cli._environment_prefix_manifest(prefix)
+    assert before["regular_file_count"] == 1
+    assert before["symlink_count"] == 1
+    assert before["symlinks"][0]["resolved_path"] == "lib/dependency.bin"
+    library.write_bytes(b"dependency-v2\n")
+    after = cli._environment_prefix_manifest(prefix)
+    assert after["manifest_sha256"] != before["manifest_sha256"]
+    assert after["regular_files"][0]["sha256"] != before["regular_files"][0]["sha256"]
+
+    executable.unlink()
+    executable.symlink_to("/etc/passwd")
+    with pytest.raises(core.RemoteValidationError, match="absolute symlink"):
+        cli._environment_prefix_manifest(prefix)
+
+
+def test_artifact_inventory_rejects_nested_sha256sums(
+    tmp_path: pathlib.Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    nested = artifacts / "nested"
+    nested.mkdir(parents=True)
+    (nested / "SHA256SUMS").write_text("nested\n", encoding="ascii")
+    with pytest.raises(core.RemoteValidationError, match="nested SHA256SUMS"):
+        cli._artifact_files(artifacts)
+
+
 def test_prepare_dry_run_is_nonmutating_and_uses_exact_commit_path(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -327,11 +364,68 @@ def test_deploy_launch_status_and_fetch_dry_runs_use_only_alias(
     assert "/home/hangbo/micromamba/envs/negf-tools/bin/tmux" in launch_command
 
 
+def _synthetic_source_identity() -> dict[str, object]:
+    records: list[dict[str, object]] = []
+    for relative in cli.ORCHESTRATION_SCRIPT_PATHS:
+        source = pathlib.Path(__file__).parents[1] / relative
+        records.append(
+            {
+                "path": relative,
+                "git_tracked": True,
+                "kind": "regular_file",
+                "size": source.stat().st_size,
+                "mode": source.stat().st_mode & 0o777,
+                "sha256": core._sha256(source),
+            }
+        )
+    tracked = cli._canonical_manifest(
+        {"schema": "negfpy.remote_validation.tracked_worktree.v1", "records": records}
+    )
+    worktree = cli._canonical_manifest(
+        {"schema": "negfpy.remote_validation.full_worktree.v1", "records": records}
+    )
+    orchestration = cli._canonical_manifest(
+        {"schema": "negfpy.remote_validation.orchestration_sources.v1", "records": records}
+    )
+    return cli._canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.execution_source.v1",
+            "git_revision": COMMIT,
+            "git_tree": GIT_TREE,
+            "package_source_sha256": SOURCE_SHA256,
+            "tracked_file_count": len(records),
+            "tracked_files_manifest_sha256": tracked["manifest_sha256"],
+            "tracked_files": records,
+            "worktree_file_count": len(records),
+            "worktree_files_manifest_sha256": worktree["manifest_sha256"],
+            "worktree_files": records,
+            "orchestration_manifest_sha256": orchestration["manifest_sha256"],
+            "orchestration_scripts": records,
+        }
+    )
+
+
+def _synthetic_prefix_manifest() -> dict[str, object]:
+    return cli._canonical_manifest(
+        {
+            "schema": "negfpy.remote_validation.environment_prefix.v1",
+            "prefix": "/validation/environment",
+            "directory_count": 1,
+            "regular_file_count": 0,
+            "symlink_count": 0,
+            "regular_files": [],
+            "symlinks": [],
+        }
+    )
+
+
 def _worker_identity(lock_sha: str) -> dict[str, object]:
     return {
         "schema": "negfpy.remote_validation.remote_environment.v1",
         "commit": COMMIT,
         "source_tree_sha256": SOURCE_SHA256,
+        "execution_source_identity": _synthetic_source_identity(),
+        "environment_prefix_manifest": _synthetic_prefix_manifest(),
         "explicit_lock_sha256": lock_sha,
         "tree": GIT_TREE,
         "hostname": "validation-host",
@@ -360,6 +454,9 @@ def _worker_identity(lock_sha: str) -> dict[str, object]:
 def _prepare_worker_root(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     root = tmp_path / COMMIT
     (root / "worktree").mkdir(parents=True)
+    runner = root / "worktree" / "scripts" / "remote_toy_mpi_runner.py"
+    runner.parent.mkdir()
+    shutil.copy2(pathlib.Path(toy_mpi.__file__).resolve(), runner)
     incoming = root / "incoming"
     incoming.mkdir(parents=True)
     lock = incoming / "environment-explicit.lock"
@@ -1220,8 +1317,6 @@ def _write_release_launch_facts(
     attempt_root.mkdir(parents=True, exist_ok=True)
     stdout_path = attempt_root / "mpi-release.stdout.log"
     stderr_path = attempt_root / "mpi-release.stderr.log"
-    stdout_path.write_text("synthetic release stdout\n", encoding="utf-8")
-    stderr_path.write_text("", encoding="utf-8")
     prefix = deployment / "environment"
     _launcher, _python = _fake_mpi_environment(prefix)
     mpi_runner = pathlib.Path(toy_mpi.__file__).resolve()
@@ -1249,22 +1344,66 @@ def _write_release_launch_facts(
         socket_count=2,
         program=program,
     )
+    binding_arguments = mpi_scaling.openmpi_binding_arguments(
+        rank_count,
+        physical_core_count=76,
+        socket_count=2,
+    )
+    identity = _worker_identity(lock_sha)
+    source_identity = identity["execution_source_identity"]
+    prefix_manifest = identity["environment_prefix_manifest"]
+    launch_environment = cli._scientific_launch_environment(
+        root=deployment,
+        attempt_root=attempt_root,
+        environment_prefix=prefix,
+    )
+    intent_arguments = {
+        "environment_prefix": prefix,
+        "mpi_runner": mpi_runner,
+        "argv": argv,
+        "binding_arguments": binding_arguments,
+        "selected_rank": rank_count,
+        "source_revision": COMMIT,
+        "source_tree_sha256": SOURCE_SHA256,
+        "environment_sha256": lock_sha,
+        "execution_id": execution_id,
+        "execution_source_identity": source_identity,
+        "environment_prefix_manifest": prefix_manifest,
+        "launch_environment": launch_environment,
+    }
+    intent_path = attempt_root / "mpi-release-launch-intent.json"
+    cli._write_release_launch_intent(
+        path=intent_path,
+        attempt_root=attempt_root,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        **intent_arguments,
+    )
+    stdout_path.write_text("synthetic release stdout\n", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
     receipt_path = attempt_root / "mpi-release-launch.json"
     cli._write_release_launch_receipt(
         path=receipt_path,
+        intent_path=intent_path,
         attempt_root=attempt_root,
         environment_prefix=prefix,
+        mpi_runner=mpi_runner,
         argv=argv,
-        binding_arguments=mpi_scaling.openmpi_binding_arguments(
-            rank_count,
-            physical_core_count=76,
-            socket_count=2,
-        ),
+        binding_arguments=binding_arguments,
         selected_rank=rank_count,
         source_revision=COMMIT,
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
         execution_id=execution_id,
+        execution_source_identity=source_identity,
+        environment_prefix_manifest=prefix_manifest,
+        launch_environment=launch_environment,
+        post_run_verification={
+            "passed": True,
+            "checked_utc": "2026-07-26T00:00:01Z",
+            "execution_source_identity_sha256": source_identity["manifest_sha256"],
+            "environment_prefix_manifest_sha256": prefix_manifest["manifest_sha256"],
+        },
         started_utc="2026-07-26T00:00:00Z",
         finished_utc="2026-07-26T00:00:01Z",
         returncode=0,
@@ -1273,6 +1412,7 @@ def _write_release_launch_facts(
     )
     facts = cli._validate_release_launch_receipt(
         path=receipt_path,
+        intent_path=intent_path,
         attempt_root=attempt_root,
         environment_prefix=prefix,
         selected_rank=rank_count,
@@ -1284,6 +1424,9 @@ def _write_release_launch_facts(
         execution_id=execution_id,
         release_root=release_root,
         mpi_runner=mpi_runner,
+        execution_source_identity=source_identity,
+        environment_prefix_manifest=prefix_manifest,
+        launch_environment=launch_environment,
     )
     return receipt_path, stdout_path, facts
 
@@ -1342,6 +1485,9 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     root, lock_sha = _prepare_worker_root(tmp_path)
     for name in core.THREAD_LIMIT_ENV:
         monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("LD_PRELOAD", "/tmp/injected.so")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/injected-libraries")
+    monkeypatch.setenv("OMPI_MCA_btl", "self,tcp")
     monkeypatch.setattr(
         cli,
         "_record_remote_environment",
@@ -1355,9 +1501,19 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     assert len(captured) == 2
     scale_argv, scale_environment = captured[0]
     release_argv, release_environment = captured[1]
+    expected_environment = cli._scientific_launch_environment(
+        root=root,
+        attempt_root=root / "artifacts" / "attempts" / "attempt-001",
+        environment_prefix=root / "environment",
+    )
     for environment in (scale_environment, release_environment):
-        assert all(environment[name] == "1" for name in core.THREAD_LIMIT_ENV)
-        assert environment["PATH"].split(os.pathsep)[0] == core.REMOTE_TOOLS_BIN
+        assert environment == expected_environment
+        assert environment["PATH"].split(os.pathsep)[0] == str(
+            root / "environment" / "bin"
+        )
+        assert "LD_PRELOAD" not in environment
+        assert "LD_LIBRARY_PATH" not in environment
+        assert "OMPI_MCA_btl" not in environment
         assert not any(name.startswith("NEGFPY_TOY_GATE") for name in environment)
     assert scale_argv[0] == str(root / "environment" / "bin" / "python")
     assert "scale" in scale_argv
@@ -1382,6 +1538,35 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     assert status["mpi_execution_facts"]["mode"] == "mpi"
     assert status["mpi_execution_facts"]["communicator_size"] == 4
     assert status["mpi_execution_facts"]["release_certified"] is True
+    launch_facts = status["mpi_execution_facts"]["launch_receipt"]
+    assert launch_facts["post_run_verified"] is True
+    assert launch_facts["runner_file_sha256"] == core._sha256(
+        root / "worktree" / "scripts" / "remote_toy_mpi_runner.py"
+    )
+    assert launch_facts["launch_environment_sha256"] == cli._launch_environment_sha256(
+        expected_environment
+    )
+    attempt_root = root / "artifacts" / "attempts" / "attempt-001"
+    intent = toy_mpi.read_hashed_manifest(
+        attempt_root / "mpi-release-launch-intent.json"
+    )
+    binding = intent["payload"]["launch_binding"]
+    assert binding["schema"] == "negfpy.remote_validation.release_launch_binding.v1"
+    assert binding["launch_environment"] == expected_environment
+    assert binding["worktree_files_manifest_sha256"] == (
+        _worker_identity(lock_sha)["execution_source_identity"][
+            "worktree_files_manifest_sha256"
+        ]
+    )
+    publication = json.loads(
+        (root / "artifacts" / "current-attempt.json").read_text(encoding="utf-8")
+    )
+    assert publication["mpi_release_launch_intent"] == (
+        "attempts/attempt-001/mpi-release-launch-intent.json"
+    )
+    assert publication["mpi_release_launch_intent_sha256"] == core._sha256(
+        attempt_root / "mpi-release-launch-intent.json"
+    )
     assert not (root / "artifacts" / "job.lock").exists()
     verified = core.verify_sha256sums(root / "artifacts")
     assert "job-status.json" in verified
@@ -1411,6 +1596,69 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
         for item in checkpoint_index["records"]
     )
 
+
+
+@pytest.mark.parametrize("mutation_stage", ("pre_launch", "post_run"))
+def test_worker_rejects_source_identity_mutation_around_release(
+    mutation_stage: str,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    baseline = _worker_identity(lock_sha)
+    changed = json.loads(json.dumps(baseline))
+    changed_source = dict(changed["execution_source_identity"])
+    changed_source["worktree_file_count"] = int(
+        changed_source["worktree_file_count"]
+    ) + 1
+    changed["execution_source_identity"] = cli._canonical_manifest(
+        {
+            key: value
+            for key, value in changed_source.items()
+            if key != "manifest_sha256"
+        }
+    )
+    calls = 0
+
+    def identity_at_boundary(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if mutation_stage == "pre_launch" and calls >= 2:
+            return changed
+        if mutation_stage == "post_run" and calls >= 3:
+            return changed
+        return baseline
+
+    monkeypatch.setattr(cli, "_record_remote_environment", identity_at_boundary)
+    captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        _mock_successful_mpi_commands(
+            root=root,
+            lock_sha=lock_sha,
+            captured=captured,
+        ),
+    )
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 2
+    attempt = root / "artifacts" / "attempts" / "attempt-001"
+    status = json.loads(
+        (root / "artifacts" / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["state"] == "failed"
+    if mutation_stage == "pre_launch":
+        assert len(captured) == 1
+        assert not (attempt / "mpi-release-launch-intent.json").exists()
+        assert not (attempt / "mpi-release-launch.json").exists()
+    else:
+        assert len(captured) == 2
+        assert (attempt / "mpi-release-launch-intent.json").is_file()
+        receipt = toy_mpi.read_hashed_manifest(
+            attempt / "mpi-release-launch.json"
+        )
+        assert receipt["payload"]["post_run_verification"]["passed"] is False
 
 
 def test_worker_uses_rank_one_serial_fallback_but_retains_silicon_mpi_choice(
@@ -1552,9 +1800,16 @@ def test_release_launch_receipt_rejects_tampering(
     )
     target = receipt if tamper_target == "receipt" else stdout
     target.write_bytes(target.read_bytes() + b"tamper\n")
+    identity = _worker_identity(lock_sha)
+    launch_environment = cli._scientific_launch_environment(
+        root=deployment,
+        attempt_root=receipt.parent,
+        environment_prefix=deployment / "environment",
+    )
     with pytest.raises(core.RemoteValidationError):
         cli._validate_release_launch_receipt(
             path=receipt,
+            intent_path=receipt.parent / "mpi-release-launch-intent.json",
             attempt_root=receipt.parent,
             environment_prefix=deployment / "environment",
             selected_rank=4,
@@ -1566,6 +1821,9 @@ def test_release_launch_receipt_rejects_tampering(
             execution_id=execution_id,
             release_root=release_root,
             mpi_runner=pathlib.Path(toy_mpi.__file__).resolve(),
+            execution_source_identity=identity["execution_source_identity"],
+            environment_prefix_manifest=identity["environment_prefix_manifest"],
+            launch_environment=launch_environment,
         )
 
 
@@ -1980,6 +2238,63 @@ def test_fetch_rejects_incomplete_checksum_coverage(
             destination_root=tmp_path / "fetched",
             runner=_ArtifactCopyRunner(source),
         )
+
+def test_fetch_rejects_existing_destination_symlink_without_writing_target(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _terminal_artifacts(tmp_path)
+    destination_root = tmp_path / "fetched"
+    destination_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (destination_root / COMMIT).symlink_to(external, target_is_directory=True)
+    monkeypatch.setattr(
+        operations,
+        "status",
+        lambda **_kwargs: {
+            "state": "completed",
+            "commit": COMMIT,
+            "returncode": 0,
+        },
+    )
+    with pytest.raises(core.RemoteValidationError, match="already exists"):
+        operations.fetch(
+            commit=COMMIT,
+            destination_root=destination_root,
+            runner=_ArtifactCopyRunner(source),
+        )
+    assert list(external.iterdir()) == []
+
+
+def test_fetch_rejects_nested_sha256sums_even_when_root_manifest_is_complete(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _terminal_artifacts(tmp_path)
+    nested = source / "nested"
+    nested.mkdir()
+    (nested / "SHA256SUMS").write_text("nested manifest\n", encoding="ascii")
+    core._write_sha256sums(
+        source,
+        (
+            pathlib.PurePath("job-status.json"),
+            pathlib.PurePath("production_toy_gate.log"),
+            pathlib.PurePath("nested/SHA256SUMS"),
+        ),
+    )
+    monkeypatch.setattr(
+        operations,
+        "status",
+        lambda **_kwargs: {"state": "failed", "commit": COMMIT, "returncode": 1},
+    )
+    with pytest.raises(core.RemoteValidationError, match="nested SHA256SUMS"):
+        operations.fetch(
+            commit=COMMIT,
+            destination_root=tmp_path / "fetched",
+            runner=_ArtifactCopyRunner(source),
+        )
+
 
 def test_cli_has_no_credential_or_host_override_options() -> None:
     help_text = subprocess.run(

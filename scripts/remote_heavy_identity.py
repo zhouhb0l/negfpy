@@ -10,6 +10,8 @@ IMMUTABLE_FIELDS = (
     "schema",
     "commit",
     "source_tree_sha256",
+    "execution_source_identity",
+    "environment_prefix_manifest",
     "explicit_lock_sha256",
     "tree",
     "hostname",
