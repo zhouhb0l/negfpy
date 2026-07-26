@@ -1,12 +1,19 @@
 name: phonon-negf
 channels:
-  - defaults
+  - conda-forge
 dependencies:
-  - python=3.10
-  - numpy
-  - scipy
+  - python=3.10.19
+  - numpy=2.2.6
+  - scipy=1.15.2
+  - h5py=3.16.0
+  - threadpoolctl=3.6.0
+  - openmpi=5.0.10
+  - mpi=1.0.1=openmpi
+  - mpi4py=4.1.1
+  - pytest=9.0.3
+  - pip
+  - setuptools
+  - wheel
   - matplotlib
   - numba
-  - mpi4py
   - jupyter
-prefix: /home/users/astar/ihpc/zhouhb/app/miniconda3/envs/phonon-negf
