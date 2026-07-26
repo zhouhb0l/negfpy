@@ -15,6 +15,7 @@ import pytest
 from negfpy.anharmonic._mpi_tasks import serial_task_communicator
 from negfpy.anharmonic.grid import SignedFrequencyGrid
 from negfpy.anharmonic.toy._mpi_production_gate_physics import (
+    production_toy_physics_sha256,
     run_production_toy_mpi_physics,
 )
 from negfpy.anharmonic.toy.multidimensional_release import (
@@ -180,6 +181,9 @@ def test_serial_bridge_reconstructs_existing_gate_without_contract_changes(
         _without_mpi_extension(resumed.report.as_dict())
     ) == _without_runtime_timing(
         _without_mpi_extension(first.report.as_dict())
+    )
+    assert production_toy_physics_sha256(resumed.report) == (
+        production_toy_physics_sha256(first.report)
     )
 
 

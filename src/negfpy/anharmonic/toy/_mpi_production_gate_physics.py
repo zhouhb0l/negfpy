@@ -94,6 +94,30 @@ _OPEN_ARRAY_NAMES = (
     "production_sigma_pp_greater",
 )
 
+_PHYSICS_DIGEST_EXCLUDED_KEYS = frozenset(
+    {
+        "asymptotic_dense_time",
+        "checkpoint",
+        "checkpoint_evidence",
+        "elapsed_ratio_right_over_left",
+        "elapsed_seconds",
+        "maximum_wall_seconds",
+        "median_wall_seconds",
+        "minimum_wall_seconds",
+        "oracle_wall_seconds",
+        "orchestration_provenance",
+        "production_born_wall_seconds",
+        "production_wall_seconds",
+        "reconstruction_seconds",
+        "report_sha256",
+        "resumed",
+        "seed_elapsed_seconds",
+        "total_elapsed_seconds",
+        "total_wall_seconds",
+        "wall_seconds",
+    }
+)
+
 
 class ProductionToyPhysicsMergeError(RuntimeError):
     """Raised when terminal campaign state cannot form the strict report."""
@@ -576,6 +600,50 @@ def attach_mpi_execution_provenance(
     )
 
 
+def production_toy_physics_document(value: Any) -> Any:
+    """Return the canonical scientific content used for rank equality.
+
+    The projection retains numerical arrays through their strict field hashes,
+    all currents and diagnostics, convergence histories, controls, and
+    certification decisions. It excludes only runtime measurements,
+    checkpoint transport records, and MPI orchestration provenance.
+    """
+
+    if isinstance(value, ProductionToyGateReport):
+        value = value.as_dict()
+    if isinstance(value, Mapping):
+        return {
+            str(key): production_toy_physics_document(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _PHYSICS_DIGEST_EXCLUDED_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [production_toy_physics_document(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def production_toy_physics_sha256(
+    report: ProductionToyGateReport | Mapping[str, Any],
+) -> str:
+    """Hash the timing-independent full scientific report projection."""
+
+    if not isinstance(report, (ProductionToyGateReport, Mapping)):
+        raise TypeError(
+            "report must be a ProductionToyGateReport or mapping."
+        )
+    document = production_toy_physics_document(report)
+    payload = json.dumps(
+        document,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionToyMPIPhysicsResult:
     campaign: ProductionToyMPICampaign
@@ -723,6 +791,8 @@ __all__ = [
     "ProductionToyPhysicsExecutor",
     "ProductionToyPhysicsMergeError",
     "attach_mpi_execution_provenance",
+    "production_toy_physics_document",
+    "production_toy_physics_sha256",
     "reconstruct_open_three_mode_run",
     "run_production_toy_mpi_physics",
 ]

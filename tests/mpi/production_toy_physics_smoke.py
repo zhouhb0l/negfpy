@@ -9,7 +9,6 @@ Run from the environment that owns both ``mpiexec`` and ``mpi4py``::
 from __future__ import annotations
 
 from dataclasses import replace
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -20,6 +19,7 @@ from mpi4py import MPI
 from negfpy.anharmonic._mpi_tasks import serial_task_communicator
 from negfpy.anharmonic.grid import SignedFrequencyGrid
 from negfpy.anharmonic.toy._mpi_production_gate_physics import (
+    production_toy_physics_sha256,
     run_production_toy_mpi_physics,
 )
 from negfpy.anharmonic.toy.multidimensional_release import (
@@ -31,29 +31,6 @@ from negfpy.anharmonic.toy.open_three_mode import OpenThreeModeFixture
 _SOURCE_REVISION = "mpi-physics-smoke-v1"
 _SOURCE_TREE_SHA256 = "a" * 64
 _ENVIRONMENT_SHA256 = "b" * 64
-_TIMING_KEYS = {
-    "asymptotic_dense_time",
-    "elapsed_ratio_right_over_left",
-    "elapsed_seconds",
-    "maximum_wall_seconds",
-    "median_wall_seconds",
-    "minimum_wall_seconds",
-    "oracle_wall_seconds",
-    "production_born_wall_seconds",
-    "production_wall_seconds",
-    "reconstruction_seconds",
-    "seed_elapsed_seconds",
-    "total_elapsed_seconds",
-    "total_wall_seconds",
-    "wall_seconds",
-}
-_ORCHESTRATION_KEYS = {
-    "checkpoint",
-    "checkpoint_evidence",
-    "orchestration_provenance",
-    "report_sha256",
-    "resumed",
-}
 
 
 def _config():
@@ -82,29 +59,6 @@ def _fixtures():
             ),
         ),
     )
-
-
-def _physics_document(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _physics_document(item)
-            for key, item in sorted(value.items())
-            if key not in _TIMING_KEYS and key not in _ORCHESTRATION_KEYS
-        }
-    if isinstance(value, list):
-        return [_physics_document(item) for item in value]
-    return value
-
-
-def _digest(document: Any) -> str:
-    payload = json.dumps(
-        _physics_document(document),
-        allow_nan=False,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _run(root: Path, *, comm: Any, execution_id: str):
@@ -168,13 +122,13 @@ def main() -> int:
     if result.execution.communicator_size != size:
         raise AssertionError("communicator size was not recorded exactly")
 
-    digest = _digest(result.report.as_dict())
+    digest = production_toy_physics_sha256(result.report)
     baseline_path = root / "bounded-physics-baseline.json"
     if mode == "initial":
         if size != 2:
             raise AssertionError("initial smoke must use exactly two ranks")
         assert serial is not None
-        serial_digest = _digest(serial.report.as_dict())
+        serial_digest = production_toy_physics_sha256(serial.report)
         if digest != serial_digest:
             raise AssertionError("serial and two-rank physics reports differ")
         baseline_path.write_text(
