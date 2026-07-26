@@ -3,13 +3,22 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from negfpy.core import heat_current_from_spectrum, surface_gf, transmission
+from negfpy.core import (
+    heat_current_from_spectrum,
+    surface_gf,
+    transmission,
+    transmission_kavg,
+)
 from negfpy.core.thermal_current import HBAR, KB
 from negfpy.models import (
     ChainParams,
+    SquareLatticeParams,
     analytic_band_max,
+    device_mass_defect,
     device_perfect_chain,
     lead_blocks,
+    square_lattice_device,
+    square_lattice_lead,
 )
 
 
@@ -124,3 +133,71 @@ def test_landauer_prefactor_and_current_sign_match_ballistic_quantum() -> None:
     assert actual > 0.0
     np.testing.assert_allclose(actual, expected, rtol=1.0e-8, atol=0.0)
     np.testing.assert_allclose(reversed_current, -actual, rtol=1.0e-13, atol=0.0)
+
+
+def test_mass_defect_transmission_is_converged_under_half_eta() -> None:
+    params = ChainParams(mass=1.0, spring=1.0)
+    lead = lead_blocks(params)
+    device = device_mass_defect(
+        n_layers=21,
+        params=params,
+        defect_index=10,
+        defect_mass=2.5,
+    )
+
+    for omega in (0.3, 0.8, 1.3, 1.8):
+        coarse = transmission(
+            omega,
+            device,
+            lead,
+            lead,
+            eta=1.0e-8,
+            eta_device=0.0,
+        )
+        refined = transmission(
+            omega,
+            device,
+            lead,
+            lead,
+            eta=5.0e-9,
+            eta_device=0.0,
+        )
+        relative_change = abs(refined - coarse) / max(abs(refined), 1.0e-15)
+        assert relative_change < 5.0e-8
+
+
+def test_square_lattice_full_bz_average_converges_below_half_percent() -> None:
+    params = SquareLatticeParams(mass=1.0, spring_x=1.0, spring_y=0.5)
+    lead = square_lattice_lead(params)
+    device = square_lattice_device(n_layers=1, params=params)
+    omega = 0.8
+
+    def average(n_points: int) -> float:
+        step = 2.0 * np.pi / n_points
+        kpoints = [
+            (float(value),)
+            for value in (np.arange(n_points) - n_points // 2) * step
+        ]
+        wrapped = {
+            round(float((point[0] + np.pi) % (2.0 * np.pi) - np.pi), 14)
+            for point in kpoints
+        }
+        assert len(wrapped) == n_points
+        return transmission_kavg(
+            omega=omega,
+            device=device,
+            lead_left=lead,
+            lead_right=lead,
+            kpoints=kpoints,
+            eta=1.0e-9,
+            eta_device=0.0,
+        )
+
+    coarse = average(255)
+    refined = average(511)
+    exact_channel_fraction = (
+        np.arccos(1.0 - omega**2 / (2.0 * params.spring_y)) / np.pi
+    )
+
+    assert abs(refined - coarse) / abs(refined) < 5.0e-3
+    assert abs(refined - exact_channel_fraction) / exact_channel_fraction < 5.0e-3
