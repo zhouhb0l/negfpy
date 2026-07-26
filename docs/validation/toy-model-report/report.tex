@@ -1132,14 +1132,17 @@ across ranks. Consequently, changing rank count changes scheduling but not
 the SCBA equations, finite-grid arithmetic, or convergence thresholds.
 
 The preregistered \MPIRankLadder{} ladder uses five fresh, isolated
-repetitions of the complete representative 28-task graph. This timing profile
-is intentionally noncertifying; its role is to select resources. Every
-repetition must complete with the same canonical physics digest before the
-smallest rank count within 5\% of the fastest time is considered. The toy
-campaign uses that candidate only if its speedup is at least \(2\times\);
-otherwise it uses the serial/FFT fallback. The locked production campaign is
-then rerun with the selected release count and must independently report
-\code{release_certified=true}.
+repetitions of the complete representative 28-task graph. Its
+multidimensional cases use the release-converged frequency, cutoff, lead
+regulator, and mixing controls; only its open-system timing fixtures remain
+bounded. No physics threshold is relaxed. This timing profile is nevertheless
+intentionally noncertifying: its role is to select resources, not to replace
+the exact release campaign. Every repetition must complete with the same
+canonical physics digest before the smallest rank count within 5\% of the
+fastest time is considered. The toy campaign uses that candidate only if its
+speedup is at least \(2\times\); otherwise it uses the serial/FFT fallback.
+The locked production campaign is then rerun with the selected release count
+and must independently report \code{release_certified=true}.
 
 \begin{table}[t]
 \centering

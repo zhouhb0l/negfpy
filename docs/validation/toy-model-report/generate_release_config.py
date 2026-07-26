@@ -622,7 +622,7 @@ def _campaign(
     commit: str,
     tree_sha: str,
     environment_sha: str,
-) -> tuple[list[str], dict[str, str], str]:
+) -> tuple[list[str], dict[str, str], str, dict[str, Any], str]:
     payload = _mapping(document.get("payload"), "campaign payload")
     expected = {
         "schema_name": "negfpy_task_manifest",
@@ -654,6 +654,10 @@ def _campaign(
         all(SHA_RE.fullmatch(str(value)) is not None for value in identity_hashes.values()),
         "campaign identity hashes are invalid",
     )
+    protocol_configuration_sha256 = _sha(
+        identity_hashes.get("protocol_configuration_sha256"),
+        "campaign protocol configuration SHA256",
+    )
     run_identity = _hash_document(
         {
             "source_revision": commit,
@@ -671,6 +675,7 @@ def _campaign(
     task_ids: list[str] = []
     task_identities: dict[str, str] = {}
     kind_counts: dict[str, int] = {}
+    preflight_configurations: list[dict[str, Any]] = []
     for ordinal, raw_task in enumerate(tasks):
         task = _mapping(raw_task, f"campaign task {ordinal}")
         task_id = task.get("task_id")
@@ -699,6 +704,24 @@ def _campaign(
             == "multidimensional_toy_gate_v2",
             f"campaign task contract changed for {task_id}",
         )
+        if ordinal < 2:
+            preflight_configuration = _mapping(
+                task_payload.get("config"),
+                f"campaign preflight {task_id} configuration",
+            )
+            _require(
+                hashes.get("protocol_configuration_sha256")
+                == protocol_configuration_sha256,
+                f"campaign preflight {task_id} protocol configuration "
+                "SHA256 differs from the campaign",
+            )
+            preflight_configurations.append(dict(preflight_configuration))
+        else:
+            _require(
+                task_payload.get("config_sha256") == protocol_configuration_sha256,
+                f"campaign task {task_id} protocol configuration SHA256 "
+                "differs from the campaign",
+            )
         derived = _hash_document(
             {
                 "run_identity_sha256": run_identity,
@@ -770,7 +793,28 @@ def _campaign(
         ],
         "campaign task-kind ordering changed",
     )
-    return task_ids, task_identities, str(document["payload_sha256"])
+    _require(
+        len(preflight_configurations) == 2
+        and preflight_configurations[0] == preflight_configurations[1],
+        "campaign preflight configurations differ",
+    )
+    configuration = preflight_configurations[0]
+    _require(
+        _hash_document(configuration) == protocol_configuration_sha256,
+        "campaign preflight configuration does not match the protocol "
+        "configuration SHA256",
+    )
+    _require(
+        configuration.get("certification_eligible") is (profile == "release"),
+        "campaign configuration certification eligibility differs from its profile",
+    )
+    return (
+        task_ids,
+        task_identities,
+        str(document["payload_sha256"]),
+        configuration,
+        protocol_configuration_sha256,
+    )
 
 
 def _execution(
@@ -1098,7 +1142,13 @@ def _worker(
         f"{profile} worker nested paths are not canonical",
     )
     campaign_document = _read_envelope(campaign_path, "campaign manifest")
-    task_ids, task_identities, campaign_sha = _campaign(
+    (
+        task_ids,
+        task_identities,
+        campaign_sha,
+        configuration,
+        campaign_configuration_sha256,
+    ) = _campaign(
         campaign_document,
         profile=profile,
         commit=commit,
@@ -1154,7 +1204,14 @@ def _worker(
         socket_count=socket_count,
         name=f"{profile} worker runtime",
     )
-    _sha(payload.get("configuration_sha256"), f"{profile} configuration SHA256")
+    worker_configuration_sha256 = _sha(
+        payload.get("configuration_sha256"),
+        f"{profile} configuration SHA256",
+    )
+    _require(
+        worker_configuration_sha256 == campaign_configuration_sha256,
+        f"{profile} worker configuration SHA256 differs from its campaign",
+    )
     report_document = _strict_json(
         report_path, "strict report", style="indent-utf8"
     )
@@ -1174,6 +1231,8 @@ def _worker(
         ).get("report_sha256"),
         "physics_sha256": physics_sha,
         "memory_fraction": memory_fraction,
+        "configuration": configuration,
+        "configuration_sha256": worker_configuration_sha256,
     }
 
 
@@ -1274,6 +1333,8 @@ def _selection(
     observed: set[int] = set()
     maximum_memory = 0.0
     terminal_rank_evidence: list[dict[str, Any]] = []
+    scaling_configuration: dict[str, Any] | None = None
+    scaling_configuration_sha256: str | None = None
     for row_value in rows:
         row = _mapping(row_value, "rank evidence")
         rank = row.get("rank_count")
@@ -1349,6 +1410,16 @@ def _selection(
             environment_sha=environment_sha,
             expected_execution_id=f"scaling-rank-{rank:03d}",
         )
+        if scaling_configuration is None:
+            scaling_configuration = dict(worker["configuration"])
+            scaling_configuration_sha256 = str(worker["configuration_sha256"])
+        else:
+            _require(
+                worker["configuration"] == scaling_configuration
+                and worker["configuration_sha256"]
+                == scaling_configuration_sha256,
+                f"rank-{rank} scaling configuration differs across rank counts",
+            )
         _require(
             rank_payload.get("worker_result_file_sha256") == worker["file_sha256"]
             and rank_payload.get("worker_result_payload_sha256")
@@ -1417,6 +1488,11 @@ def _selection(
             }
         )
     _require(observed == set(RANK_LADDER), "rank evidence ladder is incomplete")
+    _require(
+        scaling_configuration is not None
+        and scaling_configuration_sha256 is not None,
+        "scaling configuration evidence is absent",
+    )
     return (
         {
             "commit": commit,
@@ -1435,6 +1511,8 @@ def _selection(
             "maximum_memory": maximum_memory,
             "physical_core_count": cores,
             "rank_evidence": terminal_rank_evidence,
+            "configuration": scaling_configuration,
+            "configuration_sha256": scaling_configuration_sha256,
         },
         {
             "file_sha256": _file_sha256(selection_path),
@@ -3230,6 +3308,20 @@ def generate_config(
         environment_sha=scaling["environment_sha"],
         expected_execution_id=execution_id,
         nested_root=artifact_tree.root / "toy-release",
+    )
+    scaling_configuration = dict(scaling["configuration"])
+    release_configuration = dict(release["configuration"])
+    expected_scaling_configuration = dict(release_configuration)
+    _require(
+        release_configuration.get("certification_eligible") is True
+        and scaling_configuration.get("certification_eligible") is False,
+        "scaling/release configuration eligibility states are invalid",
+    )
+    expected_scaling_configuration["certification_eligible"] = False
+    _require(
+        scaling_configuration == expected_scaling_configuration,
+        "scaling configuration differs from release configuration beyond "
+        "certification eligibility",
     )
     publication_chain = _validate_publication_chain(
         artifact_tree,

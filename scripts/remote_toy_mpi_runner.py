@@ -2,9 +2,10 @@
 """Exact task-MPI scaling and release entry points for the production toy gate.
 
 The scaling driver launches five fresh, isolated repetitions of the complete
-28-task campaign.  It changes only the preregistered numerical resolution for
-timing and is therefore irrevocably noncertifying.  The release entry point
-uses the locked production fixtures without exposing scientific overrides.
+28-task campaign.  It uses the release-converged multidimensional controls and
+bounded open-system timing fixtures, and is therefore irrevocably
+noncertifying.  The release entry point uses the locked production fixtures
+without exposing scientific overrides.
 """
 
 from __future__ import annotations
@@ -513,29 +514,14 @@ def representative_scaling_profile() -> tuple[Any, tuple[tuple[str, Any], ...]]:
 
     from negfpy.anharmonic.grid import SignedFrequencyGrid
     from negfpy.anharmonic.toy.multidimensional_release import (
-        MultidimensionalLadderSpec,
-        MultidimensionalNumericalPoint,
         full_multidimensional_release_config,
     )
     from negfpy.anharmonic.toy.production_gate_runner import (
         open_three_mode_release_fixtures,
     )
 
-    spec = MultidimensionalLadderSpec(
-        spacings=(0.025, 0.0125, 0.00625),
-        cutoffs=(5.0, 6.0),
-        etas=(0.05, 0.025, 0.0125),
-        mixings=(0.2, 0.1),
-    )
     config = replace(
         full_multidimensional_release_config(),
-        spec=spec,
-        numerical=MultidimensionalNumericalPoint(
-            spacing=0.0125,
-            cutoff=5.0,
-            eta_lead=0.025,
-            mixing=0.2,
-        ),
         certification_eligible=False,
     )
     fixtures = open_three_mode_release_fixtures(

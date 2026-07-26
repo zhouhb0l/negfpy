@@ -320,7 +320,42 @@ def _runtime(rank_count: int, *, execution_id: str | None = None) -> list[dict]:
     return rows
 
 
-def _task_rows(profile: str) -> list[dict]:
+def _protocol_configuration(
+    profile: str,
+    *,
+    changed_numerical_control: bool = False,
+) -> dict:
+    configuration = {
+        "protocol": "multidimensional_toy_gate_v2",
+        "protocol_version": 2,
+        "profile": "release",
+        "coarse": False,
+        "certification_eligible": profile == "release",
+        "spec": {
+            "spacings": [0.0015625, 0.00078125, 0.000390625],
+            "cutoffs": [5.0, 6.0],
+            "etas": [0.003125, 0.0015625, 0.00078125],
+            "mixings": [0.2, 0.1],
+        },
+        "numerical": {
+            "spacing": 0.00078125,
+            "cutoff": 5.0,
+            "eta_lead": 0.0015625,
+            "mixing": 0.2,
+        },
+        "solver": {"max_iterations": 200, "production_backend": "fft"},
+    }
+    if changed_numerical_control:
+        configuration["numerical"]["spacing"] = 0.0007
+    return configuration
+
+
+def _task_rows(
+    profile: str,
+    *,
+    configuration: dict,
+    configuration_fault: str | None = None,
+) -> list[dict]:
     gate = "multidimensional.direct-zero-endpoint"
     descriptors: list[tuple[str, str, list[str], str | None]] = [
         ("preflight.harmonic-same-grid", "harmonic_preflight", [], None),
@@ -359,7 +394,10 @@ def _task_rows(profile: str) -> list[dict]:
             )
         )
 
-    identity_hashes = {"protocol_configuration_sha256": _hash({"profile": profile})}
+    configuration_sha256 = _hash(configuration)
+    identity_hashes = {
+        "protocol_configuration_sha256": configuration_sha256
+    }
     run_identity = _hash(
         {
             "source_revision": COMMIT,
@@ -370,10 +408,6 @@ def _task_rows(profile: str) -> list[dict]:
     )
     tasks: list[dict] = []
     for ordinal, (task_id, kind, dependencies, parent) in enumerate(descriptors):
-        hashes = {
-            "configuration": _hash({"profile": profile, "task_id": task_id}),
-            "problem": _hash({"task_id": task_id}),
-        }
         payload = {
             "campaign_schema": "negfpy_protocol_v2_toy_mpi_campaign",
             "campaign_schema_version": 1,
@@ -382,6 +416,39 @@ def _task_rows(profile: str) -> list[dict]:
             "dependencies": dependencies,
             "continuation_parent_task_id": parent,
         }
+        if ordinal < 2:
+            task_configuration = json.loads(json.dumps(configuration))
+            if (
+                configuration_fault == "preflight_hash_mismatch"
+                or configuration_fault == "preflight_mismatch" and ordinal == 1
+            ):
+                task_configuration["numerical"]["spacing"] = 0.0006
+            payload["config"] = task_configuration
+            hashes = {
+                "protocol_configuration_sha256": configuration_sha256,
+                "preflight_sha256": _hash(
+                    {
+                        "kind": (
+                            "harmonic_same_grid"
+                            if ordinal == 0
+                            else "bounded_backend"
+                        ),
+                        "config": task_configuration,
+                    }
+                ),
+            }
+        else:
+            payload["config_sha256"] = (
+                "f" * 64
+                if configuration_fault == "task_hash_mismatch" and ordinal == 2
+                else configuration_sha256
+            )
+            hashes = {
+                "configuration": _hash(
+                    {"profile": profile, "task_id": task_id}
+                ),
+                "problem": _hash({"task_id": task_id}),
+            }
         task = {
             "task_id": task_id,
             "identity_hashes": hashes,
@@ -394,8 +461,20 @@ def _task_rows(profile: str) -> list[dict]:
     return tasks
 
 
-def _campaign_payload(profile: str) -> dict:
-    identity_hashes = {"protocol_configuration_sha256": _hash({"profile": profile})}
+def _campaign_payload(
+    profile: str,
+    *,
+    configuration: dict | None = None,
+    configuration_fault: str | None = None,
+) -> dict:
+    selected_configuration = (
+        _protocol_configuration(profile)
+        if configuration is None
+        else configuration
+    )
+    identity_hashes = {
+        "protocol_configuration_sha256": _hash(selected_configuration)
+    }
     return {
         "schema_name": "negfpy_task_manifest",
         "schema_version": 1,
@@ -420,7 +499,11 @@ def _campaign_payload(profile: str) -> dict:
                 "identity_hashes": identity_hashes,
             }
         ),
-        "tasks": _task_rows(profile),
+        "tasks": _task_rows(
+            profile,
+            configuration=selected_configuration,
+            configuration_fault=configuration_fault,
+        ),
     }
 
 
@@ -542,6 +625,7 @@ class CanonicalFixture:
         bad_source_manifest: bool = False,
         bad_launch_environment: bool = False,
         failed_post_run: bool = False,
+        configuration_fault: str | None = None,
     ) -> None:
         self.root = root
         self.artifact_nonce = artifact_nonce
@@ -553,6 +637,18 @@ class CanonicalFixture:
         self.bad_source_manifest = bad_source_manifest
         self.bad_launch_environment = bad_launch_environment
         self.failed_post_run = failed_post_run
+        allowed_configuration_faults = {
+            None,
+            "preflight_mismatch",
+            "preflight_hash_mismatch",
+            "task_hash_mismatch",
+            "worker_hash_mismatch",
+            "cross_rank_mismatch",
+            "scaling_release_mismatch",
+        }
+        if configuration_fault not in allowed_configuration_faults:
+            raise ValueError("unknown configuration fault")
+        self.configuration_fault = configuration_fault
         self.artifacts = root / "artifacts"
         self.report = root / "report"
         self.attempt = 1
@@ -566,9 +662,37 @@ class CanonicalFixture:
         self._build_report_trees()
         self.output = self.report / "release_config.tex"
 
-    def _build_worker(self, worker_root: Path, *, profile: str, rank_count: int, execution_id: str) -> dict:
+    def _build_worker(
+        self,
+        worker_root: Path,
+        *,
+        profile: str,
+        rank_count: int,
+        execution_id: str,
+    ) -> dict:
+        changed_numerical_control = profile == "scaling" and (
+            self.configuration_fault == "scaling_release_mismatch"
+            or (
+                self.configuration_fault == "cross_rank_mismatch"
+                and rank_count == 4
+            )
+        )
+        configuration = _protocol_configuration(
+            profile,
+            changed_numerical_control=changed_numerical_control,
+        )
+        campaign_fault = (
+            self.configuration_fault if profile == "scaling" else None
+        )
         campaign_path = worker_root / "campaign-manifest.json"
-        campaign = _write_envelope(campaign_path, _campaign_payload(profile))
+        campaign = _write_envelope(
+            campaign_path,
+            _campaign_payload(
+                profile,
+                configuration=configuration,
+                configuration_fault=campaign_fault,
+            ),
+        )
         campaign_sha = campaign["payload_sha256"]
         tasks = campaign["payload"]["tasks"]
         outcomes: list[dict] = []
@@ -670,7 +794,11 @@ class CanonicalFixture:
             "campaign_manifest_sha256": campaign_sha,
             "execution_scientific_sha256": scientific,
             "production_toy_physics_sha256": MODULE._physics_sha256(report),
-            "configuration_sha256": _hash({"profile": profile}),
+            "configuration_sha256": (
+                "e" * 64
+                if campaign_fault == "worker_hash_mismatch"
+                else _hash(configuration)
+            ),
             "campaign_manifest": _record(worker_root, campaign_path),
             "execution_manifest": _record(worker_root, execution_path),
             "strict_report": _record(worker_root, report_path),
@@ -1473,6 +1601,56 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertFalse(any(self.fixture.report.glob(".release_config.tex.*.tmp")))
         self.assertIn("\\newcommand{\\HistoricalWangBornErrorAt100K}{0.49}", text)
         self.assertIn("\\newcommand{\\HistoricalMingoPrintedRMSError}{3.2301}", text)
+
+    def _assert_configuration_fault_rejected(
+        self,
+        fault: str,
+        message: str,
+    ) -> None:
+        forged = CanonicalFixture(
+            self.root / fault,
+            configuration_fault=fault,
+        )
+        with self.assertRaisesRegex(MODULE.ReleaseConfigError, message):
+            MODULE.generate_config(**forged.kwargs())
+
+    def test_rejects_preflight_configuration_disagreement(self) -> None:
+        self._assert_configuration_fault_rejected(
+            "preflight_mismatch",
+            "preflight configurations differ",
+        )
+
+    def test_rejects_preflight_configuration_hash_mismatch(self) -> None:
+        self._assert_configuration_fault_rejected(
+            "preflight_hash_mismatch",
+            "preflight configuration does not match the protocol",
+        )
+
+    def test_rejects_task_protocol_configuration_hash_mismatch(self) -> None:
+        self._assert_configuration_fault_rejected(
+            "task_hash_mismatch",
+            "task .* protocol configuration SHA256 differs from the campaign",
+        )
+
+    def test_rejects_worker_campaign_configuration_hash_mismatch(self) -> None:
+        self._assert_configuration_fault_rejected(
+            "worker_hash_mismatch",
+            "worker configuration SHA256 differs from its campaign",
+        )
+
+    def test_rejects_configuration_drift_across_scaling_ranks(self) -> None:
+        self._assert_configuration_fault_rejected(
+            "cross_rank_mismatch",
+            "scaling configuration differs across rank counts",
+        )
+
+    def test_rejects_scaling_release_configuration_difference_beyond_eligibility(
+        self,
+    ) -> None:
+        self._assert_configuration_fault_rejected(
+            "scaling_release_mismatch",
+            "differs from release configuration beyond certification eligibility",
+        )
 
     def test_real_staging_validator_rejects_comment_only_tex_fixture(self) -> None:
         MODULE._validate_staging = REAL_VALIDATE_STAGING

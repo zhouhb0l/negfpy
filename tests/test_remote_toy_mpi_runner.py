@@ -10,6 +10,9 @@ import pytest
 from negfpy.anharmonic.toy._mpi_production_gate import (
     build_production_toy_mpi_campaign,
 )
+from negfpy.anharmonic.toy.multidimensional_release import (
+    full_multidimensional_release_config,
+)
 
 
 SCRIPTS = pathlib.Path(__file__).parents[1] / "scripts"
@@ -24,6 +27,7 @@ _PHYSICS_SHA256 = "d" * 64
 
 def test_representative_scaling_profile_has_exact_full_28_task_topology() -> None:
     config, fixtures = runner.representative_scaling_profile()
+    release_config = full_multidimensional_release_config()
     campaign = build_production_toy_mpi_campaign(
         source_revision=_SOURCE_REVISION,
         source_tree_sha256=_SOURCE_TREE_SHA256,
@@ -36,14 +40,17 @@ def test_representative_scaling_profile_has_exact_full_28_task_topology() -> Non
     assert not config.certification_eligible
     assert config.executed_g_values == (0.0, 0.025, 0.05)
     assert config.executed_bias_values == (0.0, 0.1, 0.2)
-    assert config.spec.spacings == (0.025, 0.0125, 0.00625)
+    assert config.spec.spacings == (0.0015625, 0.00078125, 0.000390625)
     assert config.spec.cutoffs == (5.0, 6.0)
-    assert config.spec.etas == (0.05, 0.025, 0.0125)
+    assert config.spec.etas == (0.003125, 0.0015625, 0.00078125)
     assert config.spec.mixings == (0.2, 0.1)
-    assert config.numerical.spacing == 0.0125
+    assert config.numerical.spacing == 0.00078125
     assert config.numerical.cutoff == 5.0
-    assert config.numerical.eta_lead == 0.025
+    assert config.numerical.eta_lead == 0.0015625
     assert config.numerical.mixing == 0.2
+    release_document = release_config.as_dict()
+    release_document["certification_eligible"] = False
+    assert config.as_dict() == release_document
     assert config.max_iterations == 200
     assert config.min_iterations == 3
     assert config.consecutive_passes == 3
@@ -106,6 +113,43 @@ def _memory_record(rank: int) -> dict[str, object]:
         rank_count=rank,
         available_memory_bytes=10**15,
     )
+
+
+def test_scaling_memory_preflight_tracks_release_converged_grid() -> None:
+    record = runner.campaign_dense_memory_preflight(
+        profile="scaling",
+        rank_count=16,
+        available_memory_bytes=20_000_000_000,
+    )
+
+    assert isinstance(record.pop("measured_utc"), str)
+    assert record == {
+        "schema": "negfpy.remote_toy_mpi.aggregate_memory_preflight.v1",
+        "measurement": "linux_proc_meminfo_MemAvailable",
+        "profile": "scaling",
+        "rank_count": 16,
+        "allowed_fraction": 0.70,
+        "available_memory_bytes": 20_000_000_000,
+        "limit_bytes": 14_000_000_000,
+        "per_rank_predicted_bytes": 716_659_488,
+        "aggregate_predicted_bytes": 11_466_551_808,
+        "contributors": [
+            {
+                "kind": "multidimensional_cross_product_upper_bound",
+                "n_frequency": 30_721,
+                "ndof": 9,
+                "predicted_bytes": 716_659_488,
+            },
+            {
+                "kind": "open_three_mode_largest_fixture",
+                "fixture": "refine_spacing_half",
+                "n_frequency": 16_001,
+                "ndof": 3,
+                "predicted_bytes": 41_474_592,
+            },
+        ],
+        "passed": True,
+    }
 
 
 def _mock_environment(root: pathlib.Path) -> pathlib.Path:

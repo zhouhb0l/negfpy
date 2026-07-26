@@ -275,24 +275,30 @@ count. The outer process measures the complete launcher wall time.
 
 The representative campaign is explicitly noncertifying, but it retains the
 full physical and orchestration topology: two preflights, a hardest direct-zero
-endpoint, the five-point coupling/bias continuation, one Born-start and six independently varied
-nine-DOF outcomes, and the 13 signed-coupling/temperature open-system cases.
-The multidimensional controls are:
+endpoint, the five-point coupling/bias continuation, one Born-start and six
+independently varied nine-DOF outcomes, and the 13
+signed-coupling/temperature open-system cases. Its multidimensional portion
+uses the release-converged controls:
 
 ```text
-base:       dw=0.0125, cutoff=5, eta_lead=0.025, mixing=0.2
-spacing:    0.025, 0.0125, 0.00625
+base:       dw=0.00078125, cutoff=5, eta_lead=0.0015625, mixing=0.2
+spacing:    0.0015625, 0.00078125, 0.000390625
 cutoff:     5, 6
-eta_lead:   0.05, 0.025, 0.0125
+eta_lead:   0.003125, 0.0015625, 0.00078125
 mixing:     0.2, 0.1
 solver:     FFT convolution/Hilbert, complex128, max_iterations=200
 thresholds: production fixed-point and conservation tolerances unchanged
 ```
 
-The open-system base grid is `dw=0.00125`, cutoff 5, and
-`eta_lead=0.0008`. It uses the existing ten-case Cartesian matrix of
+The open-system portion remains a bounded timing fixture: its base grid is
+`dw=0.00125`, cutoff 5, and `eta_lead=0.0008`. It uses the existing
+ten-case Cartesian matrix of
 `T=(0,0.7)` and signed `g=(-0.02,-0.01,0,0.01,0.02)`, plus independent
 half-spacing, cutoff-6, and half-eta cases.
+
+For the locked 16-rank maximum, the conservative cross-product upper bound is
+30,721 frequency points and 716,659,488 bytes per rank, or 11,466,551,808
+bytes in aggregate. The live 70% `MemAvailable` gate remains mandatory.
 
 Every repetition writes an immutable hashed worker result and an outer
 `rank-NNN-manifest.json`. `scaling-selection.json` is published only after all
