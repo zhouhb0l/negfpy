@@ -241,6 +241,7 @@ def _record_remote_environment(
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
             "machine": platform.machine(),
+            **core.machine_cpu_topology(),
             "cpu_count": os.cpu_count(),
             "cpu_model": cpu_model,
             "memory_total_bytes": memory_total,

@@ -431,6 +431,42 @@ def _environment_lock() -> tuple[str, dict[str, Any]]:
     return text, manifest
 
 
+def machine_cpu_topology() -> dict[str, int]:
+    """Return physical cores and sockets visible to the current process."""
+
+    allowed = (
+        set(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else set(range(os.cpu_count() or 0))
+    )
+    core_keys: set[tuple[int, int]] = set()
+    sockets: set[int] = set()
+    root = pathlib.Path("/sys/devices/system/cpu")
+    for cpu in sorted(allowed):
+        topology = root / f"cpu{cpu}" / "topology"
+        try:
+            socket = int(
+                (topology / "physical_package_id").read_text().strip()
+            )
+            core = int((topology / "core_id").read_text().strip())
+        except (OSError, ValueError):
+            continue
+        sockets.add(socket)
+        core_keys.add((socket, core))
+    if not core_keys:
+        logical = len(allowed) or int(os.cpu_count() or 1)
+        return {
+            "affinity_logical_cpu_count": logical,
+            "physical_core_count": logical,
+            "socket_count": 1,
+        }
+    return {
+        "affinity_logical_cpu_count": len(allowed),
+        "physical_core_count": len(core_keys),
+        "socket_count": len(sockets),
+    }
+
+
 def mpi_environment_identity() -> dict[str, Any]:
     """Return and validate the lock environment's MPI implementation.
 

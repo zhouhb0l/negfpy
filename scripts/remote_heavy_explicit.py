@@ -133,10 +133,29 @@ meminfo = pathlib.Path("/proc/meminfo")
 if meminfo.is_file():
     values = dict(line.split(":", 1) for line in meminfo.read_text().splitlines() if ":" in line)
     memory_available = int(values["MemAvailable"].split()[0]) * 1024
+allowed = set(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else set(range(os.cpu_count() or 0))
+physical_cores = set()
+sockets = set()
+for cpu in sorted(allowed):
+    topology = pathlib.Path("/sys/devices/system/cpu") / f"cpu{cpu}" / "topology"
+    try:
+        package_id = int((topology / "physical_package_id").read_text().strip())
+        core_id = int((topology / "core_id").read_text().strip())
+    except (OSError, ValueError):
+        continue
+    sockets.add(package_id)
+    physical_cores.add((package_id, core_id))
+if not physical_cores:
+    physical_cores = {(0, cpu) for cpu in allowed}
+if not sockets:
+    sockets = {0}
 print(json.dumps({
     "schema": "negfpy.remote_validation.machine.v1",
     "hostname": socket.gethostname(), "platform": platform.platform(),
     "machine": platform.machine(), "cpu_count": os.cpu_count(),
+    "affinity_logical_cpu_count": len(allowed),
+    "physical_core_count": len(physical_cores),
+    "socket_count": len(sockets),
     "cpu_model": cpu_model, "memory_total_bytes": memory,
     "memory_available_bytes": memory_available, "home_disk_total_bytes": disk.total,
     "home_disk_free_bytes": disk.free, "python_executable": sys.executable,

@@ -213,10 +213,21 @@ def test_committed_lock_pins_one_openmpi_and_matching_mpi4py() -> None:
 def test_remote_machine_probe_is_valid_and_complete_python() -> None:
     compile(explicit._MACHINE_PROGRAM, "<remote-machine-probe>", "exec")
     for field in (
+        "affinity_logical_cpu_count",
+        "physical_core_count",
+        "socket_count",
         "cpu_model", "memory_total_bytes", "memory_available_bytes",
         "home_disk_total_bytes", "home_disk_free_bytes",
     ):
         assert field in explicit._MACHINE_PROGRAM
+
+
+def test_local_cpu_topology_is_positive_and_not_oversubscribed() -> None:
+    topology = core.machine_cpu_topology()
+    assert topology["affinity_logical_cpu_count"] >= 1
+    assert topology["physical_core_count"] >= 1
+    assert topology["socket_count"] >= 1
+    assert topology["physical_core_count"] <= topology["affinity_logical_cpu_count"]
 
 
 def test_commit_and_session_inputs_cannot_inject_remote_commands() -> None:
@@ -309,6 +320,9 @@ def _worker_identity(lock_sha: str) -> dict[str, object]:
         "hostname": "validation-host",
         "platform": "Linux-test",
         "machine": "x86_64",
+        "affinity_logical_cpu_count": 152,
+        "physical_core_count": 76,
+        "socket_count": 2,
         "python_executable": "/validation/environment/bin/python",
         "python_version": "3.10.0",
         "distributions": {"numpy": "1.0", "negfpy": "0.1"},
