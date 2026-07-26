@@ -22,13 +22,15 @@ import remote_heavy_runtime as operations
 import remote_heavy_identity
 import remote_heavy_explicit as explicit
 import remote_heavy_validation as core
+import remote_mpi_scaling
+import remote_toy_mpi_runner
 
 
 def _remote_bootstrap_command(commit: str) -> str:
     remote = core._remote_shell_dir(commit)
     return " && ".join(
         (
-            f"mkdir -p {remote}/incoming {remote}/artifacts/checkpoints",
+            f"mkdir -p {remote}/incoming {remote}/artifacts",
             f"cd {remote}/incoming",
             "sha256sum -c SHA256SUMS",
             f"test \"$(sha256sum environment-explicit.lock | cut -d' ' -f1)\" = "
@@ -457,12 +459,775 @@ def _archive_identity_bundle(
     return bundle
 
 
+def _strict_envelope(path: pathlib.Path, *, name: str) -> dict[str, Any]:
+    """Load a canonical payload envelope and verify its semantic SHA256."""
+
+    _require(
+        path.is_file() and not path.is_symlink(),
+        f"{name} is not a regular file: {path}",
+    )
+    document = _strict_json(path)
+    _require(
+        set(document) == {"payload", "payload_sha256"},
+        f"{name} has the wrong payload envelope",
+    )
+    payload = _mapping(document.get("payload"), name=f"{name}.payload")
+    digest = document.get("payload_sha256")
+    canonical_payload = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    _require(
+        _is_sha256(digest)
+        and hashlib.sha256(canonical_payload).hexdigest() == digest,
+        f"{name} payload SHA256 is invalid",
+    )
+    canonical_document = (
+        json.dumps(
+            document,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("ascii")
+    _require(
+        path.read_bytes() == canonical_document,
+        f"{name} is not canonical strict JSON",
+    )
+    return document
+
+
+def _validate_scaling_selection(
+    *,
+    selection_path: pathlib.Path,
+    source_revision: str,
+    environment_prefix: pathlib.Path,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    physical_core_count: int,
+    socket_count: int,
+) -> dict[str, Any]:
+    """Rebuild and validate the immutable five-rank scaling decision."""
+
+    try:
+        selection = remote_toy_mpi_runner.read_hashed_manifest(selection_path)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"invalid immutable MPI scaling selection: {error}"
+        ) from error
+    _require(
+        selection_path.is_file() and not selection_path.is_symlink(),
+        "MPI scaling selection is not a regular file",
+    )
+    scaling_root = selection_path.parent.resolve()
+    prefix = environment_prefix.resolve()
+    expected_launcher = (prefix / "bin" / "mpiexec").resolve()
+    expected_python = (prefix / "bin" / "python").resolve()
+    rank_manifests: list[tuple[pathlib.Path, Mapping[str, Any]]] = []
+    for rank_count in remote_mpi_scaling.RANK_LADDER:
+        rank_path = scaling_root / f"rank-{rank_count:03d}-manifest.json"
+        _require(
+            rank_path.is_file() and not rank_path.is_symlink(),
+            f"rank-{rank_count} scaling manifest is missing or unsafe",
+        )
+        try:
+            rank_document = remote_toy_mpi_runner.read_hashed_manifest(rank_path)
+        except Exception as error:
+            raise core.RemoteValidationError(
+                f"invalid rank-{rank_count} scaling manifest: {error}"
+            ) from error
+        rank_payload = _mapping(
+            rank_document.get("payload"),
+            name=f"rank-{rank_count} scaling payload",
+        )
+        launcher = _mapping(
+            rank_payload.get("launcher"),
+            name=f"rank-{rank_count} MPI launcher",
+        )
+        python = _mapping(
+            rank_payload.get("python"),
+            name=f"rank-{rank_count} Python",
+        )
+        argv = rank_payload.get("argv")
+        _require(
+            pathlib.Path(str(launcher.get("path"))).resolve()
+            == expected_launcher
+            and pathlib.Path(str(python.get("path"))).resolve()
+            == expected_python
+            and isinstance(argv, list)
+            and bool(argv)
+            and pathlib.Path(str(argv[0])).resolve() == expected_launcher
+            and str(expected_python) in argv,
+            f"rank-{rank_count} did not use the deployed MPI/Python environment",
+        )
+        rank_manifests.append((rank_path, rank_document))
+    try:
+        rebuilt = remote_toy_mpi_runner.build_scaling_selection_payload(
+            rank_manifests,
+            source_revision=source_revision,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+        )
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"MPI scaling evidence failed revalidation: {error}"
+        ) from error
+    payload = _mapping(selection.get("payload"), name="scaling selection payload")
+    supplied_without_time = {
+        key: value for key, value in payload.items() if key != "created_utc"
+    }
+    rebuilt_without_time = {
+        key: value for key, value in rebuilt.items() if key != "created_utc"
+    }
+    _require(
+        supplied_without_time == rebuilt_without_time,
+        "immutable MPI scaling selection differs from rebuilt rank evidence",
+    )
+    selection_record = _mapping(payload.get("selection"), name="scaling selection")
+    toy = _mapping(payload.get("toy_execution"), name="toy rank selection")
+    silicon = _mapping(
+        payload.get("silicon_execution"), name="silicon rank selection"
+    )
+    _require(
+        payload.get("schema")
+        == "negfpy.remote_toy_mpi.scaling_selection.v1"
+        and payload.get("source_revision") == source_revision
+        and payload.get("source_tree_sha256") == source_tree_sha256
+        and payload.get("environment_sha256") == environment_sha256
+        and payload.get("physics_equal_across_all_ranks") is True
+        and payload.get("fresh_isolated_repetitions") is True,
+        "MPI scaling selection identity or equality gate failed",
+    )
+    selected_rank = toy.get("rank_count")
+    toy_mpi_enabled = selection_record.get("toy_mpi_enabled")
+    silicon_rank = selection_record.get("silicon_rank_count")
+    _require(
+        isinstance(selected_rank, int)
+        and not isinstance(selected_rank, bool)
+        and selected_rank in remote_mpi_scaling.RANK_LADDER
+        and selected_rank == selection_record.get("toy_rank_count"),
+        "MPI scaling selection contains an invalid toy rank",
+    )
+    _require(
+        isinstance(toy_mpi_enabled, bool)
+        and (selected_rank > 1) is toy_mpi_enabled
+        and toy.get("mode")
+        == ("task_mpi" if toy_mpi_enabled else "serial_fft")
+        and toy.get("minimum_speedup_satisfied") is toy_mpi_enabled
+        and isinstance(silicon_rank, int)
+        and not isinstance(silicon_rank, bool)
+        and silicon_rank in remote_mpi_scaling.RANK_LADDER
+        and silicon.get("rank_count") == silicon_rank
+        and silicon.get("mode") == "task_mpi",
+        "MPI scaling execution policy is inconsistent",
+    )
+    raw_rank_evidence = payload.get("rank_evidence")
+    _require(
+        isinstance(raw_rank_evidence, list)
+        and len(raw_rank_evidence) == len(remote_mpi_scaling.RANK_LADDER),
+        "MPI scaling rank evidence is incomplete",
+    )
+    rank_evidence: list[dict[str, Any]] = []
+    for expected_rank, raw_record in zip(
+        remote_mpi_scaling.RANK_LADDER,
+        raw_rank_evidence,
+        strict=True,
+    ):
+        record = _mapping(
+            raw_record, name=f"rank-{expected_rank} scaling evidence"
+        )
+        launcher_memory = _mapping(
+            record.get("launcher_memory_preflight"),
+            name=f"rank-{expected_rank} launcher memory preflight",
+        )
+        worker_memory = _mapping(
+            record.get("worker_memory_preflight"),
+            name=f"rank-{expected_rank} worker memory preflight",
+        )
+        harmonic = _mapping(
+            record.get("harmonic_preflight"),
+            name=f"rank-{expected_rank} harmonic preflight",
+        )
+        runtime = record.get("rank_runtime")
+        required_hashes = (
+            "manifest_file_sha256",
+            "manifest_payload_sha256",
+            "worker_result_file_sha256",
+            "campaign_manifest_file_sha256",
+            "execution_manifest_file_sha256",
+            "strict_report_file_sha256",
+        )
+        _require(
+            record.get("rank_count") == expected_rank
+            and all(_is_sha256(record.get(key)) for key in required_hashes)
+            and launcher_memory.get("passed") is True
+            and launcher_memory.get("rank_count") == expected_rank
+            and worker_memory.get("passed") is True
+            and worker_memory.get("rank_count") == expected_rank
+            and harmonic.get("passed") is True
+            and harmonic.get("real_physics_executed") is True
+            and isinstance(runtime, list)
+            and len(runtime) == expected_rank,
+            f"rank-{expected_rank} scaling runtime evidence is incomplete",
+        )
+        rank_evidence.append(
+            {
+                "rank_count": expected_rank,
+                **{key: record[key] for key in required_hashes},
+                "launcher_memory_preflight_passed": True,
+                "worker_memory_preflight_passed": True,
+                "harmonic_preflight_passed": True,
+                "rank_runtime_count": len(runtime),
+            }
+        )
+    return {
+        "schema": "negfpy.remote_validation.scaling_facts.v1",
+        "selection_relative_path": selection_path.name,
+        "selection_file_sha256": core._sha256(selection_path),
+        "selection_payload_sha256": selection["payload_sha256"],
+        "production_toy_physics_sha256": payload.get(
+            "production_toy_physics_sha256"
+        ),
+        "physics_equal_across_all_ranks": True,
+        "toy_rank_count": selected_rank,
+        "toy_mpi_enabled": toy_mpi_enabled,
+        "silicon_rank_count": silicon_rank,
+        "candidate_speedup": selection_record.get("candidate_speedup"),
+        "rank_ladder": list(remote_mpi_scaling.RANK_LADDER),
+        "rank_evidence": rank_evidence,
+    }
+
+
+
+def _prior_scaling_selection(
+    *,
+    attempts: pathlib.Path,
+    current_attempt_root: pathlib.Path,
+    source_revision: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    environment_prefix: pathlib.Path,
+    physical_core_count: int,
+    socket_count: int,
+) -> tuple[pathlib.Path, dict[str, Any]] | None:
+    """Reuse only a completely revalidated prior ladder on exact retries."""
+
+    candidates = sorted(
+        (
+            path
+            for path in attempts.glob("attempt-[0-9][0-9][0-9]")
+            if path != current_attempt_root
+        ),
+        reverse=True,
+    )
+    for attempt_path in candidates:
+        selection_path = attempt_path / "mpi-scaling" / "scaling-selection.json"
+        if not selection_path.exists():
+            continue
+        facts = _validate_scaling_selection(
+            selection_path=selection_path,
+            source_revision=source_revision,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+            environment_prefix=environment_prefix,
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+        )
+        return selection_path, {
+            **facts,
+            "reused_for_exact_retry": True,
+            "source_attempt": attempt_path.name,
+        }
+    return None
+
+def _recorded_artifact_path(
+    *,
+    root: pathlib.Path,
+    record: Any,
+    name: str,
+) -> pathlib.Path:
+    evidence = _mapping(record, name=name)
+    relative_text = evidence.get("relative_path")
+    _require(
+        isinstance(relative_text, str) and bool(relative_text),
+        f"{name} lacks a relative path",
+    )
+    relative = pathlib.PurePosixPath(relative_text)
+    _require(
+        not relative.is_absolute()
+        and ".." not in relative.parts
+        and relative.as_posix() == relative_text,
+        f"{name} path is unsafe",
+    )
+    target = root.joinpath(*relative.parts)
+    _require(
+        target.is_file() and not target.is_symlink(),
+        f"{name} is missing or not a regular file",
+    )
+    resolved_root = root.resolve()
+    resolved = target.resolve(strict=True)
+    _require(resolved.is_relative_to(resolved_root), f"{name} escaped its run root")
+    expected_sha = evidence.get("sha256")
+    _require(
+        _is_sha256(expected_sha) and core._sha256(resolved) == expected_sha,
+        f"{name} file SHA256 is invalid",
+    )
+    return resolved
+
+
+def _executable_identity(path: pathlib.Path) -> dict[str, str]:
+    target = path.resolve(strict=True)
+    _require(
+        path.is_file() and os.access(path, os.X_OK),
+        f"executable is unavailable: {path}",
+    )
+    return {
+        "path": str(path),
+        "resolved_path": str(target),
+        "sha256": core._sha256(path),
+    }
+
+
+def _attempt_artifact_record(
+    root: pathlib.Path,
+    path: pathlib.Path,
+) -> dict[str, str]:
+    resolved_root = root.resolve()
+    resolved = path.resolve(strict=True)
+    _require(
+        resolved.is_relative_to(resolved_root)
+        and resolved.is_file()
+        and not path.is_symlink(),
+        f"release launch artifact is unsafe: {path}",
+    )
+    return {
+        "relative_path": resolved.relative_to(resolved_root).as_posix(),
+        "sha256": core._sha256(resolved),
+    }
+
+
+def _write_release_launch_receipt(
+    *,
+    path: pathlib.Path,
+    attempt_root: pathlib.Path,
+    environment_prefix: pathlib.Path,
+    argv: Sequence[str],
+    binding_arguments: Sequence[str],
+    selected_rank: int,
+    source_revision: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    execution_id: str,
+    started_utc: str,
+    finished_utc: str,
+    returncode: int,
+    stdout_path: pathlib.Path,
+    stderr_path: pathlib.Path,
+) -> dict[str, Any]:
+    payload = {
+        "schema": "negfpy.remote_validation.release_launch.v1",
+        "source_revision": source_revision,
+        "source_tree_sha256": source_tree_sha256,
+        "environment_sha256": environment_sha256,
+        "execution_id": execution_id,
+        "selected_rank_count": selected_rank,
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "returncode": returncode,
+        "argv": [str(value) for value in argv],
+        "binding_arguments": [str(value) for value in binding_arguments],
+        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+        "launcher": _executable_identity(
+            environment_prefix / "bin" / "mpiexec"
+        ),
+        "python": _executable_identity(environment_prefix / "bin" / "python"),
+        "stdout": _attempt_artifact_record(attempt_root, stdout_path),
+        "stderr": _attempt_artifact_record(attempt_root, stderr_path),
+    }
+    try:
+        return remote_toy_mpi_runner.write_hashed_manifest(path, payload)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"cannot publish immutable MPI release launch receipt: {error}"
+        ) from error
+
+
+def _validate_release_launch_receipt(
+    *,
+    path: pathlib.Path,
+    attempt_root: pathlib.Path,
+    environment_prefix: pathlib.Path,
+    selected_rank: int,
+    physical_core_count: int,
+    socket_count: int,
+    source_revision: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    execution_id: str,
+    release_root: pathlib.Path,
+    mpi_runner: pathlib.Path,
+) -> dict[str, Any]:
+    try:
+        document = remote_toy_mpi_runner.read_hashed_manifest(path)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"invalid immutable MPI release launch receipt: {error}"
+        ) from error
+    _require(
+        path.resolve() == (attempt_root / "mpi-release-launch.json").resolve()
+        and path.is_file()
+        and not path.is_symlink(),
+        "MPI release launch receipt path is not canonical",
+    )
+    payload = _mapping(document.get("payload"), name="MPI release launch payload")
+    python = environment_prefix / "bin" / "python"
+    launcher = environment_prefix / "bin" / "mpiexec"
+    program = (
+        str(python),
+        str(mpi_runner),
+        "release",
+        "--run-directory",
+        str(release_root),
+        "--source-revision",
+        source_revision,
+        "--source-tree-sha256",
+        source_tree_sha256,
+        "--environment-sha256",
+        environment_sha256,
+        "--execution-id",
+        execution_id,
+        "--expected-ranks",
+        str(selected_rank),
+    )
+    expected_binding = list(
+        remote_mpi_scaling.openmpi_binding_arguments(
+            selected_rank,
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+        )
+    )
+    expected_argv = list(
+        remote_mpi_scaling.environment_mpi_argv(
+            environment_prefix,
+            rank_count=selected_rank,
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+            program=program,
+        )
+    )
+    expected = {
+        "schema": "negfpy.remote_validation.release_launch.v1",
+        "source_revision": source_revision,
+        "source_tree_sha256": source_tree_sha256,
+        "environment_sha256": environment_sha256,
+        "execution_id": execution_id,
+        "selected_rank_count": selected_rank,
+        "returncode": 0,
+        "argv": expected_argv,
+        "binding_arguments": expected_binding,
+        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+    }
+    changed = {
+        key: (payload.get(key), value)
+        for key, value in expected.items()
+        if payload.get(key) != value
+    }
+    _require(not changed, f"MPI release launch receipt changed: {changed}")
+    _require(
+        isinstance(payload.get("started_utc"), str)
+        and isinstance(payload.get("finished_utc"), str)
+        and payload["started_utc"] <= payload["finished_utc"],
+        "MPI release launch timestamps are invalid",
+    )
+    launcher_record = _mapping(
+        payload.get("launcher"), name="MPI release launcher identity"
+    )
+    python_record = _mapping(
+        payload.get("python"), name="MPI release Python identity"
+    )
+    expected_launcher = _executable_identity(launcher)
+    expected_python = _executable_identity(python)
+    _require(
+        launcher_record == expected_launcher and python_record == expected_python,
+        "MPI release executable identity changed",
+    )
+    stdout = _recorded_artifact_path(
+        root=attempt_root,
+        record=payload.get("stdout"),
+        name="MPI release stdout",
+    )
+    stderr = _recorded_artifact_path(
+        root=attempt_root,
+        record=payload.get("stderr"),
+        name="MPI release stderr",
+    )
+    return {
+        "schema": "negfpy.remote_validation.release_launch_facts.v1",
+        "receipt_relative_path": path.relative_to(attempt_root).as_posix(),
+        "receipt_file_sha256": core._sha256(path),
+        "receipt_payload_sha256": document["payload_sha256"],
+        "launcher_file_sha256": launcher_record["sha256"],
+        "python_file_sha256": python_record["sha256"],
+        "stdout_relative_path": stdout.relative_to(attempt_root).as_posix(),
+        "stdout_file_sha256": core._sha256(stdout),
+        "stderr_relative_path": stderr.relative_to(attempt_root).as_posix(),
+        "stderr_file_sha256": core._sha256(stderr),
+        "selected_rank_count": selected_rank,
+        "binding_arguments": expected_binding,
+        "returncode": 0,
+    }
+
+
+def _validate_release_runner_result(
+    *,
+    result_path: pathlib.Path,
+    release_root: pathlib.Path,
+    execution_id: str,
+    selected_rank: int,
+    source_revision: str,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    socket_count: int,
+    environment_prefix: pathlib.Path,
+    launch_facts: Mapping[str, Any],
+) -> tuple[dict[str, Any], pathlib.Path, pathlib.Path]:
+    """Validate the MPI runner, campaign, execution, and strict-report chain."""
+
+    try:
+        result = remote_toy_mpi_runner.read_hashed_manifest(result_path)
+    except Exception as error:
+        raise core.RemoteValidationError(
+            f"invalid MPI release runner result: {error}"
+        ) from error
+    _require(
+        result_path.is_file() and not result_path.is_symlink(),
+        "MPI release runner result is not a regular file",
+    )
+    payload = _mapping(result.get("payload"), name="MPI release runner payload")
+    expected_mode = "serial" if selected_rank == 1 else "mpi"
+    expected = {
+        "schema": "negfpy.remote_toy_mpi.physics_result.v1",
+        "profile": "release",
+        "certification_eligible": True,
+        "release_certified": True,
+        "source_revision": source_revision,
+        "source_tree_sha256": source_tree_sha256,
+        "environment_sha256": environment_sha256,
+        "expected_rank_count": selected_rank,
+        "recorded_rank_count": selected_rank,
+        "task_count": 28,
+        "multidimensional_outcome_count": 13,
+        "open_system_case_count": 13,
+        "continuation_path_count": 5,
+        "all_outcomes_completed": True,
+    }
+    changed = {
+        key: (payload.get(key), value)
+        for key, value in expected.items()
+        if payload.get(key) != value
+    }
+    _require(not changed, f"MPI release runner result changed: {changed}")
+    _require(
+        payload.get("directory_mode") in {"fresh", "exact_resume_candidate"},
+        "MPI release runner recorded an invalid directory mode",
+    )
+    _require(
+        payload.get("thread_limits")
+        == dict(sorted(core.THREAD_LIMIT_ENV.items())),
+        "MPI release runner thread limits changed",
+    )
+    try:
+        deep_result = remote_toy_mpi_runner.validate_profile_worker_result(
+            result_path,
+            profile="release",
+            rank_count=selected_rank,
+            socket_count=socket_count,
+            source_revision=source_revision,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+            expected_execution_id=execution_id,
+            expected_directory_mode=str(payload.get("directory_mode")),
+        )
+    except Exception as error:
+        raise core.RemoteValidationError(
+            "MPI release artifact chain failed independent revalidation: "
+            f"{error}"
+        ) from error
+    deep_evidence = _mapping(
+        deep_result.get("_validated_evidence"),
+        name="MPI release artifact-chain evidence",
+    )
+    runtime = deep_evidence.get("rank_runtime")
+    expected_python = (environment_prefix.resolve() / "bin" / "python").resolve()
+    _require(
+        isinstance(runtime, list)
+        and len(runtime) == selected_rank
+        and all(
+            isinstance(item, Mapping)
+            and pathlib.Path(
+                str(_mapping(item.get("python"), name="rank Python").get("path"))
+            ).resolve()
+            == expected_python
+            for item in runtime
+        ),
+        "MPI release ranks did not use the deployed Python environment",
+    )
+    _require(
+        launch_facts.get("selected_rank_count") == selected_rank
+        and launch_facts.get("python_file_sha256")
+        == deep_evidence.get("python_file_sha256"),
+        "outer MPI launch receipt and rank runtime are not identity-bound",
+    )
+    for key in (
+        "campaign_manifest_sha256",
+        "execution_scientific_sha256",
+        "production_toy_physics_sha256",
+        "configuration_sha256",
+    ):
+        _require(_is_sha256(payload.get(key)), f"MPI runner {key} is invalid")
+
+    root = release_root.resolve()
+    campaign_path = _recorded_artifact_path(
+        root=root,
+        record=payload.get("campaign_manifest"),
+        name="MPI campaign manifest",
+    )
+    execution_path = _recorded_artifact_path(
+        root=root,
+        record=payload.get("execution_manifest"),
+        name="MPI execution manifest",
+    )
+    report_path = _recorded_artifact_path(
+        root=root,
+        record=payload.get("strict_report"),
+        name="MPI strict production report",
+    )
+    _require(
+        campaign_path == (root / "campaign-manifest.json").resolve()
+        and execution_path
+        == (root / "campaign-executions" / f"{execution_id}.json").resolve()
+        and report_path
+        == (root / "production-reports" / f"{execution_id}.json").resolve(),
+        "MPI runner artifact paths are not canonical",
+    )
+
+    campaign = _strict_envelope(campaign_path, name="MPI campaign manifest")
+    campaign_payload = _mapping(campaign["payload"], name="MPI campaign payload")
+    campaign_metadata = _mapping(
+        campaign_payload.get("metadata"), name="MPI campaign metadata"
+    )
+    campaign_tasks = campaign_payload.get("tasks")
+    if isinstance(campaign_tasks, list):
+        task_ids = [
+            task.get("task_id") if isinstance(task, Mapping) else None
+            for task in campaign_tasks
+        ]
+    else:
+        task_ids = []
+    _require(
+        campaign.get("payload_sha256") == payload.get("campaign_manifest_sha256")
+        and campaign_payload.get("schema_name") == "negfpy_task_manifest"
+        and campaign_payload.get("schema_version") == 1
+        and campaign_payload.get("source_revision") == source_revision
+        and campaign_payload.get("source_tree_sha256") == source_tree_sha256
+        and campaign_payload.get("environment_sha256") == environment_sha256
+        and campaign_metadata.get("schema")
+        == "negfpy_protocol_v2_toy_mpi_campaign"
+        and campaign_metadata.get("schema_version") == 1
+        and campaign_metadata.get("protocol")
+        == "multidimensional_toy_gate_v2"
+        and campaign_metadata.get("certification_eligible") is True
+        and campaign_metadata.get("multidimensional_outcome_count") == 13
+        and campaign_metadata.get("open_system_case_count") == 13
+        and campaign_metadata.get("continuation_path_count") == 5
+        and isinstance(campaign_tasks, list)
+        and len(campaign_tasks) == 28
+        and all(isinstance(task_id, str) and task_id for task_id in task_ids)
+        and len(set(task_ids)) == 28,
+        "MPI campaign manifest identity or topology is invalid",
+    )
+    execution = _strict_envelope(execution_path, name="MPI execution manifest")
+    execution_payload = _mapping(
+        execution["payload"], name="MPI execution payload"
+    )
+    outcomes = execution_payload.get("outcomes")
+    outcome_ids = (
+        [
+            outcome.get("task_id") if isinstance(outcome, Mapping) else None
+            for outcome in outcomes
+        ]
+        if isinstance(outcomes, list)
+        else []
+    )
+    _require(
+        execution_payload.get("schema_name")
+        == "negfpy_protocol_v2_toy_mpi_execution"
+        and execution_payload.get("schema_version") == 1
+        and execution_payload.get("execution_id") == execution_id
+        and execution_payload.get("campaign_manifest_sha256")
+        == payload.get("campaign_manifest_sha256")
+        and execution_payload.get("mode") == expected_mode
+        and execution_payload.get("communicator_size") == selected_rank
+        and execution_payload.get("complete") is True
+        and execution_payload.get("scientific_sha256")
+        == payload.get("execution_scientific_sha256")
+        and isinstance(outcomes, list)
+        and len(outcomes) == 28
+        and all(
+            isinstance(outcome, Mapping)
+            and outcome.get("status") == "completed"
+            for outcome in outcomes
+        )
+        and all(isinstance(task_id, str) and task_id for task_id in outcome_ids)
+        and len(set(outcome_ids)) == 28
+        and set(outcome_ids) == set(task_ids),
+        "MPI execution manifest is incomplete or identity-mismatched",
+    )
+    facts = {
+        "schema": "negfpy.remote_validation.mpi_execution_facts.v1",
+        "runner_result_file_sha256": core._sha256(result_path),
+        "runner_result_payload_sha256": result["payload_sha256"],
+        "campaign_manifest_file_sha256": core._sha256(campaign_path),
+        "campaign_manifest_payload_sha256": campaign["payload_sha256"],
+        "execution_manifest_file_sha256": core._sha256(execution_path),
+        "execution_manifest_payload_sha256": execution["payload_sha256"],
+        "execution_scientific_sha256": payload["execution_scientific_sha256"],
+        "production_toy_physics_sha256": payload[
+            "production_toy_physics_sha256"
+        ],
+        "execution_id": execution_id,
+        "rank_runtime": runtime,
+        "python_file_sha256": deep_evidence.get("python_file_sha256"),
+        "harmonic_preflight": deep_evidence.get("harmonic_preflight"),
+        "memory_preflight": deep_evidence.get("memory_preflight"),
+        "phase_evidence": deep_evidence.get("phase_evidence"),
+        "communicator_size": selected_rank,
+        "mode": expected_mode,
+        "directory_mode": payload["directory_mode"],
+        "task_count": 28,
+        "release_certified": True,
+        "launch_receipt": dict(launch_facts),
+    }
+    return facts, report_path, release_root / "scientific-checkpoints"
+
+
 def _checkpoint_index(
     *,
     artifacts: pathlib.Path,
     multidimensional: Mapping[str, Any],
+    checkpoint_root: pathlib.Path | None = None,
 ) -> list[dict[str, Any]]:
-    checkpoints = (artifacts / "checkpoints").resolve()
+    checkpoints = (
+        artifacts / "checkpoints" if checkpoint_root is None else checkpoint_root
+    ).resolve()
+    _require(checkpoints.is_relative_to(artifacts.resolve()), "unsafe checkpoint root")
     evidence = _mapping(
         multidimensional.get("checkpoint_evidence"),
         name="multidimensional.checkpoint_evidence",
@@ -534,6 +1299,8 @@ def _validate_production_report(
     artifacts: pathlib.Path,
     commit: str,
     identity: Mapping[str, Any],
+    checkpoint_root: pathlib.Path,
+    mpi_facts: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Validate current-attempt protocol-v2 evidence before publication."""
 
@@ -792,9 +1559,48 @@ def _validate_production_report(
             name=f"open run {number} code identity",
         )
 
+    orchestration = _mapping(
+        report.get("orchestration_provenance"),
+        name="report.orchestration_provenance",
+    )
+    phase_hashes = orchestration.get("phase_execution_sha256")
+    _require(
+        orchestration.get("schema") == "negfpy.task_level_mpi_provenance"
+        and orchestration.get("schema_version") == 1
+        and orchestration.get("campaign_manifest_sha256")
+        == mpi_facts.get("campaign_manifest_payload_sha256")
+        and orchestration.get("campaign_manifest_file_sha256")
+        == mpi_facts.get("campaign_manifest_file_sha256")
+        and orchestration.get("execution_manifest_file_sha256")
+        == mpi_facts.get("execution_manifest_file_sha256")
+        and orchestration.get("execution_payload_sha256")
+        == mpi_facts.get("execution_manifest_payload_sha256")
+        and orchestration.get("execution_scientific_sha256")
+        == mpi_facts.get("execution_scientific_sha256")
+        and orchestration.get("execution_id") == mpi_facts.get("execution_id")
+        and orchestration.get("mode") == mpi_facts.get("mode")
+        and orchestration.get("communicator_size")
+        == mpi_facts.get("communicator_size")
+        and orchestration.get("complete") is True
+        and orchestration.get("solver_and_gate_contract_unchanged") is True
+        and isinstance(phase_hashes, list)
+        and bool(phase_hashes)
+        and all(_is_sha256(value) for value in phase_hashes),
+        "strict report MPI orchestration provenance is incomplete or mismatched",
+    )
+    from negfpy.anharmonic.toy._mpi_production_gate_physics import (
+        production_toy_physics_sha256,
+    )
+
+    _require(
+        production_toy_physics_sha256(report)
+        == mpi_facts.get("production_toy_physics_sha256"),
+        "strict report canonical physics SHA256 differs from MPI runner evidence",
+    )
     checkpoint_records = _checkpoint_index(
         artifacts=artifacts,
         multidimensional=multidimensional,
+        checkpoint_root=checkpoint_root,
     )
     facts = {
         "schema": "negfpy.remote_validation.report_facts.v1",
@@ -815,6 +1621,7 @@ def _validate_production_report(
         "git_tree": identity.get("tree"),
         "source_tree_sha256": source_sha,
         "environment_sha256": lock_sha,
+        "mpi_execution": dict(mpi_facts),
     }
     return facts, checkpoint_records
 
@@ -903,11 +1710,9 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
     root = deployment_dir.resolve()
     commit = core._validate_commit(commit)
     artifacts = root / "artifacts"
-    checkpoints = artifacts / "checkpoints"
     attempts = artifacts / "attempts"
     lock_path = artifacts / "job.lock"
     artifacts.mkdir(parents=True, exist_ok=True)
-    checkpoints.mkdir(parents=True, exist_ok=True)
     attempts.mkdir(exist_ok=True)
     if not lock_path.is_dir() or lock_path.is_symlink():
         raise core.RemoteValidationError(
@@ -927,6 +1732,15 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
     log_path = attempt_root / "production_toy_gate.log"
     checkpoint_index_path = attempt_root / "checkpoint-index.json"
     report_facts_path = attempt_root / "report-facts.json"
+    scaling_root = attempt_root / "mpi-scaling"
+    release_root = artifacts / "toy-release"
+    execution_id = f"release-attempt-{attempt:03d}"
+    archived_runner_path = attempt_root / "mpi-release-runner-result.json"
+    archived_execution_path = attempt_root / "mpi-execution-manifest.json"
+    archived_campaign_path = attempt_root / "mpi-campaign-manifest.json"
+    release_receipt_path = attempt_root / "mpi-release-launch.json"
+    release_stdout_path = attempt_root / "mpi-release.stdout.log"
+    release_stderr_path = attempt_root / "mpi-release.stderr.log"
     started = core._utc_now()
     running = {
         "schema": "negfpy.remote_validation.job_status.v2",
@@ -945,18 +1759,12 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
         log.flush()
         os.fsync(log.fileno())
 
-    argv = (
-        str(root / "environment" / "bin" / "python"),
-        "-m",
-        "pytest",
-        "-q",
-        "tests/test_anharmonic_production_gate_runner.py",
-        "-m",
-        "nightly",
-    )
     state = "failed"
     returncode = 1
     report_facts: dict[str, Any] | None = None
+    scaling_facts: dict[str, Any] | None = None
+    selection_path: pathlib.Path | None = None
+    mpi_facts: dict[str, Any] | None = None
     identity_bundle: dict[str, Any] | None = None
     try:
         stored_path = artifacts / "identity" / "remote-environment.json"
@@ -1004,61 +1812,247 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
             + os.pathsep
             + environment.get("PATH", "")
         )
-        environment.update(
-            {
-                "PYTHONPATH": str(root / "worktree" / "src"),
-                "PYTHONHASHSEED": "0",
-                "NEGFPY_RUN_FULL_ANHARMONIC_TOY_GATE": "1",
-                "NEGFPY_TOY_GATE_REPORT": str(report_path),
-                "NEGFPY_TOY_GATE_CHECKPOINT_DIR": str(checkpoints),
-                "NEGFPY_VALIDATION_ENV_SHA256": lock_sha,
-            }
+        environment.update({
+            "PYTHONPATH": str(root / "worktree" / "src"),
+            "PYTHONHASHSEED": "0",
+        })
+        source_sha = str(stored_identity["source_tree_sha256"])
+        physical_core_count = stored_identity.get("physical_core_count")
+        socket_count = stored_identity.get("socket_count")
+        _require(
+            isinstance(physical_core_count, int)
+            and not isinstance(physical_core_count, bool)
+            and physical_core_count >= max(remote_mpi_scaling.RANK_LADDER),
+            "remote identity cannot support the locked 16-rank scaling endpoint",
+        )
+        _require(
+            isinstance(socket_count, int)
+            and not isinstance(socket_count, bool)
+            and socket_count > 0,
+            "remote identity has an invalid socket count",
+        )
+        environment_prefix = root / "environment"
+        python = environment_prefix / "bin" / "python"
+        mpi_runner = root / "worktree" / "scripts" / "remote_toy_mpi_runner.py"
+        scale_argv = (
+            str(python),
+            str(mpi_runner),
+            "scale",
+            "--environment-prefix",
+            str(environment_prefix),
+            "--run-directory",
+            str(scaling_root),
+            "--source-revision",
+            commit,
+            "--source-tree-sha256",
+            source_sha,
+            "--environment-sha256",
+            lock_sha,
+            "--physical-core-count",
+            str(physical_core_count),
+            "--socket-count",
+            str(socket_count),
+        )
+        prior_scaling = _prior_scaling_selection(
+            attempts=attempts,
+            current_attempt_root=attempt_root,
+            source_revision=commit,
+            source_tree_sha256=source_sha,
+            environment_sha256=lock_sha,
+            physical_core_count=physical_core_count,
+            environment_prefix=environment_prefix,
+            socket_count=socket_count,
         )
         with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"argv={shlex.join(argv)}\n")
             for key in sorted(core.THREAD_LIMIT_ENV):
                 log.write(f"{key}=1\n")
             log.flush()
             os.fsync(log.fileno())
             try:
-                completed = subprocess.run(
-                    argv,
-                    cwd=root / "worktree",
-                    env=environment,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    check=False,
-                    text=True,
+                if prior_scaling is None:
+                    log.write(f"scaling_argv={shlex.join(scale_argv)}\n")
+                    log.flush()
+                    os.fsync(log.fileno())
+                    completed_scaling = subprocess.run(
+                        scale_argv,
+                        cwd=root / "worktree",
+                        env=environment,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                        text=True,
+                    )
+                    returncode = int(completed_scaling.returncode)
+                    if returncode != 0:
+                        raise core.RemoteValidationError(
+                            f"MPI scaling ladder returned {returncode}"
+                        )
+                    selection_path = scaling_root / "scaling-selection.json"
+                    scaling_facts = _validate_scaling_selection(
+                        selection_path=selection_path,
+                        source_revision=commit,
+                        source_tree_sha256=source_sha,
+                        environment_sha256=lock_sha,
+                        physical_core_count=physical_core_count,
+                        environment_prefix=environment_prefix,
+                        socket_count=socket_count,
+                    )
+                    scaling_facts["reused_for_exact_retry"] = False
+                    scaling_facts["source_attempt"] = attempt_root.name
+                else:
+                    selection_path, scaling_facts = prior_scaling
+                    log.write(
+                        "scaling_selection_reused="
+                        f"{selection_path.relative_to(artifacts).as_posix()}\n"
+                    )
+                scaling_facts["selection_relative_path"] = (
+                    selection_path.relative_to(artifacts).as_posix()
                 )
+                selected_rank = int(scaling_facts["toy_rank_count"])
+                release_program = (
+                    str(python),
+                    str(mpi_runner),
+                    "release",
+                    "--run-directory",
+                    str(release_root),
+                    "--source-revision",
+                    commit,
+                    "--source-tree-sha256",
+                    source_sha,
+                    "--environment-sha256",
+                    lock_sha,
+                    "--execution-id",
+                    execution_id,
+                    "--expected-ranks",
+                    str(selected_rank),
+                )
+                release_argv = remote_mpi_scaling.environment_mpi_argv(
+                    environment_prefix,
+                    rank_count=selected_rank,
+                    physical_core_count=physical_core_count,
+                    socket_count=socket_count,
+                    program=release_program,
+                )
+                log.write(f"release_argv={shlex.join(release_argv)}\n")
+                log.write(
+                    "release_receipt="
+                    f"{release_receipt_path.relative_to(artifacts).as_posix()}\n"
+                )
+                log.flush()
+                os.fsync(log.fileno())
+                release_started = core._utc_now()
+                with (
+                    release_stdout_path.open("x", encoding="utf-8") as stdout,
+                    release_stderr_path.open("x", encoding="utf-8") as stderr,
+                ):
+                    completed_release = subprocess.run(
+                        release_argv,
+                        cwd=root / "worktree",
+                        env=environment,
+                        stdout=stdout,
+                        stderr=stderr,
+                        check=False,
+                        text=True,
+                    )
+                    for stream in (stdout, stderr):
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                release_finished = core._utc_now()
+                returncode = int(completed_release.returncode)
+                _write_release_launch_receipt(
+                    path=release_receipt_path,
+                    attempt_root=attempt_root,
+                    environment_prefix=environment_prefix,
+                    argv=release_argv,
+                    binding_arguments=remote_mpi_scaling.openmpi_binding_arguments(
+                        selected_rank,
+                        physical_core_count=physical_core_count,
+                        socket_count=socket_count,
+                    ),
+                    selected_rank=selected_rank,
+                    source_revision=commit,
+                    source_tree_sha256=source_sha,
+                    environment_sha256=lock_sha,
+                    execution_id=execution_id,
+                    started_utc=release_started,
+                    finished_utc=release_finished,
+                    returncode=returncode,
+                    stdout_path=release_stdout_path,
+                    stderr_path=release_stderr_path,
+                )
+                if returncode != 0:
+                    raise core.RemoteValidationError(
+                        f"locked MPI toy release returned {returncode}"
+                    )
             finally:
-                # The runner may create this sidecar immediately before an
-                # exception; never leave it at the shared artifact root.
                 _collect_attempt_sidecars(
                     artifacts=artifacts,
                     attempt_root=attempt_root,
                 )
-        returncode = int(completed.returncode)
-        if returncode == 0:
-            report_facts, checkpoint_records = _validate_production_report(
-                path=report_path,
-                artifacts=artifacts,
-                commit=commit,
-                identity=stored_identity,
+        launch_facts = _validate_release_launch_receipt(
+            path=release_receipt_path,
+            attempt_root=attempt_root,
+            environment_prefix=environment_prefix,
+            selected_rank=int(scaling_facts["toy_rank_count"]),
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+            source_revision=commit,
+            source_tree_sha256=source_sha,
+            environment_sha256=lock_sha,
+            execution_id=execution_id,
+            release_root=release_root,
+            mpi_runner=mpi_runner,
+        )
+        runner_result_path = (
+            release_root / "runner-results" / f"{execution_id}.json"
+        )
+        mpi_facts, strict_report_source, checkpoint_root = (
+            _validate_release_runner_result(
+                result_path=runner_result_path,
+                release_root=release_root,
+                execution_id=execution_id,
+                selected_rank=int(scaling_facts["toy_rank_count"]),
+                source_revision=commit,
+                source_tree_sha256=source_sha,
+                launch_facts=launch_facts,
+                environment_sha256=lock_sha,
+                socket_count=socket_count,
+                environment_prefix=environment_prefix,
             )
-            core._atomic_write_json(
-                checkpoint_index_path,
-                {
-                    "schema": "negfpy.remote_validation.checkpoint_index.v1",
-                    "attempt": attempt,
-                    "checkpoint_root": "checkpoints",
-                    "count": len(checkpoint_records),
-                    "records": checkpoint_records,
-                },
-            )
-            core._atomic_write_json(report_facts_path, report_facts)
-            state = "completed"
-        else:
-            state = "failed"
+        )
+        core._atomic_copy_file(strict_report_source, report_path)
+        core._atomic_copy_file(runner_result_path, archived_runner_path)
+        core._atomic_copy_file(
+            release_root / "campaign-manifest.json",
+            archived_campaign_path,
+        )
+        core._atomic_copy_file(
+            release_root / "campaign-executions" / f"{execution_id}.json",
+            archived_execution_path,
+        )
+        report_facts, checkpoint_records = _validate_production_report(
+            path=report_path,
+            artifacts=artifacts,
+            commit=commit,
+            identity=stored_identity,
+            checkpoint_root=checkpoint_root,
+            mpi_facts=mpi_facts,
+        )
+        report_facts["mpi_scaling"] = scaling_facts
+        core._atomic_write_json(
+            checkpoint_index_path,
+            {
+                "schema": "negfpy.remote_validation.checkpoint_index.v1",
+                "attempt": attempt,
+                "checkpoint_root": checkpoint_root.relative_to(
+                    artifacts
+                ).as_posix(),
+                "count": len(checkpoint_records),
+                "records": checkpoint_records,
+            },
+        )
+        core._atomic_write_json(report_facts_path, report_facts)
+        state = "completed"
     except BaseException as error:
         if returncode == 0:
             returncode = 2
@@ -1081,6 +2075,8 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
         "returncode": returncode,
         "identity_bundle": identity_bundle,
         "report_facts": report_facts,
+        "scaling_facts": scaling_facts,
+        "mpi_execution_facts": mpi_facts,
     }
     publication_path = attempt_root / "publication.json"
     current_path = artifacts / "current-attempt.json"
@@ -1106,6 +2102,76 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                 core._sha256(report_path) if report_path.is_file() else None
             ),
             "report_facts": report_facts,
+            "scaling_selection": (
+                selection_path.relative_to(artifacts).as_posix()
+                if selection_path is not None and selection_path.is_file()
+                else None
+            ),
+            "scaling_selection_sha256": (
+                core._sha256(selection_path)
+                if selection_path is not None and selection_path.is_file()
+                else None
+            ),
+            "mpi_release_launch": (
+                release_receipt_path.relative_to(artifacts).as_posix()
+                if release_receipt_path.is_file()
+                else None
+            ),
+            "mpi_release_launch_sha256": (
+                core._sha256(release_receipt_path)
+                if release_receipt_path.is_file()
+                else None
+            ),
+            "mpi_release_stdout": (
+                release_stdout_path.relative_to(artifacts).as_posix()
+                if release_stdout_path.is_file()
+                else None
+            ),
+            "mpi_release_stdout_sha256": (
+                core._sha256(release_stdout_path)
+                if release_stdout_path.is_file()
+                else None
+            ),
+            "mpi_release_stderr": (
+                release_stderr_path.relative_to(artifacts).as_posix()
+                if release_stderr_path.is_file()
+                else None
+            ),
+            "mpi_release_stderr_sha256": (
+                core._sha256(release_stderr_path)
+                if release_stderr_path.is_file()
+                else None
+            ),
+            "mpi_runner_result": (
+                archived_runner_path.relative_to(artifacts).as_posix()
+                if archived_runner_path.is_file()
+                else None
+            ),
+            "mpi_runner_result_sha256": (
+                core._sha256(archived_runner_path)
+                if archived_runner_path.is_file()
+                else None
+            ),
+            "mpi_execution_manifest": (
+                archived_execution_path.relative_to(artifacts).as_posix()
+                if archived_execution_path.is_file()
+                else None
+            ),
+            "mpi_execution_manifest_sha256": (
+                core._sha256(archived_execution_path)
+                if archived_execution_path.is_file()
+                else None
+            ),
+            "mpi_campaign_manifest": (
+                archived_campaign_path.relative_to(artifacts).as_posix()
+                if archived_campaign_path.is_file()
+                else None
+            ),
+            "mpi_campaign_manifest_sha256": (
+                core._sha256(archived_campaign_path)
+                if archived_campaign_path.is_file()
+                else None
+            ),
         }
         core._atomic_write_json(publication_path, publication)
         core._atomic_write_json(current_path, publication)

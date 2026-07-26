@@ -11,7 +11,21 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+
+from negfpy.anharmonic import _mpi_tasks as task_mpi
+from negfpy.anharmonic.toy import _mpi_production_gate as production_mpi
+from negfpy.anharmonic.toy._mpi_production_gate import (
+    ProductionToyCaseResult,
+    ProductionToyMPIExecutionReport,
+)
+from negfpy.anharmonic.toy._mpi_production_gate_physics import (
+    production_toy_physics_sha256,
+)
+from negfpy.anharmonic.toy.multidimensional_release import (
+    _refinement_points,
+)
 
 
 SCRIPTS = pathlib.Path(__file__).parents[1] / "scripts"
@@ -23,8 +37,11 @@ cli = importlib.import_module("remote_heavy_cli")
 lock_validation = importlib.import_module("remote_heavy_lock")
 identity = importlib.import_module("remote_heavy_identity")
 security = importlib.import_module("remote_heavy_security")
+mpi_scaling = importlib.import_module("remote_mpi_scaling")
+toy_mpi = importlib.import_module("remote_toy_mpi_runner")
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_REAL_SUBPROCESS_RUN = subprocess.run
 GIT_TREE = "a" * 40
 SOURCE_SHA256 = "b" * 64
 
@@ -405,8 +422,12 @@ def _write_valid_worker_report(
     report_path: pathlib.Path,
     root: pathlib.Path,
     lock_sha: str,
+    checkpoint_root: pathlib.Path | None = None,
+    orchestration: dict[str, object] | None = None,
 ) -> dict[str, object]:
     artifacts = root / "artifacts"
+    checkpoints = artifacts / "checkpoints" if checkpoint_root is None else checkpoint_root
+    checkpoints.mkdir(parents=True, exist_ok=True)
     identity = {
         "git_revision": COMMIT,
         "source_tree_sha256": SOURCE_SHA256,
@@ -416,7 +437,7 @@ def _write_valid_worker_report(
     checkpoint_records: list[dict[str, object]] = []
     for index in range(13):
         run_id = f"run-{index:02d}"
-        checkpoint = artifacts / "checkpoints" / f"{run_id}.h5"
+        checkpoint = checkpoints / f"{run_id}.h5"
         checkpoint.write_bytes(f"checkpoint {run_id}\n".encode("ascii"))
         checkpoint_sha = core._sha256(checkpoint)
         checkpoint_records.append(
@@ -579,9 +600,739 @@ def _write_valid_worker_report(
             ]
         },
     }
+    if orchestration is not None:
+        report["orchestration_provenance"] = orchestration
     report["report_sha256"] = _report_digest(report, ensure_ascii=False)
     core._atomic_write_json(report_path, report)
     return report
+
+
+def _fake_mpi_environment(
+    prefix: pathlib.Path,
+) -> tuple[dict[str, str], dict[str, str]]:
+    binary = prefix / "bin"
+    binary.mkdir(parents=True, exist_ok=True)
+    for name in ("mpiexec", "python"):
+        path = binary / name
+        if not path.exists():
+            path.write_text(
+                f"#!/bin/sh\n# synthetic {name}\nexit 0\n",
+                encoding="ascii",
+            )
+            path.chmod(0o755)
+    return (
+        toy_mpi._launcher_record(binary / "mpiexec"),
+        toy_mpi._launcher_record(binary / "python"),
+    )
+
+
+def _memory_preflight(profile: str, rank: int) -> dict[str, object]:
+    return toy_mpi.campaign_dense_memory_preflight(
+        profile=profile,
+        rank_count=rank,
+        available_memory_bytes=10**15,
+    )
+
+
+def _rank_runtime(
+    rank_count: int,
+    python_record: dict[str, str],
+    *,
+    profile: str,
+    root: pathlib.Path,
+    execution_id: str,
+    environment_sha256: str,
+    socket_count: int = 2,
+) -> list[dict[str, object]]:
+    by_core: dict[tuple[int, int], int] = {}
+    for cpu_id in sorted(os.sched_getaffinity(0)):
+        topology = toy_mpi._logical_cpu_topology(cpu_id)
+        key = (
+            topology["physical_package_id"],
+            topology["core_id"],
+        )
+        by_core.setdefault(key, cpu_id)
+    by_package: dict[int, list[tuple[int, int]]] = {}
+    for package_id, core_id in sorted(by_core):
+        by_package.setdefault(package_id, []).append(
+            (core_id, by_core[(package_id, core_id)])
+        )
+    packages = sorted(by_package)
+    assert len(packages) >= socket_count
+    selected: list[tuple[int, int, int]] = []
+    if rank_count >= socket_count and rank_count % socket_count == 0:
+        per_socket = rank_count // socket_count
+        for package_id in packages[:socket_count]:
+            assert len(by_package[package_id]) >= per_socket
+            selected.extend(
+                (package_id, core_id, cpu_id)
+                for core_id, cpu_id in by_package[package_id][:per_socket]
+            )
+    else:
+        package_id = packages[0]
+        selected.extend(
+            (package_id, core_id, cpu_id)
+            for core_id, cpu_id in by_package[package_id][:rank_count]
+        )
+    assert len(selected) == rank_count
+    python_argv = toy_mpi._expected_rank_python_argv(
+        profile=profile,
+        root=root.resolve(),
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=environment_sha256,
+        execution_id=execution_id,
+        rank_count=rank_count,
+    )
+    records: list[dict[str, object]] = []
+    for rank, (package_id, core_id, cpu_id) in enumerate(selected):
+        records.append(
+            {
+                "rank": rank,
+                "hostname": "validation-host",
+                "logical_cpu_ids": [cpu_id],
+                "logical_cpu_topology": [
+                    {
+                        "logical_cpu_id": cpu_id,
+                        "physical_package_id": package_id,
+                        "core_id": core_id,
+                    }
+                ],
+                "physical_cores": [
+                    {
+                        "physical_package_id": package_id,
+                        "core_id": core_id,
+                    }
+                ],
+                "one_physical_core": True,
+                "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+                "python": dict(python_record),
+                "python_argv": python_argv,
+            }
+        )
+    return records
+
+
+
+
+def _harmonic_preflight_evidence(config) -> dict[str, object]:
+    labels = ("base",) + tuple(label for label, _ in _refinement_points(config))
+    assert len(labels) == 7
+    points = [
+        {
+            "label": label,
+            "passed": True,
+            "field_sha256": {
+                "green_retarded": hashlib.sha256(label.encode("ascii")).hexdigest()
+            },
+        }
+        for label in labels
+    ]
+    return {
+        "schema": "negfpy.anharmonic.harmonic_same_grid_preflight",
+        "schema_version": 2,
+        "protocol": "multidimensional_toy_gate_v2",
+        "applicable": True,
+        "passed": True,
+        "scope": "base_plus_six_preregistered_numerical_points",
+        "point_count": 7,
+        "all_seven_archived": True,
+        "points": points,
+        "comparisons": [
+            {"left_label": "base", "right_label": label, "passed": True}
+            for label in labels[1:]
+        ],
+    }
+
+
+def _write_canonical_worker_chain(
+    *,
+    root: pathlib.Path,
+    profile: str,
+    rank_count: int,
+    execution_id: str,
+    python_record: dict[str, str],
+    environment_sha256: str,
+    report_owner_root: pathlib.Path,
+    report_mutator=None,
+) -> tuple[pathlib.Path, str]:
+    lock_sha = environment_sha256
+    campaign, config = toy_mpi._expected_campaign(
+        profile=profile,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    task_mpi.write_task_manifest(root / "campaign-manifest.json", campaign.manifest)
+    runtime = _rank_runtime(
+        rank_count,
+        python_record,
+        profile=profile,
+        root=root,
+        environment_sha256=lock_sha,
+        execution_id=execution_id,
+    )
+    runtime_by_rank = {int(item["rank"]): item for item in runtime}
+    validator = production_mpi._artifact_validator(campaign)
+    phase_sha256: list[str] = []
+    worker_ranks = (0,) if rank_count == 1 else tuple(range(1, rank_count))
+    for wave_index, task_ids in enumerate(campaign.waves):
+        phase = production_mpi._phase_manifest(campaign, wave_index)
+        phase_root = root / "phases" / production_mpi._phase_slug(
+            wave_index,
+            task_ids,
+        )
+        artifact_root = phase_root / "task-artifacts"
+        checkpoint_root = phase_root / "task-outcomes"
+        task_mpi.write_task_manifest(phase_root / "task-manifest.json", phase)
+        assignments: list[task_mpi.TaskAssignment] = []
+        for task_index, task_id in enumerate(task_ids):
+            task = phase.task(task_id)
+            rank = worker_ranks[task_index % len(worker_ranks)]
+            runtime_record = runtime_by_rank[rank]
+            cpu_affinity = tuple(int(value) for value in runtime_record["logical_cpu_ids"])
+            cap = {
+                "cpu_affinity": list(cpu_affinity),
+                "all_loaded_libraries_capped": True,
+            }
+            context = task_mpi.TaskContext(
+                run_directory=phase_root,
+                artifact_root=artifact_root,
+                ordinal=phase.ordinal(task),
+                task_identity_sha256=phase.task_identity_sha256(task),
+                rank=rank,
+                communicator_size=rank_count,
+                hostname=str(runtime_record["hostname"]),
+                thread_limit=1,
+                thread_cap_metadata=cap,
+            )
+            evidence = (
+                _harmonic_preflight_evidence(config)
+                if task_id == "preflight.harmonic-same-grid"
+                else {"task_id": task_id, "passed": True}
+            )
+            arrays = (
+                {}
+                if task_id == "preflight.harmonic-same-grid"
+                else {
+                    "synthetic_field": np.asarray(
+                        [campaign.manifest.ordinal(task_id)],
+                        dtype=np.float64,
+                    )
+                }
+            )
+            case_result = ProductionToyCaseResult.completed(
+                evidence=evidence,
+                arrays=arrays,
+            )
+            artifact = production_mpi._write_case_artifact(
+                campaign,
+                task,
+                context,
+                case_result,
+            )
+            task_result = task_mpi.TaskResult.completed(
+                artifact,
+                metadata={
+                    "campaign_manifest_sha256": campaign.campaign_manifest_sha256,
+                    "campaign_task_identity_sha256": (
+                        campaign.manifest.task_identity_sha256(task_id)
+                    ),
+                    "case_status": "completed",
+                },
+            )
+            checkpoint = task_mpi._checkpoint_from_result(
+                phase,
+                task,
+                task_result,
+                context,
+                elapsed_seconds=0.01,
+                artifact_validator=validator,
+            )
+            checkpoint_path = task_mpi.task_checkpoint_path(
+                phase,
+                task,
+                checkpoint_root,
+            )
+            task_mpi.write_task_checkpoint(checkpoint_path, checkpoint)
+            assignments.append(
+                task_mpi.TaskAssignment(
+                    task_id=task_id,
+                    status="completed",
+                    rank=rank,
+                    hostname=str(runtime_record["hostname"]),
+                    elapsed_seconds=0.01,
+                    resumed=False,
+                    cpu_affinity=cpu_affinity,
+                    thread_cap_passed=True,
+                    checkpoint_relative_path=checkpoint_path.name,
+                    checkpoint_file_sha256=core._sha256(checkpoint_path),
+                    artifact_relative_path=checkpoint.artifact_relative_path,
+                    artifact_sha256=checkpoint.artifact_sha256,
+                )
+            )
+        phase_id = f"{execution_id}.phase-{wave_index:03d}"
+        phase_report = task_mpi.MPIExecutionReport(
+            execution_id=phase_id,
+            manifest_sha256=phase.manifest_sha256,
+            mode="serial" if rank_count == 1 else "mpi",
+            communicator_size=rank_count,
+            coordinator_hostname="validation-host",
+            started_utc="2026-07-26T00:00:00Z",
+            finished_utc="2026-07-26T00:00:01Z",
+            elapsed_seconds=1.0,
+            thread_limit=1,
+            assignments=tuple(assignments),
+            missing_task_ids=(),
+            infrastructure_errors=(),
+        )
+        task_mpi.write_execution_manifest(
+            phase_root / "executions" / f"{phase_id}.json",
+            phase_report,
+        )
+        phase_sha256.append(phase_report.execution_sha256)
+
+    outcomes = production_mpi.collect_production_toy_campaign_outcomes(
+        campaign,
+        root,
+    )
+    execution = ProductionToyMPIExecutionReport(
+        execution_id=execution_id,
+        campaign_manifest_sha256=campaign.campaign_manifest_sha256,
+        mode="serial" if rank_count == 1 else "mpi",
+        communicator_size=rank_count,
+        coordinator_hostname="validation-host",
+        started_utc="2026-07-26T00:00:00Z",
+        finished_utc="2026-07-26T00:00:02Z",
+        elapsed_seconds=2.0,
+        phase_execution_sha256=tuple(phase_sha256),
+        outcomes=outcomes,
+    )
+    execution_path = root / "campaign-executions" / f"{execution_id}.json"
+    execution_path.parent.mkdir(parents=True, exist_ok=True)
+    toy_mpi.write_hashed_manifest(execution_path, execution._payload())
+    campaign_path = root / "campaign-manifest.json"
+    campaign_document = toy_mpi.read_hashed_manifest(campaign_path)
+    execution_document = toy_mpi.read_hashed_manifest(execution_path)
+    report_path = root / "production-reports" / f"{execution_id}.json"
+    orchestration = {
+        "schema": "negfpy.task_level_mpi_provenance",
+        "schema_version": 1,
+        "campaign_manifest_sha256": campaign.campaign_manifest_sha256,
+        "campaign_manifest_file_sha256": core._sha256(campaign_path),
+        "execution_manifest_file_sha256": core._sha256(execution_path),
+        "execution_payload_sha256": execution_document["payload_sha256"],
+        "execution_scientific_sha256": execution.scientific_sha256,
+        "execution_id": execution_id,
+        "mode": execution.mode,
+        "communicator_size": rank_count,
+        "phase_execution_sha256": phase_sha256,
+        "complete": True,
+        "solver_and_gate_contract_unchanged": True,
+    }
+    report = _write_valid_worker_report(
+        report_path=report_path,
+        root=report_owner_root,
+        lock_sha=lock_sha,
+        checkpoint_root=root / "scientific-checkpoints",
+        orchestration=orchestration,
+    )
+    if profile == "scaling":
+        report["summary"]["release_certified"] = False
+        report["summary"]["validation_tier"] = "pull_request"
+    if report_mutator is not None:
+        report_mutator(report)
+    report["report_sha256"] = _report_digest(
+        {key: value for key, value in report.items() if key != "report_sha256"},
+        ensure_ascii=False,
+    )
+    core._atomic_write_json(report_path, report)
+    digest = production_toy_physics_sha256(report)
+    assert campaign_document["payload_sha256"] == campaign.campaign_manifest_sha256
+    return report_path, digest
+
+
+def _scaling_worker_payload(
+    rank: int,
+    lock_sha: str,
+    digest: str,
+    python_record: dict[str, str],
+    *,
+    root: pathlib.Path,
+) -> dict[str, object]:
+    execution_id = f"scaling-rank-{rank:03d}"
+    campaign_path = root / "campaign-manifest.json"
+    execution_path = root / "campaign-executions" / f"{execution_id}.json"
+    report_path = root / "production-reports" / f"{execution_id}.json"
+    campaign = toy_mpi.read_hashed_manifest(campaign_path)
+    execution = toy_mpi.read_hashed_manifest(execution_path)
+    config, _fixtures = toy_mpi._locked_profile_inputs("scaling")
+    return {
+        "schema": "negfpy.remote_toy_mpi.physics_result.v1",
+        "profile": "scaling",
+        "certification_eligible": False,
+        "release_certified": False,
+        "source_revision": COMMIT,
+        "source_tree_sha256": SOURCE_SHA256,
+        "environment_sha256": lock_sha,
+        "expected_rank_count": rank,
+        "recorded_rank_count": rank,
+        "execution_id": execution_id,
+        "execution_mode": "serial" if rank == 1 else "mpi",
+        "directory_mode": "fresh",
+        "task_count": 28,
+        "multidimensional_outcome_count": 13,
+        "open_system_case_count": 13,
+        "continuation_path_count": 5,
+        "all_outcomes_completed": True,
+        "campaign_manifest_sha256": campaign["payload_sha256"],
+        "execution_scientific_sha256": execution["payload"][
+            "scientific_sha256"
+        ],
+        "production_toy_physics_sha256": digest,
+        "configuration_sha256": toy_mpi._payload_sha256(config.as_dict()),
+        "campaign_manifest": _artifact_record(root, campaign_path),
+        "execution_manifest": _artifact_record(root, execution_path),
+        "strict_report": _artifact_record(root, report_path),
+        "memory_preflight": _memory_preflight("scaling", rank),
+        "rank_runtime": _rank_runtime(
+            rank,
+            python_record,
+            profile="scaling",
+            root=root,
+            execution_id=execution_id,
+            environment_sha256=lock_sha,
+        ),
+        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+    }
+
+
+def _write_scaling_selection(
+    root: pathlib.Path,
+    lock_sha: str,
+    *,
+    times: tuple[float, ...] = (100.0, 60.0, 31.0, 30.0, 29.8),
+    environment_prefix: pathlib.Path | None = None,
+) -> pathlib.Path:
+    root.mkdir(parents=True)
+    prefix = (
+        root.parent / "environment"
+        if environment_prefix is None
+        else environment_prefix
+    ).resolve()
+    launcher_record, python_record = _fake_mpi_environment(prefix)
+    records = []
+    for rank, wall_seconds in zip(mpi_scaling.RANK_LADDER, times, strict=True):
+        repetition = root / f"rank-{rank:03d}"
+        execution_id = f"scaling-rank-{rank:03d}"
+        _report_path, digest = _write_canonical_worker_chain(
+            root=repetition,
+            profile="scaling",
+            rank_count=rank,
+            execution_id=execution_id,
+            python_record=python_record,
+            environment_sha256=lock_sha,
+            report_owner_root=root,
+        )
+        worker_path = repetition / "runner-results" / f"{execution_id}.json"
+        worker_path.parent.mkdir(parents=True, exist_ok=True)
+        worker = toy_mpi.write_hashed_manifest(
+            worker_path,
+            _scaling_worker_payload(
+                rank,
+                lock_sha,
+                digest,
+                python_record,
+                root=repetition,
+            ),
+        )
+        stdout_path = root / "logs" / f"rank-{rank:03d}.stdout.log"
+        stderr_path = root / "logs" / f"rank-{rank:03d}.stderr.log"
+        stdout_path.parent.mkdir(exist_ok=True)
+        stdout_path.write_text("synthetic stdout\n", encoding="ascii")
+        stderr_path.write_text("", encoding="ascii")
+        program = (
+            python_record["path"],
+            str(pathlib.Path(toy_mpi.__file__).resolve()),
+            "_rank-worker",
+            "--profile",
+            "scaling",
+            "--source-revision",
+            COMMIT,
+            "--source-tree-sha256",
+            SOURCE_SHA256,
+            "--environment-sha256",
+            lock_sha,
+            "--run-directory",
+            str(repetition),
+            "--execution-id",
+            execution_id,
+            "--expected-ranks",
+            str(rank),
+        )
+        rank_path = root / f"rank-{rank:03d}-manifest.json"
+        rank_payload = {
+            "schema": "negfpy.remote_toy_mpi.scaling_rank.v1",
+            "rank_count": rank,
+            "source_revision": COMMIT,
+            "source_tree_sha256": SOURCE_SHA256,
+            "environment_sha256": lock_sha,
+            "fresh_isolated_repetition": True,
+            "resume_used": False,
+            "outer_wall_seconds": wall_seconds,
+            "returncode": 0,
+            "completed": True,
+            "failure": None,
+            "argv": list(
+                mpi_scaling.environment_mpi_argv(
+                    prefix,
+                    rank_count=rank,
+                    physical_core_count=76,
+                    socket_count=2,
+                    program=program,
+                )
+            ),
+            "binding_arguments": list(
+                mpi_scaling.openmpi_binding_arguments(
+                    rank,
+                    physical_core_count=76,
+                    socket_count=2,
+                )
+            ),
+            "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+            "launcher": launcher_record,
+            "python": python_record,
+            "launcher_memory_preflight": _memory_preflight("scaling", rank),
+            "stdout": _artifact_record(root, stdout_path),
+            "stderr": _artifact_record(root, stderr_path),
+            "worker_result_relative_path": worker_path.relative_to(root).as_posix(),
+            "worker_result_file_sha256": toy_mpi._file_sha256(worker_path),
+            "worker_result_payload_sha256": worker["payload_sha256"],
+            "production_toy_physics_sha256": digest,
+        }
+        rank_document = toy_mpi.write_hashed_manifest(rank_path, rank_payload)
+        records.append((rank_path, rank_document))
+    selection = toy_mpi.build_scaling_selection_payload(
+        records,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        physical_core_count=76,
+        socket_count=2,
+    )
+    target = root / "scaling-selection.json"
+    toy_mpi.write_hashed_manifest(target, selection)
+    return target
+
+
+def _artifact_record(root: pathlib.Path, path: pathlib.Path) -> dict[str, str]:
+    return {
+        "relative_path": path.relative_to(root).as_posix(),
+        "sha256": core._sha256(path),
+    }
+
+
+def _write_release_evidence(
+    *,
+    root: pathlib.Path,
+    lock_sha: str,
+    execution_id: str,
+    rank_count: int,
+    report_mutator=None,
+    environment_prefix: pathlib.Path | None = None,
+) -> pathlib.Path:
+    root.mkdir(parents=True, exist_ok=True)
+    prefix = (
+        root.parent / "environment"
+        if environment_prefix is None
+        else environment_prefix
+    ).resolve()
+    _launcher_record, python_record = _fake_mpi_environment(prefix)
+    report_path, digest = _write_canonical_worker_chain(
+        root=root,
+        profile="release",
+        rank_count=rank_count,
+        execution_id=execution_id,
+        python_record=python_record,
+        environment_sha256=lock_sha,
+        report_owner_root=prefix.parent,
+        report_mutator=report_mutator,
+    )
+    campaign_path = root / "campaign-manifest.json"
+    campaign = toy_mpi.read_hashed_manifest(campaign_path)
+    execution_path = root / "campaign-executions" / f"{execution_id}.json"
+    execution = toy_mpi.read_hashed_manifest(execution_path)
+    config, _fixtures = toy_mpi._locked_profile_inputs("release")
+    runner_payload = {
+        "schema": "negfpy.remote_toy_mpi.physics_result.v1",
+        "profile": "release",
+        "certification_eligible": True,
+        "release_certified": True,
+        "source_revision": COMMIT,
+        "source_tree_sha256": SOURCE_SHA256,
+        "environment_sha256": lock_sha,
+        "directory_mode": "fresh",
+        "expected_rank_count": rank_count,
+        "recorded_rank_count": rank_count,
+        "execution_mode": "serial" if rank_count == 1 else "mpi",
+        "task_count": 28,
+        "multidimensional_outcome_count": 13,
+        "execution_id": execution_id,
+        "open_system_case_count": 13,
+        "continuation_path_count": 5,
+        "all_outcomes_completed": True,
+        "campaign_manifest_sha256": campaign["payload_sha256"],
+        "execution_scientific_sha256": execution["payload"][
+            "scientific_sha256"
+        ],
+        "production_toy_physics_sha256": digest,
+        "configuration_sha256": toy_mpi._payload_sha256(config.as_dict()),
+        "campaign_manifest": _artifact_record(root, campaign_path),
+        "execution_manifest": _artifact_record(root, execution_path),
+        "strict_report": _artifact_record(root, report_path),
+        "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
+        "memory_preflight": _memory_preflight("release", rank_count),
+        "rank_runtime": _rank_runtime(
+            rank_count,
+            python_record,
+            profile="release",
+            root=root,
+            execution_id=execution_id,
+            environment_sha256=lock_sha,
+        ),
+    }
+    result_path = root / "runner-results" / f"{execution_id}.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    toy_mpi.write_hashed_manifest(result_path, runner_payload)
+    return result_path
+
+
+def _write_release_launch_facts(
+    *,
+    deployment: pathlib.Path,
+    release_root: pathlib.Path,
+    execution_id: str,
+    rank_count: int,
+    lock_sha: str,
+) -> tuple[pathlib.Path, pathlib.Path, dict[str, object]]:
+    attempt_root = deployment / "artifacts" / "attempts" / "attempt-001"
+    attempt_root.mkdir(parents=True, exist_ok=True)
+    stdout_path = attempt_root / "mpi-release.stdout.log"
+    stderr_path = attempt_root / "mpi-release.stderr.log"
+    stdout_path.write_text("synthetic release stdout\n", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    prefix = deployment / "environment"
+    _launcher, _python = _fake_mpi_environment(prefix)
+    mpi_runner = pathlib.Path(toy_mpi.__file__).resolve()
+    program = (
+        str(prefix / "bin" / "python"),
+        str(mpi_runner),
+        "release",
+        "--run-directory",
+        str(release_root),
+        "--source-revision",
+        COMMIT,
+        "--source-tree-sha256",
+        SOURCE_SHA256,
+        "--environment-sha256",
+        lock_sha,
+        "--execution-id",
+        execution_id,
+        "--expected-ranks",
+        str(rank_count),
+    )
+    argv = mpi_scaling.environment_mpi_argv(
+        prefix,
+        rank_count=rank_count,
+        physical_core_count=76,
+        socket_count=2,
+        program=program,
+    )
+    receipt_path = attempt_root / "mpi-release-launch.json"
+    cli._write_release_launch_receipt(
+        path=receipt_path,
+        attempt_root=attempt_root,
+        environment_prefix=prefix,
+        argv=argv,
+        binding_arguments=mpi_scaling.openmpi_binding_arguments(
+            rank_count,
+            physical_core_count=76,
+            socket_count=2,
+        ),
+        selected_rank=rank_count,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        execution_id=execution_id,
+        started_utc="2026-07-26T00:00:00Z",
+        finished_utc="2026-07-26T00:00:01Z",
+        returncode=0,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+    facts = cli._validate_release_launch_receipt(
+        path=receipt_path,
+        attempt_root=attempt_root,
+        environment_prefix=prefix,
+        selected_rank=rank_count,
+        physical_core_count=76,
+        socket_count=2,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        execution_id=execution_id,
+        release_root=release_root,
+        mpi_runner=mpi_runner,
+    )
+    return receipt_path, stdout_path, facts
+
+
+def _mock_successful_mpi_commands(
+    *,
+    root: pathlib.Path,
+    lock_sha: str,
+    captured: list[tuple[tuple[str, ...], dict[str, str]]] | None = None,
+    rank_times: tuple[float, ...] = (100.0, 60.0, 31.0, 30.0, 29.8),
+    report_mutator=None,
+):
+    def fake_run(argv, **kwargs):
+        command = tuple(str(value) for value in argv)
+        if "env" not in kwargs: return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+        environment = dict(kwargs["env"])
+        if captured is not None:
+            captured.append((command, environment))
+        assert all(environment[name] == "1" for name in core.THREAD_LIMIT_ENV)
+        if "scale" in command:
+            run_directory = pathlib.Path(
+                command[command.index("--run-directory") + 1]
+            )
+            _write_scaling_selection(
+                run_directory,
+                lock_sha,
+                times=rank_times,
+                environment_prefix=root / "environment",
+            )
+            kwargs["stdout"].write("synthetic scaling success\n")
+        else:
+            assert command[0] == str(root / "environment" / "bin" / "mpiexec")
+            rank_count = int(command[command.index("-n") + 1])
+            run_directory = pathlib.Path(
+                command[command.index("--run-directory") + 1]
+            )
+            execution_id = command[command.index("--execution-id") + 1]
+            _write_release_evidence(
+                root=run_directory,
+                lock_sha=lock_sha,
+                execution_id=execution_id,
+                rank_count=rank_count,
+                report_mutator=report_mutator,
+                environment_prefix=root / "environment",
+            )
+            kwargs["stdout"].write("synthetic release success\n")
+        return SimpleNamespace(returncode=0)
+
+    return fake_run
 
 
 def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
@@ -596,31 +1347,26 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
         "_record_remote_environment",
         lambda **_kwargs: _worker_identity(lock_sha),
     )
-    captured: dict[str, object] = {}
-
-    def fake_run(argv, **kwargs):
-        captured["argv"] = argv
-        captured["env"] = kwargs["env"]
-        _write_valid_worker_report(
-            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
-            root=root,
-            lock_sha=lock_sha,
-        )
-        kwargs["stdout"].write("synthetic success\n")
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root, lock_sha=lock_sha, captured=captured
+    ))
     assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
-    environment = captured["env"]
-    assert isinstance(environment, dict)
-    for name in core.THREAD_LIMIT_ENV:
-        assert environment[name] == "1"
-    assert environment["PATH"].split(os.pathsep)[0] == core.REMOTE_TOOLS_BIN
-    assert "NEGFPY_TOY_GATE_RESUME" not in environment
-    assert environment["NEGFPY_VALIDATION_ENV_SHA256"] == lock_sha
-    assert pathlib.Path(
-        environment["NEGFPY_TOY_GATE_CHECKPOINT_DIR"]
-    ).name == "checkpoints"
+    assert len(captured) == 2
+    scale_argv, scale_environment = captured[0]
+    release_argv, release_environment = captured[1]
+    for environment in (scale_environment, release_environment):
+        assert all(environment[name] == "1" for name in core.THREAD_LIMIT_ENV)
+        assert environment["PATH"].split(os.pathsep)[0] == core.REMOTE_TOOLS_BIN
+        assert not any(name.startswith("NEGFPY_TOY_GATE") for name in environment)
+    assert scale_argv[0] == str(root / "environment" / "bin" / "python")
+    assert "scale" in scale_argv
+    assert release_argv[0] == str(root / "environment" / "bin" / "mpiexec")
+    assert tuple(release_argv[1:7]) == mpi_scaling.openmpi_binding_arguments(
+        4, physical_core_count=76, socket_count=2
+    )
+    assert release_argv[release_argv.index("-n") + 1] == "4"
+    assert "release" in release_argv
     status = json.loads(
         (root / "artifacts" / "job-status.json").read_text(encoding="utf-8")
     )
@@ -631,6 +1377,11 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     assert status["report_facts"]["multidimensional_outcome_count"] == 13
     assert status["report_facts"]["checkpoint_count"] == 13
     assert status["report_facts"]["source_tree_sha256"] == SOURCE_SHA256
+    assert status["scaling_facts"]["toy_rank_count"] == 4
+    assert status["scaling_facts"]["physics_equal_across_all_ranks"] is True
+    assert status["mpi_execution_facts"]["mode"] == "mpi"
+    assert status["mpi_execution_facts"]["communicator_size"] == 4
+    assert status["mpi_execution_facts"]["release_certified"] is True
     assert not (root / "artifacts" / "job.lock").exists()
     verified = core.verify_sha256sums(root / "artifacts")
     assert "job-status.json" in verified
@@ -640,6 +1391,10 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     assert "attempts/attempt-001/production_toy_gate.json" in verified
     assert "attempts/attempt-001/report-facts.json" in verified
     assert "attempts/attempt-001/checkpoint-index.json" in verified
+    assert "attempts/attempt-001/mpi-release-runner-result.json" in verified
+    assert "attempts/attempt-001/mpi-execution-manifest.json" in verified
+    assert "attempts/attempt-001/mpi-campaign-manifest.json" in verified
+    assert "attempts/attempt-001/mpi-scaling/scaling-selection.json" in verified
     assert "identity/deployment-manifest.json" in verified
     assert "identity/environment-manifest.json" in verified
     assert "identity/environment-explicit.lock" in verified
@@ -652,10 +1407,226 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     )
     assert checkpoint_index["count"] == 13
     assert all(
-        item["artifact_relative_path"].startswith("checkpoints/")
+        item["artifact_relative_path"].startswith("toy-release/scientific-checkpoints/")
         for item in checkpoint_index["records"]
     )
 
+
+
+def test_worker_uses_rank_one_serial_fallback_but_retains_silicon_mpi_choice(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+    captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root,
+        lock_sha=lock_sha,
+        captured=captured,
+        rank_times=(100.0, 95.0, 92.0, 90.0, 89.0),
+    ))
+
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
+    status = json.loads(
+        (root / "artifacts" / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["scaling_facts"]["toy_rank_count"] == 1
+    assert status["scaling_facts"]["toy_mpi_enabled"] is False
+    assert status["scaling_facts"]["silicon_rank_count"] == 4
+    assert status["mpi_execution_facts"]["mode"] == "serial"
+    assert status["mpi_execution_facts"]["communicator_size"] == 1
+    release_argv = captured[1][0]
+    assert release_argv[release_argv.index("-n") + 1] == "1"
+    assert tuple(release_argv[1:7]) == mpi_scaling.openmpi_binding_arguments(
+        1, physical_core_count=76, socket_count=2
+    )
+
+
+def test_lifecycle_rebuilds_scaling_selection_and_rejects_worker_tampering(
+    tmp_path: pathlib.Path,
+) -> None:
+    lock_sha = "7" * 64
+    selection = _write_scaling_selection(tmp_path / "scaling", lock_sha)
+    facts = cli._validate_scaling_selection(
+        selection_path=selection,
+        environment_prefix=tmp_path / "environment",
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        physical_core_count=76,
+        socket_count=2,
+    )
+    assert facts["toy_rank_count"] == 4
+    worker = (
+        selection.parent
+        / "rank-004"
+        / "runner-results"
+        / "scaling-rank-004.json"
+    )
+    worker.write_bytes(worker.read_bytes() + b" ")
+    with pytest.raises(core.RemoteValidationError, match="revalidation"):
+        cli._validate_scaling_selection(
+            selection_path=selection,
+            environment_prefix=tmp_path / "environment",
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            physical_core_count=76,
+            socket_count=2,
+        )
+
+
+def test_lifecycle_rejects_hash_mismatched_mpi_execution_manifest(
+    tmp_path: pathlib.Path,
+) -> None:
+    deployment = tmp_path / COMMIT
+    release_root = deployment / "artifacts" / "toy-release"
+    lock_sha = "7" * 64
+    execution_id = "release-attempt-001"
+    result = _write_release_evidence(
+        root=release_root,
+        lock_sha=lock_sha,
+        execution_id=execution_id,
+        rank_count=4,
+        environment_prefix=deployment / "environment",
+    )
+    _receipt, _stdout, launch_facts = _write_release_launch_facts(
+        deployment=deployment,
+        release_root=release_root,
+        execution_id=execution_id,
+        rank_count=4,
+        lock_sha=lock_sha,
+    )
+    facts, _report, _checkpoints = cli._validate_release_runner_result(
+        result_path=result,
+        release_root=release_root,
+        execution_id=execution_id,
+        selected_rank=4,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        socket_count=2,
+        environment_prefix=deployment / "environment",
+        launch_facts=launch_facts,
+    )
+    assert facts["mode"] == "mpi"
+    execution = release_root / "campaign-executions" / f"{execution_id}.json"
+    execution.write_bytes(execution.read_bytes() + b" ")
+    with pytest.raises(core.RemoteValidationError, match="hash-mismatched"):
+        cli._validate_release_runner_result(
+            result_path=result,
+            release_root=release_root,
+            execution_id=execution_id,
+            selected_rank=4,
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            socket_count=2,
+            environment_prefix=deployment / "environment",
+            launch_facts=launch_facts,
+        )
+
+
+@pytest.mark.parametrize("tamper_target", ("receipt", "stdout"))
+def test_release_launch_receipt_rejects_tampering(
+    tamper_target: str,
+    tmp_path: pathlib.Path,
+) -> None:
+    deployment = tmp_path / COMMIT
+    release_root = deployment / "artifacts" / "toy-release"
+    execution_id = "release-attempt-001"
+    lock_sha = "7" * 64
+    receipt, stdout, _facts = _write_release_launch_facts(
+        deployment=deployment,
+        release_root=release_root,
+        execution_id=execution_id,
+        rank_count=4,
+        lock_sha=lock_sha,
+    )
+    target = receipt if tamper_target == "receipt" else stdout
+    target.write_bytes(target.read_bytes() + b"tamper\n")
+    with pytest.raises(core.RemoteValidationError):
+        cli._validate_release_launch_receipt(
+            path=receipt,
+            attempt_root=receipt.parent,
+            environment_prefix=deployment / "environment",
+            selected_rank=4,
+            physical_core_count=76,
+            socket_count=2,
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            execution_id=execution_id,
+            release_root=release_root,
+            mpi_runner=pathlib.Path(toy_mpi.__file__).resolve(),
+        )
+
+
+def test_worker_exact_retry_reuses_only_revalidated_scaling_evidence(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, lock_sha = _prepare_worker_root(tmp_path)
+    for name in core.THREAD_LIMIT_ENV:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        cli,
+        "_record_remote_environment",
+        lambda **_kwargs: _worker_identity(lock_sha),
+    )
+    first_commands: list[tuple[str, ...]] = []
+
+    def interrupted_release(argv, **kwargs):
+        command = tuple(str(value) for value in argv)
+        if "env" not in kwargs:
+            return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+        first_commands.append(command)
+        if "scale" in command:
+            directory = pathlib.Path(
+                command[command.index("--run-directory") + 1]
+            )
+            _write_scaling_selection(
+                directory,
+                lock_sha,
+                environment_prefix=root / "environment",
+            )
+            return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(cli.subprocess, "run", interrupted_release)
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 1
+    assert len(first_commands) == 2
+    lock = root / "artifacts" / "job.lock"
+    lock.mkdir()
+    (lock / "session").write_text("retry-session\n", encoding="ascii")
+
+    retry_commands: list[tuple[tuple[str, ...], dict[str, str]]] = []
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root,
+        lock_sha=lock_sha,
+        captured=retry_commands,
+    ))
+    assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
+    assert len(retry_commands) == 1
+    assert "release" in retry_commands[0][0]
+    assert "scale" not in retry_commands[0][0]
+    status = json.loads(
+        (root / "artifacts" / "job-status.json").read_text(encoding="utf-8")
+    )
+    assert status["attempt"] == 2
+    assert status["state"] == "completed"
+    assert status["scaling_facts"]["reused_for_exact_retry"] is True
+    assert status["scaling_facts"]["source_attempt"] == "attempt-001"
+    assert status["scaling_facts"]["selection_relative_path"] == (
+        "attempts/attempt-001/mpi-scaling/scaling-selection.json"
+    )
 
 def test_worker_identity_drift_is_terminal_and_releases_lock(
     tmp_path: pathlib.Path,
@@ -710,20 +1681,11 @@ def test_worker_rejects_hash_valid_but_uncertified_current_report(
         lambda **_kwargs: _worker_identity(lock_sha),
     )
 
-    def fake_run(_argv, **kwargs):
-        path = pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"])
-        report = _write_valid_worker_report(
-            report_path=path, root=root, lock_sha=lock_sha
-        )
+    def mutate_report(report):
         report["summary"]["release_certified"] = False
-        report["report_sha256"] = _report_digest(
-            {key: value for key, value in report.items() if key != "report_sha256"},
-            ensure_ascii=False,
-        )
-        core._atomic_write_json(path, report)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root, lock_sha=lock_sha, report_mutator=mutate_report
+    ))
     assert cli._worker(deployment_dir=root, commit=COMMIT) == 2
     artifacts = root / "artifacts"
     status = json.loads(
@@ -732,7 +1694,7 @@ def test_worker_rejects_hash_valid_but_uncertified_current_report(
     assert status["state"] == "failed"
     assert status["report_facts"] is None
     assert not (artifacts / "job.lock").exists()
-    assert "report summary gate failed: release_certified" in (
+    assert "strict report certification state changed" in (
         artifacts / "attempts" / "attempt-001" / "production_toy_gate.log"
     ).read_text(encoding="utf-8")
     core.verify_sha256sums(artifacts)
@@ -760,27 +1722,12 @@ def test_worker_requires_explicit_multidimensional_contract_subgates(
         lambda **_kwargs: _worker_identity(lock_sha),
     )
 
-    def fake_run(_argv, **kwargs):
-        path = pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"])
-        report = _write_valid_worker_report(
-            report_path=path,
-            root=root,
-            lock_sha=lock_sha,
-        )
+    def mutate_report(report):
         assert report["summary"]["multidimensional_contract_passed"] is True
         report["summary"][gate_key] = False
-        report["report_sha256"] = _report_digest(
-            {
-                key: value
-                for key, value in report.items()
-                if key != "report_sha256"
-            },
-            ensure_ascii=False,
-        )
-        core._atomic_write_json(path, report)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root, lock_sha=lock_sha, report_mutator=mutate_report
+    ))
     assert cli._worker(deployment_dir=root, commit=COMMIT) == 2
     artifacts = root / "artifacts"
     status = json.loads(
@@ -829,15 +1776,9 @@ def test_worker_invalidates_stale_root_report_and_checksum_before_attempt(
         lambda **_kwargs: _worker_identity(lock_sha),
     )
 
-    def fake_run(_argv, **kwargs):
-        _write_valid_worker_report(
-            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
-            root=root,
-            lock_sha=lock_sha,
-        )
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root, lock_sha=lock_sha
+    ))
     assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
     attempt = artifacts / "attempts" / "attempt-001"
     assert (attempt / "previous-SHA256SUMS").is_file()
@@ -900,15 +1841,9 @@ def test_worker_keeps_lock_and_never_completes_when_checksum_publication_fails(
         lambda **_kwargs: _worker_identity(lock_sha),
     )
 
-    def fake_run(_argv, **kwargs):
-        _write_valid_worker_report(
-            report_path=pathlib.Path(kwargs["env"]["NEGFPY_TOY_GATE_REPORT"]),
-            root=root,
-            lock_sha=lock_sha,
-        )
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
+        root=root, lock_sha=lock_sha
+    ))
     monkeypatch.setattr(
         core,
         "_write_sha256sums",

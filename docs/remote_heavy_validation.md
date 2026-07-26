@@ -99,9 +99,9 @@ python scripts/remote_heavy_cli.py launch "$commit"
 Deployment verifies checksums remotely, checks out exactly the detached clean
 commit in `~/negfpy-validation/<commit>/worktree`, verifies explicit-lock SHA
 `aca1a3f7eb7675adb5982d571005cc5ae65ed442b4972ad835f2d4fdf6fa33c1`, and
-creates `~/negfpy-validation/<commit>/environment` from that lock. The worker
-passes the same hash as `NEGFPY_VALIDATION_ENV_SHA256`; no shared scientific
-environment is accepted. Deploy-time and attempt-time identity records must
+creates `~/negfpy-validation/<commit>/environment` from that lock. Every
+scientific manifest receives that exact lock SHA directly; no shared scientific
+environment or environment-variable override is accepted. Identity records must
 agree on the full commit, Git tree, package-source SHA256, lock SHA256,
 interpreter, installed distributions, platform, and thread limits.
 
@@ -115,10 +115,30 @@ attempt-time provenance must match it exactly.
 
 `launch` creates `negf-toy-<12-character-commit>` in detached `tmux`. It fixes
 OpenMP, OpenBLAS, MKL, BLIS, NumExpr, and vecLib thread counts to one and runs
-the established nightly pytest release entry point.
+the hardened task-level MPI lifecycle. The worker first runs five fresh,
+isolated 1/2/4/8/16-rank representative campaigns, independently rebuilds the
+immutable scaling decision, then launches the locked release through that
+deployment's absolute `environment/bin/mpiexec` path and binding policy. There
+is no pytest wrapper and no scientific command-line override.
 
-The release worker does not accept pytest exit status alone as success. It
-strictly reloads the current-attempt report and requires:
+Every release subprocess writes separate `mpi-release.stdout.log` and
+`mpi-release.stderr.log` files and then atomically publishes the immutable
+hashed envelope `mpi-release-launch.json` with schema
+`negfpy.remote_validation.release_launch.v1`. The receipt records the exact
+environment-local launcher and Python paths, their resolved paths and file
+SHA256 values, the complete argv and Open MPI binding arguments, selected rank
+count, one-thread environment, source/tree/environment identities, execution
+identifier, timestamps, return code, and the relative log paths and hashes.
+The worker independently reconstructs the launcher argv and binding policy and
+remeasures both executables and logs before it accepts a successful run. The
+validated receipt facts are embedded in `mpi_execution_facts`; the attempt
+publication names and hashes the receipt and both logs, and `SHA256SUMS` covers
+all three. A nonzero launch still retains its receipt and logs as infrastructure
+evidence eligible only for an identical hashed retry.
+
+The release worker does not accept process exit status alone as success. It
+strictly reloads the scaling, campaign, MPI execution, and scientific reports
+and requires:
 
 - combined schema v4 with a valid canonical body digest and
   `release_certified=true`;
@@ -128,7 +148,12 @@ strictly reloads the current-attempt report and requires:
   numerical points);
 - the passing bounded converged serial/threaded/FFT full-field oracle;
 - the complete 13-run open-system matrix;
-- 13 valid checkpoint files and one environment-lock identity; and
+- identical canonical physics digests across every scaling rank;
+- a policy-selected toy rank (or the one-rank serial/FFT fallback when speedup
+  is below 2x), with the silicon MPI selection retained separately;
+- a complete 28-task campaign/execution manifest whose SHA chain is attached
+  to the strict report;
+- 13 valid scientific checkpoint files and one environment-lock identity; and
 - full commit and package-source identity equal to the deployed candidate.
 
 The protocol-v2 numerical ladder is
@@ -149,17 +174,23 @@ remote certification.
 
 ## Resume, status, and retrieval
 
-The worker always supplies the persistent checkpoint directory. The release
-runner's existing default is resume-enabled, and scientific checkpoint
-validation rejects any source, environment, grid, input, or initial-state
-hash mismatch. The obsolete, unconsumed resume environment variable is not
-exported.
+The release campaign lives at `artifacts/toy-release/` and is resume-enabled.
+Its task outcomes and `scientific-checkpoints/` are reused only after source,
+environment, grid, input, initial-state, campaign, and task hashes match
+exactly. Each attempt uses a new execution identifier; no resume environment
+variable or altered control is accepted.
 
 Each execution writes a new `artifacts/attempts/attempt-NNN/` directory with
-its own report, log, status, execution identity, report facts, and relative
-checkpoint index. Compatible HDF5 checkpoints remain in
-`artifacts/checkpoints/`. A root `current-attempt.json` points to the sole
-current terminal attempt. A runner failure sidecar is moved into that attempt;
+its own report, log, status, execution identity, scaling reference, report
+facts, MPI runner result, MPI execution manifest, and relative checkpoint
+index. Compatible HDF5 checkpoints remain in
+`artifacts/toy-release/scientific-checkpoints/`.
+
+The first attempt runs a fresh scaling ladder. An exact infrastructure retry
+may reuse it only after reopening every rank/worker artifact and rebuilding the
+same source-, tree-, environment-, topology-, and physics-locked decision.
+A root `current-attempt.json` points to the sole current terminal attempt. A
+runner failure sidecar is moved into that attempt;
 it cannot survive at the artifact root and masquerade as current evidence.
 
 Before a retry, the old `SHA256SUMS` and current-attempt pointer are archived,
@@ -213,8 +244,9 @@ implementation, and publishes its own atomic HDF5 outcome. Green functions and
 self-energies are never sent through MPI or combined by a floating-point MPI
 reduction.
 
-Before release certification, run the representative rank ladder with the
-exact deployed environment and source identities:
+`remote_heavy_cli.py launch` performs the ladder and release automatically.
+The following lower-level command is for controlled diagnostics only; it must
+use the exact deployed environment and source identities:
 
 ```bash
 environment/bin/python scripts/remote_toy_mpi_runner.py scale \
@@ -262,10 +294,10 @@ within 5% of the fastest wall time. Toy MPI is enabled only for at least a
 2x end-to-end speedup; otherwise toy certification remains serial/FFT while
 the selected task-MPI count is retained for the silicon target-q workload.
 
-The full certification invocation exposes no grid, eta, mixing, backend, or
-solver-tolerance options. Launch it with the rank count selected above and the
-same environment-local MPI executable. For an eight-rank example on the
-confirmed two-socket workstation:
+The lower-level certification invocation exposes no grid, eta, mixing,
+backend, or solver-tolerance options. The hardened lifecycle constructs it
+from the validated selection with the same environment-local MPI executable.
+For an eight-rank diagnostic example on the confirmed two-socket workstation:
 
 ```bash
 environment/bin/mpiexec \
