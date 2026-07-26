@@ -2319,3 +2319,73 @@ def test_hosted_workflows_do_not_ssh_or_enable_the_heavy_gate() -> None:
     assert "remote_heavy" not in text
     assert " ssh " not in text
     assert "\nssh " not in text
+
+
+def test_remote_python_entrypoints_cannot_dirty_a_clean_worktree_with_pycache(
+    tmp_path: pathlib.Path,
+) -> None:
+    bootstrap = cli._remote_bootstrap_command(COMMIT)
+    launch = cli._launch_command(COMMIT, "negf-toy-pycache-regression")
+    assert "env PYTHONDONTWRITEBYTECODE=1 " in bootstrap
+    assert "env PYTHONDONTWRITEBYTECODE=1 " in launch
+
+    repository = pathlib.Path(__file__).parents[1].resolve()
+    worktree = tmp_path / "clean-worktree"
+    _REAL_SUBPROCESS_RUN(
+        (
+            "git", "clone", "--quiet", "--no-hardlinks", "--no-checkout",
+            str(repository), str(worktree),
+        ),
+        check=True,
+    )
+    _REAL_SUBPROCESS_RUN(
+        ("git", "-C", str(worktree), "checkout", "--quiet", "--detach", "HEAD"),
+        check=True,
+    )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(worktree / "src"),
+        }
+    )
+    _REAL_SUBPROCESS_RUN(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import negfpy; "
+                "from negfpy.anharmonic._provenance import code_provenance; "
+                "code_provenance(); "
+                "from negfpy.anharmonic.toy._mpi_production_gate_physics "
+                "import production_toy_physics_sha256; "
+                "from negfpy.anharmonic.toy._mpi_production_gate "
+                "import collect_production_toy_campaign_outcomes; "
+                "from negfpy.anharmonic.toy.production_gate_report "
+                "import ProductionToyGateReport"
+            ),
+        ),
+        cwd=worktree,
+        check=True,
+        env=environment,
+    )
+    ignored = _REAL_SUBPROCESS_RUN(
+        (
+            "git", "-C", str(worktree), "ls-files", "--others", "--ignored",
+            "--exclude-standard",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    status = _REAL_SUBPROCESS_RUN(
+        (
+            "git", "-C", str(worktree), "status", "--porcelain=v1",
+            "--untracked-files=all",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert ignored == ""
+    assert status == ""

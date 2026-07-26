@@ -59,7 +59,8 @@ def _remote_bootstrap_command(commit: str) -> str:
             f"--file {remote}/incoming/environment-explicit.lock",
             f"{remote}/environment/bin/python -m pip install --no-deps "
             f"--no-build-isolation -e {remote}/worktree",
-            f"env PYTHONPATH={remote}/worktree/src {remote}/environment/bin/python "
+            f"env PYTHONDONTWRITEBYTECODE=1 "
+            f"PYTHONPATH={remote}/worktree/src {remote}/environment/bin/python "
             f"{remote}/worktree/scripts/remote_heavy_cli.py "
             f"_record-remote-environment --deployment-dir {remote} --commit {commit}",
         )
@@ -113,7 +114,8 @@ def _launch_command(commit: str, session: str) -> str:
         f"{key}=1" for key in sorted(core.THREAD_LIMIT_ENV)
     )
     worker = (
-        f"env PYTHONPATH={remote}/worktree/src {limits} "
+        f"env PYTHONDONTWRITEBYTECODE=1 "
+        f"PYTHONPATH={remote}/worktree/src {limits} "
         f"{remote}/environment/bin/python "
         f"{remote}/worktree/scripts/remote_heavy_cli.py _worker "
         f"--deployment-dir {remote} --commit {commit}"
