@@ -7,12 +7,15 @@ import argparse
 from dataclasses import dataclass
 import hashlib
 import hmac
+import importlib.util
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
+import sys
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 
@@ -130,6 +133,21 @@ HISTORICAL_FIGURES = (
     "historical_paper_benchmarks.pdf",
     "historical_paper_benchmarks.png",
 )
+HISTORICAL_METRICS = "historical_paper_benchmarks_metrics.json"
+HISTORICAL_RENDER_MANIFEST = (
+    "historical_paper_benchmarks_render_manifest.json"
+)
+IMPORTER_SOURCE = (
+    "docs/validation/toy-model-report/scripts/import_production_toy_gate.py"
+)
+PRODUCTION_RENDERER_SOURCE = (
+    "docs/validation/toy-model-report/scripts/render_production_toy_gate_figures.py"
+)
+HISTORICAL_RENDERER_SOURCE = (
+    "docs/validation/toy-model-report/scripts/render_historical_paper_benchmarks.py"
+)
+HISTORICAL_DATA_ROOT = "docs/validation/toy-model-report/historical-data"
+
 
 
 class ReleaseConfigError(RuntimeError):
@@ -194,6 +212,79 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _load_committed_module(
+    relative: str,
+    source_records: Mapping[str, Any],
+    *,
+    name: str,
+) -> tuple[Any, str]:
+    record = _mapping(source_records.get(relative), f"{name} source record")
+    expected_keys = {"path", "git_tracked", "kind", "size", "mode", "sha256"}
+    _require(
+        set(record) == expected_keys
+        and record.get("path") == relative
+        and record.get("git_tracked") is True
+        and record.get("kind") == "regular_file"
+        and isinstance(record.get("size"), int)
+        and not isinstance(record.get("size"), bool)
+        and record["size"] > 0,
+        f"{name} is not an exact committed regular-file source record",
+    )
+    path = Path(__file__).resolve().parents[3] / relative
+    _require(path.is_file() and not path.is_symlink(), f"{name} source is missing or unsafe")
+    digest = _file_sha256(path)
+    _require(
+        path.stat().st_size == record["size"]
+        and digest == _sha(record.get("sha256"), f"{name} source SHA256"),
+        f"local {name} bytes differ from the remotely executed commit",
+    )
+    module_name = f"_negfpy_release_{name.replace('-', '_')}_{digest[:16]}"
+    specification = importlib.util.spec_from_file_location(module_name, path)
+    _require(
+        specification is not None and specification.loader is not None,
+        f"cannot load committed {name}",
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    try:
+        specification.loader.exec_module(module)
+    except Exception as error:
+        raise ReleaseConfigError(f"cannot execute committed {name}") from error
+    finally:
+        sys.modules.pop(module_name, None)
+    _require(_file_sha256(path) == digest, f"committed {name} changed during loading")
+    return module, digest
+
+
+def _exact_local_source_file(
+    relative: str,
+    source_records: Mapping[str, Any],
+    *,
+    name: str,
+) -> tuple[Path, str]:
+    record = _mapping(source_records.get(relative), f"{name} source record")
+    _require(
+        set(record) == {"path", "git_tracked", "kind", "size", "mode", "sha256"}
+        and record.get("path") == relative
+        and record.get("git_tracked") is True
+        and record.get("kind") == "regular_file"
+        and isinstance(record.get("size"), int)
+        and not isinstance(record.get("size"), bool)
+        and record["size"] >= 0,
+        f"{name} is not an exact committed regular-file source record",
+    )
+    path = Path(__file__).resolve().parents[3] / relative
+    _require(path.is_file() and not path.is_symlink(), f"{name} source is missing or unsafe")
+    digest = _file_sha256(path)
+    _require(
+        path.stat().st_size == record["size"]
+        and digest == _sha(record.get("sha256"), f"{name} source SHA256"),
+        f"local {name} bytes differ from the remotely executed commit",
+    )
+    return path, digest
 
 
 def _sha(value: Any, name: str) -> str:
@@ -1064,6 +1155,9 @@ def _worker(
         name=f"{profile} worker runtime",
     )
     _sha(payload.get("configuration_sha256"), f"{profile} configuration SHA256")
+    report_document = _strict_json(
+        report_path, "strict report", style="indent-utf8"
+    )
     return {
         "document": worker_document,
         "payload": payload,
@@ -1073,9 +1167,11 @@ def _worker(
         "execution_payload_sha256": execution_payload_sha,
         "report_file_sha256": report_file_sha,
         "report_path": report_path,
-        "report_body_sha256": _strict_json(
-            report_path, "strict report", style="indent-utf8"
-        )["report_sha256"],
+        "report_body_sha256": report_document["report_sha256"],
+        "nested_report_body_sha256": _mapping(
+            report_document.get("multidimensional_scba"),
+            "strict report multidimensional block",
+        ).get("report_sha256"),
         "physics_sha256": physics_sha,
         "memory_fraction": memory_fraction,
     }
@@ -1932,6 +2028,9 @@ def _remote_source_manifests(
         "prefix": prefix,
         "prefix_regular": regular_by_path,
         "remote_environment_file_sha256": _file_sha256(remote_path),
+        "remote_environment": remote,
+        "identity_bundle": bundle,
+        "git_tree": git_tree,
     }
 
 
@@ -1942,7 +2041,7 @@ def _validate_publication_chain(
     scaling: Mapping[str, Any],
     scaling_record: Mapping[str, Any],
     release: Mapping[str, Any],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     publication = _mapping(context.get("publication"), "current publication")
     paths = _mapping(context.get("paths"), "publication paths")
     status = _mapping(context.get("status"), "publication terminal status")
@@ -2457,6 +2556,10 @@ def _validate_publication_chain(
         "execution_source_identity_sha256": source["manifest_sha256"],
         "environment_prefix_manifest_sha256": prefix_manifest["manifest_sha256"],
         "launch_environment_sha256": launch_binding["launch_environment_sha256"],
+        "source_records": source_records,
+        "remote_environment": identities["remote_environment"],
+        "identity_bundle": identities["identity_bundle"],
+        "git_tree": identities["git_tree"],
     }
 
 
@@ -2464,63 +2567,238 @@ def _validate_staging(
     tree: ChecksumTree,
     *,
     commit: str,
+    git_tree: str,
     tree_sha: str,
     environment_sha: str,
     artifact_anchor: str,
+    artifact_fetch_receipt_sha: str,
+    fetch_receipt: Mapping[str, Any],
     release_report_sha: str,
+    release_report_body_sha: str,
+    nested_report_body_sha: str,
+    identity_bundle: Mapping[str, Any],
+    remote_environment: Mapping[str, Any],
+    source_records: Mapping[str, Any],
 ) -> str:
+    importer, importer_sha = _load_committed_module(
+        IMPORTER_SOURCE, source_records, name="production-importer"
+    )
+    _require(
+        callable(getattr(importer, "_derive_files", None))
+        and isinstance(getattr(importer, "_IMPORTER_VERSION", None), str),
+        "committed production importer lacks the canonical derivation contract",
+    )
     for filename in REQUIRED_TEX:
         _tree_file(tree, f"tex/{filename}", f"staging TeX {filename}")
     staged_report = _tree_file(
-        tree,
-        "production_toy_gate.json",
-        "staged strict report",
+        tree, "production_toy_gate.json", "staged strict report",
         expected_sha256=release_report_sha,
     )
+    document = _strict_json(
+        staged_report, "staged strict production report", style="indent-utf8"
+    )
+    nested = _mapping(
+        document.get("multidimensional_scba"),
+        "staged strict report multidimensional block",
+    )
+    _require(
+        document.get("report_sha256") == release_report_body_sha
+        and nested.get("report_sha256") == nested_report_body_sha,
+        "staged strict report body hashes differ from the validated remote report",
+    )
+
     receipt_path = _tree_file(tree, "import_receipt.json", "staging import receipt")
     receipt = _strict_json(receipt_path, "staging import receipt", style="indent-ascii")
     _require(
-        receipt.get("schema") == "negfpy.anharmonic.production_toy_gate_import_receipt"
+        set(receipt) == {
+            "schema", "schema_version", "implementation", "source",
+            "trusted_inputs", "release_contract", "checkpoint_validation",
+            "staged_artifacts", "receipt_sha256",
+        }
+        and receipt.get("schema")
+        == "negfpy.anharmonic.production_toy_gate_import_receipt"
         and receipt.get("schema_version") == 2,
-        "staging import receipt schema changed",
+        "staging import receipt shape or schema changed",
     )
     recorded_body = _sha(receipt.get("receipt_sha256"), "import receipt body SHA256")
     receipt_core = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     _require(
-        recorded_body == _hash_document(receipt_core),
+        hmac.compare_digest(recorded_body, _hash_document(receipt_core)),
         "staging import receipt body SHA256 mismatch",
     )
-    source = _mapping(receipt.get("source"), "staging receipt source")
-    contract = _mapping(receipt.get("release_contract"), "staging release contract")
-    expected_contract = {
-        "checkpoint_count": 13,
-        "multidimensional_outcome_count": 13,
-        "open_system_run_count": 13,
-        "protocol": "multidimensional_toy_gate_v2",
-        "protocol_version": 2,
-        "release_certified": True,
-        "schema_version": 4,
-        "validation_tier": "release",
-    }
+    implementation = _mapping(receipt.get("implementation"), "staging importer identity")
     _require(
-        source.get("commit") == commit
-        and source.get("source_tree_sha256") == tree_sha
-        and source.get("environment_sha256") == environment_sha
-        and source.get("report_file_sha256") == release_report_sha
-        and source.get("report_relative_path") == "production_toy_gate.json"
-        and source.get("sha256sums_sha256") == artifact_anchor
-        and all(contract.get(key) == value for key, value in expected_contract.items()),
-        "staging import receipt source/release contract changed",
+        implementation == {
+            "name": Path(IMPORTER_SOURCE).name,
+            "version": importer._IMPORTER_VERSION,
+            "source_sha256": importer_sha,
+        },
+        "staging receipt is not bound to the exact committed canonical importer",
     )
-    _require(_file_sha256(staged_report) == release_report_sha, "staged report changed")
+
+    source = _mapping(receipt.get("source"), "staging receipt source")
+    attempt = source.get("attempt")
+    expected_created = fetch_receipt.get("fetched_utc") or fetch_receipt.get("created_utc")
+    _require(
+        set(source) == {
+            "commit", "attempt", "report_relative_path",
+            "remote_report_relative_path", "report_file_sha256",
+            "report_body_sha256", "nested_report_body_sha256",
+            "outer_sha256sums_file_sha256", "fetch_receipt_sha256",
+            "sha256sums_sha256", "transport_receipt_schema",
+            "transport_receipt_created_utc", "fetched_utc", "git_tree",
+            "source_tree_sha256", "environment_sha256",
+        }
+        and source.get("commit") == commit
+        and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0
+        and source.get("report_relative_path") == "production_toy_gate.json"
+        and source.get("remote_report_relative_path")
+        == f"attempts/attempt-{attempt:03d}/production_toy_gate.json"
+        and source.get("report_file_sha256") == release_report_sha
+        and source.get("report_body_sha256") == release_report_body_sha
+        and source.get("nested_report_body_sha256") == nested_report_body_sha
+        and source.get("outer_sha256sums_file_sha256") == artifact_anchor
+        and source.get("fetch_receipt_sha256") == artifact_fetch_receipt_sha
+        and source.get("sha256sums_sha256") == artifact_anchor
+        and source.get("transport_receipt_schema") == fetch_receipt.get("schema")
+        and source.get("transport_receipt_created_utc") == expected_created
+        and source.get("fetched_utc") == fetch_receipt.get("fetched_utc")
+        and source.get("git_tree") == git_tree
+        and source.get("source_tree_sha256") == tree_sha
+        and source.get("environment_sha256") == environment_sha,
+        "staging import receipt source identity changed",
+    )
+    trusted = _mapping(receipt.get("trusted_inputs"), "staging trusted inputs")
+    _require(
+        trusted == {
+            "expected_commit": commit,
+            "expected_environment_lock_sha256": environment_sha,
+            "expected_fetch_receipt_sha256": artifact_fetch_receipt_sha,
+            "expected_sha256sums_sha256": artifact_anchor,
+        },
+        "staging trusted-input shape or values changed",
+    )
+    contract = _mapping(receipt.get("release_contract"), "staging release contract")
+    _require(
+        contract == {
+            "checkpoint_count": 13,
+            "multidimensional_outcome_count": 13,
+            "open_system_run_count": 13,
+            "protocol": "multidimensional_toy_gate_v2",
+            "protocol_version": 2,
+            "release_certified": True,
+            "schema_version": 4,
+            "validation_tier": "release",
+        },
+        "staging release contract changed",
+    )
+
+    checkpoint_validation = _mapping(
+        receipt.get("checkpoint_validation"), "staging checkpoint validation"
+    )
+    records = checkpoint_validation.get("records")
+    outcomes = nested.get("outcomes")
+    _require(
+        set(checkpoint_validation) == {"mode", "count", "records"}
+        and checkpoint_validation.get("mode")
+        == "identity_and_integrity_load_without_scba_restore"
+        and checkpoint_validation.get("count") == 13
+        and isinstance(records, list) and len(records) == 13
+        and isinstance(outcomes, list) and len(outcomes) == 13,
+        "staging checkpoint-validation shape or count changed",
+    )
+    checkpoint_keys = {
+        "run_id", "artifact_relative_path", "file_sha256", "identity_sha256",
+        "status", "shape", "history_count", "sigma_pp_lesser_sha256",
+        "sigma_pp_greater_sha256",
+    }
+    for index, (record_value, outcome_value) in enumerate(zip(records, outcomes)):
+        record = _mapping(record_value, f"staging checkpoint record {index}")
+        outcome = _mapping(outcome_value, f"staged report outcome {index}")
+        result = _mapping(outcome.get("result"), f"staged report outcome {index} result")
+        point = _mapping(outcome.get("point"), f"staged report outcome {index} point")
+        numerical = _mapping(point.get("numerical"), f"staged report outcome {index} numerical")
+        field_hashes = _mapping(
+            result.get("field_sha256"), f"staged report outcome {index} field hashes"
+        )
+        artifact_relative = _relative(
+            record.get("artifact_relative_path"),
+            f"staging checkpoint record {index} artifact path",
+        )
+        _require(
+            set(record) == checkpoint_keys
+            and artifact_relative.as_posix() == record.get("artifact_relative_path")
+            and record.get("run_id") == outcome.get("run_id")
+            and SHA_RE.fullmatch(str(record.get("file_sha256"))) is not None
+            and SHA_RE.fullmatch(str(record.get("identity_sha256"))) is not None
+            and record.get("status") == outcome.get("status") == "converged"
+            and record.get("shape") == [int(numerical.get("n_frequency", -1)), 9, 9]
+            and record.get("history_count") == result.get("iterations")
+            and record.get("sigma_pp_lesser_sha256")
+            == field_hashes.get("sigma_pp_lesser")
+            and record.get("sigma_pp_greater_sha256")
+            == field_hashes.get("sigma_pp_greater")
+            and SHA_RE.fullmatch(str(record.get("sigma_pp_lesser_sha256"))) is not None
+            and SHA_RE.fullmatch(str(record.get("sigma_pp_greater_sha256"))) is not None,
+            f"staging checkpoint record {index} shape or report binding changed",
+        )
+
+    _require(
+        identity_bundle.get("commit") == commit
+        and identity_bundle.get("git_tree") == git_tree
+        and identity_bundle.get("source_tree_sha256") == tree_sha
+        and identity_bundle.get("explicit_lock_sha256") == environment_sha,
+        "validated identity bundle differs from staging source identity",
+    )
+    try:
+        derived_raw = importer._derive_files(
+            document,
+            identity_bundle=identity_bundle,
+            remote_environment=remote_environment,
+            report_file_sha256=release_report_sha,
+            report_body_sha256=release_report_body_sha,
+            nested_body_sha256=nested_report_body_sha,
+        )
+    except Exception as error:
+        raise ReleaseConfigError(
+            "committed importer could not rederive staged report artifacts"
+        ) from error
+    _require(isinstance(derived_raw, Mapping), "importer derivation did not return a mapping")
+    derived: dict[str, bytes] = {}
+    for relative, payload in derived_raw.items():
+        _require(
+            isinstance(relative, str) and isinstance(payload, bytes)
+            and _relative(relative, "derived staging path").as_posix() == relative,
+            "importer derivation returned an invalid path or payload",
+        )
+        derived[relative] = payload
+    _require(
+        {f"tex/{filename}" for filename in REQUIRED_TEX}.issubset(derived),
+        "committed importer did not derive every required TeX artifact",
+    )
+
     staged = _mapping(receipt.get("staged_artifacts"), "staged artifact records")
     expected_staged = set(tree.entries) - {"import_receipt.json"}
     _require(set(staged) == expected_staged, "staging receipt coverage changed")
     for relative_text, record_value in staged.items():
         record = _mapping(record_value, f"staged artifact {relative_text}")
+        path = _tree_file(tree, relative_text, f"staged artifact {relative_text}")
         _require(
-            record.get("sha256") == tree.entries[relative_text],
-            f"staging receipt SHA256 mismatch for {relative_text}",
+            set(record) == {"sha256", "bytes"}
+            and record.get("sha256") == tree.entries[relative_text]
+            and record.get("sha256") == _file_sha256(path)
+            and record.get("bytes") == path.stat().st_size,
+            f"staging receipt hash/size record changed for {relative_text}",
+        )
+    _require(set(derived).issubset(staged), "derived staging artifacts lack receipt coverage")
+    for relative, expected in derived.items():
+        observed = (tree.root / relative).read_bytes()
+        expected_sha = hashlib.sha256(expected).hexdigest()
+        _require(
+            observed == expected
+            and _mapping(staged[relative], f"derived staged artifact {relative}")
+            == {"sha256": expected_sha, "bytes": len(expected)},
+            f"staged {relative} is not the canonical importer derivative",
         )
     return _file_sha256(receipt_path)
 
@@ -2528,83 +2806,311 @@ def _validate_staging(
 def _validate_production_figures(
     tree: ChecksumTree,
     *,
+    staging_tree: ChecksumTree,
+    source_records: Mapping[str, Any],
     commit: str,
     staging_anchor: str,
     staging_receipt_sha: str,
     release_report_sha: str,
 ) -> str:
+    renderer, renderer_sha = _load_committed_module(
+        PRODUCTION_RENDERER_SOURCE,
+        source_records,
+        name="production-renderer",
+    )
+    required_hooks = (
+        "_validate_staging",
+        "_validate_raw_report_binding",
+        "_load_data",
+        "_verify_output",
+        "_resolve_font",
+    )
+    _require(
+        all(callable(getattr(renderer, name, None)) for name in required_hooks)
+        and isinstance(getattr(renderer, "_RENDERER_VERSION", None), str),
+        "committed production renderer lacks idempotent validation hooks",
+    )
     for filename in PRODUCTION_FIGURES:
         _tree_file(tree, filename, f"production figure {filename}")
     receipt_path = _tree_file(tree, "render_manifest.json", "figure render manifest")
     receipt = _strict_json(receipt_path, "figure render manifest", style="indent-ascii")
     _require(
-        receipt.get("schema") == "negfpy.anharmonic.production_toy_gate_figure_render"
-        and receipt.get("schema_version") == 1,
-        "production figure receipt schema changed",
+        receipt.get("renderer_sha256") == renderer_sha
+        and receipt.get("renderer_version") == renderer._RENDERER_VERSION,
+        "production figure manifest is not bound to the committed renderer",
     )
-    recorded = _sha(receipt.get("manifest_sha256"), "figure manifest body SHA256")
-    core = {key: value for key, value in receipt.items() if key != "manifest_sha256"}
-    _require(recorded == _hash_document(core), "figure manifest body SHA256 mismatch")
-    source = _mapping(receipt.get("source"), "figure receipt source")
+    try:
+        staging_base = renderer._validate_staging(
+            staging_tree.root,
+            expected_import_receipt_sha256=staging_receipt_sha,
+        )
+        report_binding = renderer._validate_raw_report_binding(
+            staging_tree.root, staging_base
+        )
+        renderer_data = renderer._load_data(staging_tree.root)
+        renderer_staging = MappingProxyType(
+            {**dict(staging_base), "report_binding": report_binding}
+        )
+        style = _mapping(receipt.get("style"), "production figure style")
+        font = _mapping(style.get("font"), "production figure font identity")
+        resolved_font = renderer._resolve_font(
+            Path(str(font.get("regular_path"))),
+            Path(str(font.get("bold_path"))),
+        )
+        _require(
+            dict(resolved_font) == dict(font),
+            "production recorded font bytes differ from exact rerender fonts",
+        )
+        verified = renderer._verify_output(
+            tree.root,
+            staging=renderer_staging,
+            font=resolved_font,
+            data=renderer_data,
+        )
+    except Exception as error:
+        raise ReleaseConfigError(
+            "committed production renderer rejected staged data or figure structure"
+        ) from error
     _require(
-        source.get("commit") == commit
-        and source.get("staging_sha256sums_file_sha256") == staging_anchor
-        and source.get("import_receipt_file_sha256") == staging_receipt_sha
-        and source.get("report_file_sha256") == release_report_sha,
-        "production figure source binding changed",
+        isinstance(verified, Mapping)
+        and verified == receipt
+        and _mapping(receipt.get("source"), "figure receipt source").get("commit")
+        == commit
+        and receipt["source"].get("staging_sha256sums_file_sha256")
+        == staging_anchor
+        and receipt["source"].get("import_receipt_file_sha256")
+        == staging_receipt_sha
+        and receipt["source"].get("report_file_sha256") == release_report_sha,
+        "production renderer validation did not reproduce the exact manifest",
     )
-    figures = _mapping(receipt.get("figures"), "figure receipt records")
-    for stem in (
-        "figure_open_oracle_born",
-        "figure_scba_validation",
-        "figure_passivity_backend_timing",
-    ):
-        record = _mapping(figures.get(stem), f"figure record {stem}")
-        for extension in ("pdf", "png"):
-            item = _mapping(record.get(extension), f"{stem} {extension} record")
-            path = item.get("path")
-            _require(
-                path == f"{stem}.{extension}"
-                and item.get("sha256") == tree.entries[path],
-                f"{stem} {extension} receipt binding changed",
-            )
     return _file_sha256(receipt_path)
 
 
-def _validate_historical_figures(tree: ChecksumTree) -> str:
+def _validate_historical_figures(
+    tree: ChecksumTree,
+    *,
+    source_records: Mapping[str, Any],
+) -> tuple[str, Mapping[str, float]]:
+    renderer, renderer_sha = _load_committed_module(
+        HISTORICAL_RENDERER_SOURCE,
+        source_records,
+        name="historical-renderer",
+    )
+    required_hooks = (
+        "load_historical_inputs",
+        "_reported_metrics",
+        "_validate_pdf",
+        "_validate_png",
+        "_font",
+        "_render_figure",
+    )
+    _require(
+        all(callable(getattr(renderer, name, None)) for name in required_hooks)
+        and isinstance(getattr(renderer, "_RENDERER_VERSION", None), str),
+        "committed historical renderer lacks semantic validation hooks",
+    )
+    expected_tree = {
+        *HISTORICAL_FIGURES,
+        HISTORICAL_METRICS,
+        HISTORICAL_RENDER_MANIFEST,
+    }
+    _require(set(tree.entries) == expected_tree, "historical output file set changed")
     for filename in HISTORICAL_FIGURES:
         _tree_file(tree, filename, f"historical figure {filename}")
+    metrics_path = _tree_file(tree, HISTORICAL_METRICS, "historical metrics manifest")
     receipt_path = _tree_file(
-        tree,
-        "historical_paper_benchmarks_render_manifest.json",
-        "historical figure receipt",
+        tree, HISTORICAL_RENDER_MANIFEST, "historical figure receipt"
     )
+
+    benchmark_relative = f"{HISTORICAL_DATA_ROOT}/benchmark_manifest.json"
+    benchmark_path, benchmark_sha = _exact_local_source_file(
+        benchmark_relative,
+        source_records,
+        name="historical benchmark manifest",
+    )
+    _strict_json(
+        benchmark_path, "historical benchmark manifest", style="indent-ascii"
+    )
+    data_root = benchmark_path.parent
+    selected_names = tuple(renderer._INPUT_SCHEMAS)
+    for filename in selected_names:
+        _exact_local_source_file(
+            f"{HISTORICAL_DATA_ROOT}/{filename}",
+            source_records,
+            name=f"historical source {filename}",
+        )
+    try:
+        data, input_hashes, source = renderer.load_historical_inputs(
+            data_dir=data_root,
+            benchmark_manifest=benchmark_path,
+            expected_benchmark_manifest_sha256=benchmark_sha,
+        )
+        reported_metrics = renderer._reported_metrics(data)
+    except Exception as error:
+        raise ReleaseConfigError(
+            "committed historical renderer rejected benchmark inputs"
+        ) from error
+    _require(
+        isinstance(reported_metrics, Mapping)
+        and reported_metrics
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and float(value) >= 0.0
+            for value in reported_metrics.values()
+        ),
+        "historical reported metrics are missing, negative, or non-finite",
+    )
+    renderer_identity = {
+        "basename": Path(HISTORICAL_RENDERER_SOURCE).name,
+        "version": renderer._RENDERER_VERSION,
+        "sha256": renderer_sha,
+    }
+    expected_metrics_core = {
+        "schema": renderer._METRICS_SCHEMA,
+        "status": renderer._STATUS,
+        "release_certified": False,
+        "production_evidence": False,
+        "source": source,
+        "input_sha256": dict(sorted(input_hashes.items())),
+        "metrics_recomputed_from_csv": data["metrics"],
+        "reported_metrics": dict(reported_metrics),
+        "renderer": renderer_identity,
+    }
+    metrics_document = _strict_json(
+        metrics_path, "historical metrics manifest", style="compact-ascii"
+    )
+    _require(
+        metrics_document
+        == {
+            **expected_metrics_core,
+            "manifest_sha256": _hash_document(expected_metrics_core),
+        },
+        "historical metrics manifest is not the canonical recomputed document",
+    )
+
     receipt = _strict_json(
-        receipt_path, "historical figure receipt", style="indent-ascii"
+        receipt_path, "historical figure receipt", style="compact-ascii"
     )
+    pdf_name, png_name = HISTORICAL_FIGURES
+    try:
+        pdf_validation = renderer._validate_pdf(tree.root / pdf_name)
+        png_validation = renderer._validate_png(tree.root / png_name)
+    except Exception as error:
+        raise ReleaseConfigError(
+            "committed historical renderer rejected PDF/font/vector or PNG structure"
+        ) from error
+    fonts = _mapping(receipt.get("fonts"), "historical figure fonts")
+    regular = _mapping(fonts.get("regular"), "historical regular font")
+    bold = _mapping(fonts.get("bold"), "historical bold font")
+    for role, font in (("regular", regular), ("bold", bold)):
+        font_path = Path(str(font.get("path")))
+        _require(
+            set(font) == {"path", "basename", "sha256", "family", "style"}
+            and font_path.is_absolute()
+            and isinstance(font.get("basename"), str)
+            and font["basename"].endswith(".ttf")
+            and font_path.name == font["basename"]
+            and SHA_RE.fullmatch(str(font.get("sha256"))) is not None
+            and isinstance(font.get("family"), str)
+            and font["family"]
+            and isinstance(font.get("style"), str)
+            and font["style"],
+            f"historical {role} font identity changed",
+        )
     _require(
-        receipt.get("schema")
-        == "negfpy.anharmonic.historical_paper_benchmark_figure_render.v1"
-        and receipt.get("production_evidence") is False
-        and receipt.get("release_certified") is False
-        and receipt.get("status") == "NONCERTIFYING_HISTORICAL_SENSITIVITY",
-        "historical figure receipt scope changed",
+        regular["family"] == bold["family"]
+        and "sans" in regular["family"].lower()
+        and "serif" not in regular["family"].lower()
+        and "bold" not in regular["style"].lower()
+        and "bold" in bold["style"].lower()
+        and fonts.get("policy")
+        == "caller-selected TrueType sans fonts; embedded as Type 42"
+        and set(fonts) == {"regular", "bold", "policy"},
+        "historical font family/style policy changed",
     )
-    hashes = _mapping(receipt.get("figure_sha256"), "historical figure SHA256 records")
+    try:
+        regular_font, observed_regular = renderer._font(
+            Path(regular["path"]), role="regular"
+        )
+        bold_font, observed_bold = renderer._font(
+            Path(bold["path"]), role="bold"
+        )
+        _require(
+            observed_regular == regular and observed_bold == bold,
+            "historical recorded font bytes differ from exact rerender fonts",
+        )
+        with tempfile.TemporaryDirectory(prefix="negfpy-historical-rerender-") as temp:
+            rerender_root = Path(temp)
+            rerender_pdf = rerender_root / pdf_name
+            rerender_png = rerender_root / png_name
+            renderer._render_figure(
+                data,
+                rerender_pdf,
+                rerender_png,
+                regular_font=regular_font,
+                bold_font=bold_font,
+                font_family=regular["family"],
+            )
+            _require(
+                rerender_pdf.read_bytes() == (tree.root / pdf_name).read_bytes()
+                and rerender_png.read_bytes() == (tree.root / png_name).read_bytes(),
+                "historical figures differ from the canonical deterministic rerender",
+            )
+    except ReleaseConfigError:
+        raise
+    except Exception as error:
+        raise ReleaseConfigError(
+            "committed historical renderer could not reproduce exact figure bytes"
+        ) from error
+    expected_receipt = {
+        "schema": renderer._SCHEMA,
+        "status": renderer._STATUS,
+        "release_certified": False,
+        "production_evidence": False,
+        "caption_metadata": {
+            "caption": renderer._CAPTION,
+            "published_data_provenance": (
+                "figure-extracted paths/points; not author raw data"
+            ),
+            "wang_convention_scope": "conditional_inferred_onsite_convention",
+            "mingo_half_weight_scope": "separately_named_noncertifying_sensitivity",
+            "mingo_fig8_interacting_curve": "not_computed_not_shown",
+        },
+        "source": source,
+        "input_sha256": dict(sorted(input_hashes.items())),
+        "metrics_recomputed_from_csv": data["metrics"],
+        "reported_metrics": dict(reported_metrics),
+        "figure_sha256": {
+            pdf_name: tree.entries[pdf_name],
+            png_name: tree.entries[png_name],
+        },
+        "figure_validation": {
+            "pdf": pdf_validation,
+            "png": png_validation,
+        },
+        "fonts": dict(fonts),
+        "renderer": renderer_identity,
+        "metrics_manifest": {
+            "path": HISTORICAL_METRICS,
+            "sha256": tree.entries[HISTORICAL_METRICS],
+        },
+        "output_contract": {
+            "atomic_noreplace": True,
+            "single_multipanel_figure": True,
+            "vector_pdf": True,
+            "rgb_png_450_dpi": True,
+            "sha256sums_exact_coverage": True,
+        },
+    }
     _require(
-        all(hashes.get(filename) == tree.entries[filename] for filename in HISTORICAL_FIGURES),
-        "historical figure receipt binding changed",
+        receipt == expected_receipt,
+        "historical render manifest differs from recomputed semantic/structural evidence",
     )
-    output_contract = _mapping(
-        receipt.get("output_contract"), "historical output contract"
+    return _file_sha256(receipt_path), MappingProxyType(
+        {key: float(value) for key, value in reported_metrics.items()}
     )
-    _require(
-        output_contract.get("sha256sums_exact_coverage") is True
-        and output_contract.get("vector_pdf") is True
-        and output_contract.get("rgb_png_450_dpi") is True,
-        "historical figure output contract changed",
-    )
-    return _file_sha256(receipt_path)
 
 
 def _safe_tex_relative(value: str, name: str) -> str:
@@ -2760,22 +3266,44 @@ def generate_config(
         expected_historical_figure_sha256sums_sha256,
         "historical figures",
     )
+    artifact_fetch_receipt_sha = _sha(
+        artifact_tree.local_receipt_sha256, "artifact fetch receipt SHA256"
+    )
+    source_records = _mapping(
+        publication_chain["source_records"], "validated remote source records"
+    )
     staging_receipt_sha = _validate_staging(
         staging_tree,
         commit=scaling["commit"],
+        git_tree=publication_chain["git_tree"],
         tree_sha=scaling["tree_sha"],
         environment_sha=scaling["environment_sha"],
         artifact_anchor=artifact_tree.raw_manifest_sha256,
+        artifact_fetch_receipt_sha=artifact_fetch_receipt_sha,
+        fetch_receipt=fetch_receipt,
         release_report_sha=release["report_file_sha256"],
+        release_report_body_sha=release["report_body_sha256"],
+        nested_report_body_sha=release["nested_report_body_sha256"],
+        identity_bundle=_mapping(
+            publication_chain["identity_bundle"], "validated identity bundle"
+        ),
+        remote_environment=_mapping(
+            publication_chain["remote_environment"], "validated remote environment"
+        ),
+        source_records=source_records,
     )
     production_receipt_sha = _validate_production_figures(
         production_tree,
+        staging_tree=staging_tree,
+        source_records=source_records,
         commit=scaling["commit"],
         staging_anchor=staging_tree.raw_manifest_sha256,
         staging_receipt_sha=staging_receipt_sha,
         release_report_sha=release["report_file_sha256"],
     )
-    historical_receipt_sha = _validate_historical_figures(historical_tree)
+    historical_receipt_sha, historical_metrics = _validate_historical_figures(
+        historical_tree, source_records=source_records
+    )
     _require(DATE_RE.fullmatch(report_date) is not None, "report date is invalid")
 
     release_mode = "task-MPI" if scaling["toy_rank"] > 1 else "serial/FFT"
@@ -2839,6 +3367,51 @@ def generate_config(
         ("ProductionFiguresReceiptSHA", production_receipt_sha),
         ("HistoricalFiguresSHA256SUMSRawSHA", historical_tree.raw_manifest_sha256),
         ("HistoricalFiguresReceiptSHA", historical_receipt_sha),
+        ("HistoricalMetricsManifestSHA", historical_tree.entries[HISTORICAL_METRICS]),
+        (
+            "HistoricalWangHarmonicRMSError",
+            f"{historical_metrics['wang_harmonic_rms_error_nW_per_K']:.6f}",
+        ),
+        (
+            "HistoricalWangHarmonicMaxError",
+            f"{historical_metrics['wang_harmonic_max_abs_error_nW_per_K']:.6f}",
+        ),
+        (
+            "HistoricalWangBornErrorAt100K",
+            f"{historical_metrics['wang_born_t2_relative_error_percent_100K']:.2f}",
+        ),
+        (
+            "HistoricalWangBornErrorAt300K",
+            f"{historical_metrics['wang_born_t2_relative_error_percent_300K']:.2f}",
+        ),
+        (
+            "HistoricalWangBornErrorAt500K",
+            f"{historical_metrics['wang_born_t2_relative_error_percent_500K']:.2f}",
+        ),
+        (
+            "HistoricalWangMeanFieldErrorAt300K",
+            f"{historical_metrics['wang_selective_mean_field_relative_error_percent_300K']:.2f}",
+        ),
+        (
+            "HistoricalWangMeanFieldErrorAt400K",
+            f"{historical_metrics['wang_selective_mean_field_relative_error_percent_400K']:.2f}",
+        ),
+        (
+            "HistoricalMingoPrintedRMSError",
+            f"{historical_metrics['mingo_printed_normalization_rms_error_pW_per_K']:.4f}",
+        ),
+        (
+            "HistoricalMingoPrintedMaxError",
+            f"{historical_metrics['mingo_printed_normalization_max_abs_error_pW_per_K']:.4f}",
+        ),
+        (
+            "HistoricalMingoHalfWeightRMSError",
+            f"{historical_metrics['mingo_half_weight_rms_error_pW_per_K']:.4f}",
+        ),
+        (
+            "HistoricalMingoHalfWeightMaxError",
+            f"{historical_metrics['mingo_half_weight_max_abs_error_pW_per_K']:.4f}",
+        ),
         ("ReleaseStrictReportFileSHA", release["report_file_sha256"]),
         ("ReleaseStrictReportBodySHA", release["report_body_sha256"]),
         ("MPIToyMinimumSpeedupSatisfied", str(scaling["mpi_enabled"]).lower()),

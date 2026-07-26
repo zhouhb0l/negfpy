@@ -60,7 +60,7 @@ _LOCAL_TRANSPORT_RECEIPT_SCHEMA = (
 _MANIFEST_SCHEMA = "negfpy.anharmonic.production_toy_gate_figure_render"
 _PROTOCOL = "multidimensional_toy_gate_v2"
 _DPI = 450
-_RENDERER_VERSION = "2"
+_RENDERER_VERSION = "3"
 _IMPORTER_VERSION = "3"
 _FIGURE_SIZE = (7.0, 5.0)
 _EXPECTED_PIXELS = (3150, 2250)
@@ -2619,6 +2619,7 @@ def _verify_output(
     *,
     staging: Mapping[str, Any],
     font: Mapping[str, Any],
+    data: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     _require(
         output.is_dir() and not output.is_symlink(),
@@ -2638,6 +2639,11 @@ def _verify_output(
         "existing render manifest schema/body SHA256 is invalid",
     )
     figures = _mapping(manifest.get("figures"), name="render_manifest.figures")
+    expected_payloads, expected_figures = _render_all(data, font)
+    _require(
+        figures == expected_figures,
+        "existing figure metadata differs from the canonical deterministic rerender",
+    )
     expected_core = _manifest_core(staging, font, figures)
     observed_core = {
         key: value for key, value in manifest.items() if key != "manifest_sha256"
@@ -2665,6 +2671,10 @@ def _verify_output(
                 f"existing figure hash/size differs for {name}.{kind}",
             )
             payload = path.read_bytes()
+            _require(
+                payload == expected_payloads[relative],
+                f"existing {relative} differs from the canonical deterministic rerender",
+            )
             if kind == "pdf":
                 _require(
                     record.get("vector") is True
@@ -2797,7 +2807,7 @@ def render_figures(
     data = _load_data(root)
     font = _resolve_font(font_regular, font_bold)
     if output.exists():
-        _verify_output(output, staging=staging, font=font)
+        _verify_output(output, staging=staging, font=font, data=data)
         return MappingProxyType(
             {
                 "status": "unchanged",
@@ -2823,7 +2833,7 @@ def render_figures(
     try:
         _publish_atomic(output, files)
     except FileExistsError:
-        _verify_output(output, staging=staging, font=font)
+        _verify_output(output, staging=staging, font=font, data=data)
         status = "unchanged"
     else:
         status = "created"

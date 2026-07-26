@@ -78,6 +78,12 @@
   StagingSHA256SUMSRawSHA,StagingImportReceiptSHA,%
   ProductionFiguresSHA256SUMSRawSHA,ProductionFiguresReceiptSHA,%
   HistoricalFiguresSHA256SUMSRawSHA,HistoricalFiguresReceiptSHA,%
+  HistoricalMetricsManifestSHA,HistoricalWangHarmonicRMSError,%
+  HistoricalWangHarmonicMaxError,HistoricalWangBornErrorAt100K,%
+  HistoricalWangBornErrorAt300K,HistoricalWangBornErrorAt500K,%
+  HistoricalWangMeanFieldErrorAt300K,HistoricalWangMeanFieldErrorAt400K,%
+  HistoricalMingoPrintedRMSError,HistoricalMingoPrintedMaxError,%
+  HistoricalMingoHalfWeightRMSError,HistoricalMingoHalfWeightMaxError,%
   ReleaseStrictReportFileSHA,ReleaseStrictReportBodySHA,%
   MPIToyMinimumSpeedupSatisfied,MPIScalingPassed,MPIPhysicsEqualityPassed,%
   MPIBindingPassed,MPIMemoryPreflightPassed,MPIRunnerReleaseCertified}
@@ -1224,6 +1230,8 @@ Production figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
 Historical figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
 \quad{\scriptsize\texttt{\HistoricalFiguresSHA256SUMSRawSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\HistoricalFiguresReceiptSHA}} \\[1mm]
+Historical metrics manifest: \\[-1mm]
+\quad{\scriptsize\texttt{\HistoricalMetricsManifestSHA}} \\[1mm]
 Strict report file / nested body: \\[-1mm]
 \quad{\scriptsize\texttt{\ReleaseStrictReportFileSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\ReleaseStrictReportBodySHA}}
@@ -1249,10 +1257,12 @@ historical regression, not a production oracle. The APS/Grace source is a
 vector EPS path, not raster digitization. Conditional on the explicitly
 inferred onsite-unit convention, the independent harmonic calculation over
 all 51 vector-path temperatures has RMS/max errors
-\(0.000124/0.000277\;\mathrm{nW\,K^{-1}}\). The complete historical
+\(\HistoricalWangHarmonicRMSError/\HistoricalWangHarmonicMaxError\;\mathrm{nW\,K^{-1}}\). The complete historical
 \(O(T^2)\) bubble-plus-tadpole result differs from the interpolated path by
-0.49\%, 0.27\%, and 0.30\% at 100, 300, and 500 K; selective mean field
-differs by 0.28\% and 0.75\% at 300 and 400 K. These are useful
+\HistoricalWangBornErrorAt100K\%, \HistoricalWangBornErrorAt300K\%, and
+\HistoricalWangBornErrorAt500K\% at 100, 300, and 500 K; selective mean field
+differs by \HistoricalWangMeanFieldErrorAt300K\% and
+\HistoricalWangMeanFieldErrorAt400K\% at 300 and 400 K. These are useful
 source-limited regressions, but not a same-input reproduction because the
 onsite assignment and plotted-run settings are not uniquely fixed by the
 recoverable source. Wang \(O(T^4)\) remains unimplemented and nonblocking.
@@ -1267,10 +1277,11 @@ normalization and a paper-specific surface spectral measure
 uniquely determine the surface normalization and \(V'''/6\) convention
 needed for a same-input interacting reproduction. Using the normalized
 Eq.~(47) surface measure, the eta-free harmonic calculation differs from all
-18 vector-path Fig.~4 points by \(3.2301\;\mathrm{pW/K}\) RMS and
-\(5.0423\;\mathrm{pW/K}\) maximum; it is therefore not a same-input
+18 vector-path Fig.~4 points by \(\HistoricalMingoPrintedRMSError\;\mathrm{pW/K}\) RMS and
+\(\HistoricalMingoPrintedMaxError\;\mathrm{pW/K}\) maximum; it is therefore not a same-input
 reproduction. A separately named half-weight sensitivity gives
-\(0.1264\;\mathrm{pW/K}\) RMS and \(0.2295\;\mathrm{pW/K}\) maximum, but
+\(\HistoricalMingoHalfWeightRMSError\;\mathrm{pW/K}\) RMS and
+\(\HistoricalMingoHalfWeightMaxError\;\mathrm{pW/K}\) maximum, but
 that factor is neither normalized nor derived from the printed equations and
 is noncertifying. No interacting Mingo SCBA/Fig.~8 curve has been computed.
 The status remains \emph{historical reproduction unresolved}; no surface

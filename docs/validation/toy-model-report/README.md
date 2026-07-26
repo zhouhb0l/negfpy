@@ -66,7 +66,10 @@ Caller anchors must be captured outside the directory being validated; do not
 derive an expected hash from a possibly modified input in the same command.
 The production renderer structurally rejects raster image records and
 unembedded/Type-3 fonts in its PDFs. Both renderers fully decode their PNGs
-and require `(3150, 2250)`, RGB, and 450-DPI metadata.
+and require `(3150, 2250)`, RGB, and 450-DPI metadata. Release-config
+validation also reopens the exact recorded fonts and deterministically rerenders
+every PDF and PNG; manifest-rehashed substitute artwork is rejected unless its
+bytes equal the committed renderer output.
 
 Run the complete artifact tests with:
 
@@ -74,16 +77,16 @@ Run the complete artifact tests with:
 make artifact-test
 ```
 
-The historical metrics manifest is already checksum-covered. The
-release-config generator must additionally validate its schema, canonical
-body hash, input hashes, and noncertifying status before the manuscript cites
-individual historical error metrics; until that integration hook is added,
-the report may use the historical figure but not promote its numerical
-metrics to release evidence.
+The release-config generator reopens the historical metrics manifest,
+recomputes every cited value from the exact committed CSVs, verifies the
+committed renderer identity and structural PDF/PNG records, and emits the
+manuscript numeric macros only after those noncertifying checks pass.
 
 ## Generate the release configuration
 
-`generate_release_config.py` is standard-library only. It consumes the
+`generate_release_config.py` requires the `report` extra because it dynamically
+loads the exact committed renderers and repeats their semantic and structural
+validators. It consumes the
 checksum-complete fetched artifact root and its byte-identical
 `current-attempt.json` / immutable selected publication. The caller-supplied
 scaling selection and release-runner paths must exactly equal the paths named

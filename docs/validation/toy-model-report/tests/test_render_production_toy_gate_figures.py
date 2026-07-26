@@ -840,6 +840,57 @@ def test_renderer_creates_three_native_figure_pairs_atomically_and_idempotently(
     assert hashes_before == {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in output.iterdir()}
 
 
+
+def test_idempotent_validation_rejects_self_consistent_valid_figure_swap(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    output = tmp_path / "figures"
+    _write_staging(staging)
+    _render(staging, output)
+
+    manifest_path = output / "render_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = "figure_open_oracle_born"
+    donor = "figure_scba_validation"
+    for extension in ("pdf", "png"):
+        donor_bytes = (output / f"{donor}.{extension}").read_bytes()
+        target_path = output / f"{target}.{extension}"
+        target_path.write_bytes(donor_bytes)
+        target_record = manifest["figures"][target][extension]
+        target_record["sha256"] = hashlib.sha256(donor_bytes).hexdigest()
+        target_record["bytes"] = len(donor_bytes)
+    manifest_core = {
+        key: value for key, value in manifest.items() if key != "manifest_sha256"
+    }
+    manifest["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            manifest_core,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _rewrite_sha256sums(output)
+
+    with pytest.raises(
+        RENDERER.FigureRenderError,
+        match="canonical deterministic rerender",
+    ):
+        _render(staging, output)
+
 def test_panel_labels_are_lowercase_bold_eight_point_sans_serif() -> None:
     font = RENDERER._resolve_font(None, None)
     figure, axis = RENDERER.plt.subplots()

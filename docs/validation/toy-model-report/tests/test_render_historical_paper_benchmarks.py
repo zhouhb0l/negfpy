@@ -234,6 +234,14 @@ def test_full_render_is_noncertifying_vector_rgb_and_hash_covered(
     metrics = json.loads(metrics_path.read_text(encoding="ascii"))
     assert metrics["schema"] == module._METRICS_SCHEMA
     assert metrics["metrics_recomputed_from_csv"] == manifest["metrics_recomputed_from_csv"]
+    assert metrics["reported_metrics"] == manifest["reported_metrics"]
+    assert metrics["reported_metrics"] == module._reported_metrics(
+        module.load_historical_inputs(
+            data_dir=data,
+            benchmark_manifest=source_manifest,
+            expected_benchmark_manifest_sha256=anchor,
+        )[0]
+    )
     assert manifest["metrics_manifest"]["sha256"] == _sha(metrics_path)
     metrics_core = {
         key: value

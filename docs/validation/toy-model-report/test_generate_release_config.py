@@ -20,6 +20,10 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+REAL_VALIDATE_STAGING = MODULE._validate_staging
+REAL_VALIDATE_PRODUCTION_FIGURES = MODULE._validate_production_figures
+REAL_VALIDATE_HISTORICAL_FIGURES = MODULE._validate_historical_figures
+
 COMMIT = "1" * 40
 TREE_SHA = "2" * 64
 ENVIRONMENT_LOCK_BYTES = b"fixture explicit environment lock\n"
@@ -72,9 +76,9 @@ def _manifest(body: dict) -> dict:
 
 
 def _execution_source_identity() -> dict:
-    records = []
+    orchestration_records = []
     for path in MODULE.ORCHESTRATION_SCRIPT_PATHS:
-        records.append(
+        orchestration_records.append(
             {
                 "path": path,
                 "git_tracked": True,
@@ -92,6 +96,39 @@ def _execution_source_identity() -> dict:
                 ),
             }
         )
+    report_paths = (
+        MODULE.IMPORTER_SOURCE,
+        MODULE.PRODUCTION_RENDERER_SOURCE,
+        MODULE.HISTORICAL_RENDERER_SOURCE,
+        f"{MODULE.HISTORICAL_DATA_ROOT}/benchmark_manifest.json",
+        *(
+            f"{MODULE.HISTORICAL_DATA_ROOT}/{name}"
+            for name in (
+                "wang2006_harmonic.csv",
+                "wang2006_published_reference_curves.csv",
+                "wang2006_anharmonic_checkpoints.csv",
+                "mingo2006_figure4.csv",
+                "mingo2006_figure4_smooth_calculations.csv",
+            )
+        ),
+    )
+    repository = MODULE_PATH.resolve().parents[3]
+    report_records = []
+    for relative in report_paths:
+        path = repository / relative
+        report_records.append(
+            {
+                "path": relative,
+                "git_tracked": True,
+                "kind": "regular_file",
+                "size": path.stat().st_size,
+                "mode": 0o644,
+                "sha256": _file_hash(path),
+            }
+        )
+    records = sorted(
+        [*orchestration_records, *report_records], key=lambda record: record["path"]
+    )
     tracked_sha = _hash(
         {
             "schema": "negfpy.remote_validation.tracked_worktree.v1",
@@ -107,7 +144,7 @@ def _execution_source_identity() -> dict:
     orchestration_sha = _hash(
         {
             "schema": "negfpy.remote_validation.orchestration_sources.v1",
-            "records": records,
+            "records": orchestration_records,
         }
     )
     return _manifest(
@@ -123,7 +160,7 @@ def _execution_source_identity() -> dict:
             "worktree_files_manifest_sha256": worktree_sha,
             "worktree_files": records,
             "orchestration_manifest_sha256": orchestration_sha,
-            "orchestration_scripts": records,
+            "orchestration_scripts": orchestration_records,
         }
     )
 
@@ -1298,6 +1335,10 @@ class CanonicalFixture:
         historical = self.report / "historical-figures"
         for filename in MODULE.HISTORICAL_FIGURES:
             _write_bytes(historical / filename, f"historical:{filename}\n".encode("ascii"))
+        _write_json(
+            historical / MODULE.HISTORICAL_METRICS,
+            {"schema": "synthetic-historical-metrics"},
+        )
         historical_receipt = {
             "schema": "negfpy.anharmonic.historical_paper_benchmark_figure_render.v1",
             "production_evidence": False,
@@ -1353,7 +1394,41 @@ class ReleaseConfigTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.fixture = CanonicalFixture(self.root / "trusted")
 
+        def staging_stub(tree, **kwargs):
+            return _file_hash(tree.root / "import_receipt.json")
+
+        def production_stub(tree, **kwargs):
+            return _file_hash(tree.root / "render_manifest.json")
+
+        def historical_stub(tree, **kwargs):
+            return (
+                _file_hash(
+                    tree.root
+                    / "historical_paper_benchmarks_render_manifest.json"
+                ),
+                {
+                    "wang_harmonic_rms_error_nW_per_K": 0.000124,
+                    "wang_harmonic_max_abs_error_nW_per_K": 0.000277,
+                    "wang_born_t2_relative_error_percent_100K": 0.49,
+                    "wang_born_t2_relative_error_percent_300K": 0.27,
+                    "wang_born_t2_relative_error_percent_500K": 0.30,
+                    "wang_selective_mean_field_relative_error_percent_300K": 0.28,
+                    "wang_selective_mean_field_relative_error_percent_400K": 0.75,
+                    "mingo_printed_normalization_rms_error_pW_per_K": 3.2301,
+                    "mingo_printed_normalization_max_abs_error_pW_per_K": 5.0423,
+                    "mingo_half_weight_rms_error_pW_per_K": 0.1264,
+                    "mingo_half_weight_max_abs_error_pW_per_K": 0.2295,
+                },
+            )
+
+        MODULE._validate_staging = staging_stub
+        MODULE._validate_production_figures = production_stub
+        MODULE._validate_historical_figures = historical_stub
+
     def tearDown(self) -> None:
+        MODULE._validate_staging = REAL_VALIDATE_STAGING
+        MODULE._validate_production_figures = REAL_VALIDATE_PRODUCTION_FIGURES
+        MODULE._validate_historical_figures = REAL_VALIDATE_HISTORICAL_FIGURES
         self.temporary.cleanup()
 
     def test_generates_from_complete_canonical_chain(self) -> None:
@@ -1396,6 +1471,173 @@ class ReleaseConfigTests(unittest.TestCase):
             text,
         )
         self.assertFalse(any(self.fixture.report.glob(".release_config.tex.*.tmp")))
+        self.assertIn("\\newcommand{\\HistoricalWangBornErrorAt100K}{0.49}", text)
+        self.assertIn("\\newcommand{\\HistoricalMingoPrintedRMSError}{3.2301}", text)
+
+    def test_real_staging_validator_rejects_comment_only_tex_fixture(self) -> None:
+        MODULE._validate_staging = REAL_VALIDATE_STAGING
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "receipt shape or schema|canonical importer"
+        ):
+            MODULE.generate_config(**self.fixture.kwargs())
+
+    def test_real_production_validator_rejects_fake_figure_fixture(self) -> None:
+        MODULE._validate_production_figures = REAL_VALIDATE_PRODUCTION_FIGURES
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "not bound to the committed renderer|rejected"
+        ):
+            MODULE.generate_config(**self.fixture.kwargs())
+
+    def test_real_historical_validator_rejects_fake_metrics_and_figures(self) -> None:
+        MODULE._validate_historical_figures = REAL_VALIDATE_HISTORICAL_FIGURES
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "historical metrics manifest|historical renderer"
+        ):
+            MODULE.generate_config(**self.fixture.kwargs())
+
+    @unittest.skipUnless(
+        all(
+            Path(path).is_file()
+            for path in (
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/bin/pdfinfo",
+                "/usr/bin/pdffonts",
+                "/usr/bin/pdfimages",
+                "/usr/bin/pdftoppm",
+            )
+        ),
+        "historical rendering dependencies are unavailable",
+    )
+    def test_real_historical_validator_accepts_renderer_output(self) -> None:
+        source_records = {
+            record["path"]: record
+            for record in _execution_source_identity()["worktree_files"]
+        }
+        renderer, _ = MODULE._load_committed_module(
+            MODULE.HISTORICAL_RENDERER_SOURCE,
+            source_records,
+            name="historical-renderer-test",
+        )
+        repository = MODULE_PATH.resolve().parents[3]
+        data_root = repository / MODULE.HISTORICAL_DATA_ROOT
+        benchmark = data_root / "benchmark_manifest.json"
+        output = self.root / "valid-historical-output"
+        renderer.render_historical_benchmarks(
+            data_dir=data_root,
+            benchmark_manifest=benchmark,
+            expected_benchmark_manifest_sha256=_file_hash(benchmark),
+            regular_font_path=Path(
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+            ),
+            bold_font_path=Path(
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+            ),
+            output_dir=output,
+        )
+        tree = MODULE._verify_checksum_tree(
+            output,
+            _file_hash(output / "SHA256SUMS"),
+            "valid historical fixture",
+        )
+        receipt_sha, metrics = REAL_VALIDATE_HISTORICAL_FIGURES(
+            tree, source_records=source_records
+        )
+        self.assertEqual(
+            receipt_sha,
+            _file_hash(output / MODULE.HISTORICAL_RENDER_MANIFEST),
+        )
+        self.assertAlmostEqual(
+            metrics["wang_harmonic_rms_error_nW_per_K"], 0.000124, places=6
+        )
+
+    @unittest.skipUnless(
+        all(
+            Path(path).is_file()
+            for path in (
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/usr/bin/pdfinfo",
+                "/usr/bin/pdffonts",
+                "/usr/bin/pdfimages",
+                "/usr/bin/pdftoppm",
+            )
+        ),
+        "historical rendering dependencies are unavailable",
+    )
+    def test_historical_validator_rejects_self_consistent_valid_forgery(self) -> None:
+        source_records = {
+            record["path"]: record
+            for record in _execution_source_identity()["worktree_files"]
+        }
+        renderer, _ = MODULE._load_committed_module(
+            MODULE.HISTORICAL_RENDERER_SOURCE,
+            source_records,
+            name="historical-forgery-renderer-test",
+        )
+        repository = MODULE_PATH.resolve().parents[3]
+        data_root = repository / MODULE.HISTORICAL_DATA_ROOT
+        benchmark = data_root / "benchmark_manifest.json"
+        output = self.root / "forged-historical-output"
+        regular_path = Path(
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+        )
+        bold_path = Path(
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+        )
+        renderer.render_historical_benchmarks(
+            data_dir=data_root,
+            benchmark_manifest=benchmark,
+            expected_benchmark_manifest_sha256=_file_hash(benchmark),
+            regular_font_path=regular_path,
+            bold_font_path=bold_path,
+            output_dir=output,
+        )
+        data, _, _ = renderer.load_historical_inputs(
+            data_dir=data_root,
+            benchmark_manifest=benchmark,
+            expected_benchmark_manifest_sha256=_file_hash(benchmark),
+        )
+        forged_data = dict(data)
+        forged_harmonic = dict(data["harmonic"])
+        forged_harmonic["calculated"] = list(forged_harmonic["calculated"])
+        forged_harmonic["calculated"][20] += 0.01
+        forged_data["harmonic"] = forged_harmonic
+        regular_font, regular_identity = renderer._font(
+            regular_path, role="regular"
+        )
+        bold_font, _ = renderer._font(bold_path, role="bold")
+        pdf_path = output / "historical_paper_benchmarks.pdf"
+        png_path = output / "historical_paper_benchmarks.png"
+        renderer._render_figure(
+            forged_data,
+            pdf_path,
+            png_path,
+            regular_font=regular_font,
+            bold_font=bold_font,
+            font_family=regular_identity["family"],
+        )
+        manifest_path = output / MODULE.HISTORICAL_RENDER_MANIFEST
+        manifest = _read_json(manifest_path)
+        manifest["figure_sha256"] = {
+            pdf_path.name: _file_hash(pdf_path),
+            png_path.name: _file_hash(png_path),
+        }
+        manifest["figure_validation"] = {
+            "pdf": renderer._validate_pdf(pdf_path),
+            "png": renderer._validate_png(png_path),
+        }
+        manifest_path.write_bytes(renderer._canonical_json(manifest))
+        anchor, _ = _refresh_checksums(output)
+        tree = MODULE._verify_checksum_tree(
+            output, anchor, "self-consistent historical forgery"
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError, "canonical deterministic rerender"
+        ):
+            REAL_VALIDATE_HISTORICAL_FIGURES(
+                tree, source_records=source_records
+            )
 
     def test_projection_matches_exact_installed_production_function(self) -> None:
         from negfpy.anharmonic.toy._mpi_production_gate_physics import (

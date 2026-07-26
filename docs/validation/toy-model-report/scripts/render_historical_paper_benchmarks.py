@@ -51,7 +51,7 @@ _METRICS_SCHEMA = "negfpy.anharmonic.historical_paper_benchmark_metrics.v1"
 _STATUS = "NONCERTIFYING_HISTORICAL_SENSITIVITY"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DPI = 450
-_RENDERER_VERSION = "2"
+_RENDERER_VERSION = "3"
 _FIGURE_SIZE_IN = (7.0, 5.0)
 _PNG_PIXELS = (3150, 2250)
 _MAX_FIGURE_BYTES = 10 * 1024 * 1024
@@ -630,6 +630,52 @@ def load_historical_inputs(
     return validated, input_hashes, source
 
 
+def _reported_metrics(data: Mapping[str, Any]) -> dict[str, float]:
+    """Select every recomputed historical value cited by the manuscript."""
+
+    metrics = data["metrics"]
+    checkpoints = data["checkpoints"]
+    born = {
+        float(record["temperature"]): abs(float(record["relative_error_percent"]))
+        for record in checkpoints["wang_born_t2"]
+    }
+    selective = {
+        float(record["temperature"]): abs(float(record["relative_error_percent"]))
+        for record in checkpoints["wang_selective_mean_field"]
+    }
+    if set(born) != {100.0, 300.0, 500.0}:
+        raise HistoricalRenderError("Wang Born checkpoint projection changed")
+    if set(selective) != {300.0, 400.0}:
+        raise HistoricalRenderError(
+            "Wang selective-mean-field checkpoint projection changed"
+        )
+    return {
+        "wang_harmonic_rms_error_nW_per_K": float(
+            metrics["wang_harmonic_error_nW_per_K"]["rms"]
+        ),
+        "wang_harmonic_max_abs_error_nW_per_K": float(
+            metrics["wang_harmonic_error_nW_per_K"]["max_abs"]
+        ),
+        "wang_born_t2_relative_error_percent_100K": born[100.0],
+        "wang_born_t2_relative_error_percent_300K": born[300.0],
+        "wang_born_t2_relative_error_percent_500K": born[500.0],
+        "wang_selective_mean_field_relative_error_percent_300K": selective[300.0],
+        "wang_selective_mean_field_relative_error_percent_400K": selective[400.0],
+        "mingo_printed_normalization_rms_error_pW_per_K": float(
+            metrics["mingo_fig4_printed_normalization_error_pW_per_K"]["rms"]
+        ),
+        "mingo_printed_normalization_max_abs_error_pW_per_K": float(
+            metrics["mingo_fig4_printed_normalization_error_pW_per_K"]["max_abs"]
+        ),
+        "mingo_half_weight_rms_error_pW_per_K": float(
+            metrics["mingo_fig4_half_weight_sensitivity_error_pW_per_K"]["rms"]
+        ),
+        "mingo_half_weight_max_abs_error_pW_per_K": float(
+            metrics["mingo_fig4_half_weight_sensitivity_error_pW_per_K"]["max_abs"]
+        ),
+    }
+
+
 def _font(path: Path, *, role: str) -> tuple[font_manager.FontProperties, dict[str, str]]:
     path = _regular_file(path, label=f"{role} font")
     if path.suffix.lower() != ".ttf":
@@ -652,6 +698,7 @@ def _font(path: Path, *, role: str) -> tuple[font_manager.FontProperties, dict[s
     font_manager.fontManager.addfont(str(path))
     properties = font_manager.FontProperties(fname=str(path))
     return properties, {
+        "path": str(path),
         "basename": path.name,
         "sha256": _sha256_file(path),
         "family": family,
@@ -1217,6 +1264,7 @@ def render_historical_benchmarks(
             "version": _RENDERER_VERSION,
             "sha256": _sha256_file(renderer_path),
         }
+        reported_metrics = _reported_metrics(data)
         metrics_core = {
             "schema": _METRICS_SCHEMA,
             "status": _STATUS,
@@ -1225,6 +1273,7 @@ def render_historical_benchmarks(
             "source": source,
             "input_sha256": dict(sorted(input_hashes.items())),
             "metrics_recomputed_from_csv": data["metrics"],
+            "reported_metrics": reported_metrics,
             "renderer": renderer_identity,
         }
         metrics_document = {
@@ -1252,6 +1301,7 @@ def render_historical_benchmarks(
             "source": source,
             "input_sha256": dict(sorted(input_hashes.items())),
             "metrics_recomputed_from_csv": data["metrics"],
+            "reported_metrics": reported_metrics,
             "figure_sha256": figure_hashes,
             "figure_validation": {
                 "pdf": pdf_validation,
