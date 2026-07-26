@@ -2201,8 +2201,7 @@ def _draw_passivity_matrix(
     *,
     title: str,
 ) -> None:
-    cmap = plt.get_cmap("viridis").copy()
-    cmap.set_bad(_PALETTE["na"])
+    cmap = plt.get_cmap("viridis").with_extremes(bad=_PALETTE["na"])
     compressed = matrix.compressed()
     maximum = float(compressed.max()) if compressed.size else 1.0
     norm = mpl_colors.Normalize(vmin=0.0, vmax=maximum if maximum > 0.0 else 1.0)
