@@ -106,9 +106,11 @@ agree on the full commit, Git tree, package-source SHA256, lock SHA256,
 interpreter, installed distributions, platform, and thread limits.
 
 Wheel installs additionally follow the fail-closed build identity contract in
-[`development/build_provenance.md`](development/build_provenance.md); embedded
-metadata supplements but never replaces the deployment bundle and worktree
-receipts. Remote identity comparison treats this SHA256 as an opaque value from
+[`development/build_provenance.md`](development/build_provenance.md). A clean
+wheel must be staged in its exact project-owned marked build root and binds
+both package payload and `pyproject.toml` version to HEAD; embedded metadata
+supplements but never replaces the deployment bundle and worktree receipts.
+Remote identity comparison treats this SHA256 as an opaque value from
 `code_provenance()`; it does not implement a second hash algorithm.
 
 The explicit Linux lock pins Python 3.10.19, Open MPI 5.0.10, mpi4py 4.1.1,

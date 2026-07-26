@@ -16,20 +16,33 @@ special files fail closed. The JSON is canonical and is included in wheel
 `RECORD`. The Git root is resolved from the build-hook module location, never
 from the invoking working directory.
 
-Before copying, the hook removes only the exact generated
-`build_lib/negfpy` directory under a validated build root. It rejects the
-project root, source ancestors, source descendants, symlinks, and every target
-that overlaps canonical `src/negfpy` before deletion. After copying, it
-compares every package path and byte against both `src/negfpy` and regular
-HEAD blobs. This remains effective when index flags hide worktree changes and
-prevents ignored stale build output from being attributed to a clean commit.
+Before copying, the hook claims a build root with the regular, non-symlink
+`build_lib/.negfpy-build-root.json` marker. The strict marker records its
+schema plus the exact resolved project and build roots. It is created only
+when `build_lib/negfpy` is absent. A pre-existing package target without that
+exact valid marker is rejected and preserved byte-for-byte; copied, malformed,
+or symlinked markers do not authorize removal. Only a previously claimed root
+may have its exact generated `build_lib/negfpy` target removed for a repeated
+build. The hook also rejects the project root, source ancestors, source
+descendants, symlinks, and every target overlapping canonical `src/negfpy`.
+
+After copying, it compares every package path and byte against both
+`src/negfpy` and regular HEAD blobs. It independently compares the current
+regular `pyproject.toml` bytes with the exact regular HEAD blob and requires
+the setuptools package version to equal the static version declared by both.
+Thus a clean record binds package payload, project declaration, and version to
+one commit even when assume-unchanged or skip-worktree flags hide mutations.
+Ignored stale output can never be attributed to a clean commit.
 
 At runtime, live Git is permitted only when the resolved import root is
 exactly `<project>/src/negfpy` beside that project's `.git` and
 `pyproject.toml`. That authenticated source layout compares the complete
 current package payload directly with regular HEAD blobs, so ignored files and
-index-hidden mutations remain dirty. It ignores any forged embedded record and
-records it as worktree dirt. Every other import is treated as an
+index-hidden mutations remain dirty. The live-source path also compares the
+regular current `pyproject.toml` bytes and declared version directly with the
+regular HEAD blob, so `git_dirty=false` implies that `package_version` is the
+clean HEAD declaration. It ignores any forged embedded record and records it
+as worktree dirt. Every other import is treated as an
 installed package: its embedded record is used when valid, and an absent or
 invalid record remains unknown without consulting ancestor repositories. This
 prevents a wheel under a repository-local `.venv` from being attributed to the

@@ -361,13 +361,17 @@ def test_pep517_clean_wheel_contains_bound_record_and_record_entry(
     epoch = _run_git(repository, "show", "-s", "--format=%ct", "HEAD")
     source = tmp_path / "source"
     _clone_clean_repository(repository, source)
-    stale = source / "build" / "lib" / "negfpy"
-    stale.mkdir(parents=True)
-    (stale / "stale_ignored.py").write_text(
-        "STALE = True\n", encoding="ascii"
-    )
 
     first = _build_wheel(source, tmp_path / "wheel-first", epoch=epoch)
+    owned_target = source / "build" / "lib" / "negfpy"
+    owned_marker = (
+        owned_target.parent / build_support._BUILD_ROOT_MARKER
+    )
+    assert owned_target.is_dir()
+    assert owned_marker.is_file() and not owned_marker.is_symlink()
+    (owned_target / "stale_ignored.py").write_text(
+        "STALE = True\n", encoding="ascii"
+    )
     second = _build_wheel(source, tmp_path / "wheel-second", epoch=epoch)
     assert first.read_bytes() == second.read_bytes()
     assert _run_git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
@@ -509,6 +513,11 @@ def test_present_embedded_identity_precedes_ancestor_project_and_git(
 
     monkeypatch.setattr(provenance, "_source_repository", lambda root: None)
     monkeypatch.setattr(
+        provenance.importlib_metadata,
+        "version",
+        lambda name: "0.1.0rc1",
+    )
+    monkeypatch.setattr(
         provenance,
         "_embedded_build_provenance_if_present",
         embedded,
@@ -556,24 +565,120 @@ def test_runtime_hash_binds_non_python_payload_and_rejects_symlink(
     assert provenance._package_source_sha256(package) is None
 
 
-def test_fresh_build_root_removes_ignored_stale_payload(
+def test_fresh_build_root_rejects_unowned_target_without_modification(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
     build_lib = project / "build" / "lib"
     target = build_lib / "negfpy"
     target.mkdir(parents=True)
+    sentinel = target / "stale_ignored.py"
+    sentinel.write_text("PRESERVE = True\n", encoding="ascii")
+
+    with pytest.raises(RuntimeError, match="unowned build package target"):
+        build_support._fresh_package_root(build_lib, project_root=project)
+
+    assert target.is_dir()
+    assert sentinel.read_text(encoding="ascii") == "PRESERVE = True\n"
+    assert not (build_lib / build_support._BUILD_ROOT_MARKER).exists()
+
+
+def test_fresh_build_root_owned_repeated_build_removes_only_target(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    build_lib = project / "build" / "lib"
+    target = build_lib / "negfpy"
+    unrelated = build_lib / "preserve.txt"
+
+    assert build_support._fresh_package_root(
+        build_lib, project_root=project
+    ) == target
+    marker = build_lib / build_support._BUILD_ROOT_MARKER
+    assert marker.is_file() and not marker.is_symlink()
+    marker_before = marker.read_bytes()
+    unrelated.write_bytes(b"PRESERVE\n")
+    target.mkdir()
     (target / "stale_ignored.py").write_text("STALE = True\n", encoding="ascii")
+
     assert build_support._fresh_package_root(
         build_lib, project_root=project
     ) == target
     assert not target.exists()
+    assert marker.read_bytes() == marker_before
+    assert unrelated.read_bytes() == b"PRESERVE\n"
 
+
+def test_fresh_build_root_rejects_invalid_marker_and_target_symlink(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    build_lib = project / "build" / "lib"
+    target = build_lib / "negfpy"
+    assert build_support._fresh_package_root(
+        build_lib, project_root=project
+    ) == target
+    marker = build_lib / build_support._BUILD_ROOT_MARKER
+    marker.write_text("{}\n", encoding="ascii")
+    target.mkdir()
+    sentinel = target / "sentinel.py"
+    sentinel.write_bytes(b"PRESERVE = True\n")
+
+    with pytest.raises(RuntimeError, match="valid marker"):
+        build_support._fresh_package_root(build_lib, project_root=project)
+    assert sentinel.read_bytes() == b"PRESERVE = True\n"
+
+    sentinel.unlink()
+    target.rmdir()
+    marker.unlink()
     outside = tmp_path / "outside"
     outside.mkdir()
     target.symlink_to(outside, target_is_directory=True)
     with pytest.raises(RuntimeError, match="symlinked build package target"):
         build_support._fresh_package_root(build_lib, project_root=project)
+    assert outside.is_dir()
+
+
+def test_fresh_build_root_rejects_copied_or_symlinked_valid_marker(
+    tmp_path: Path,
+) -> None:
+    owner_project = tmp_path / "owner-project"
+    owner_build = owner_project / "build" / "lib"
+    build_support._fresh_package_root(
+        owner_build,
+        project_root=owner_project,
+    )
+    owner_marker = owner_build / build_support._BUILD_ROOT_MARKER
+    valid_for_owner = owner_marker.read_bytes()
+
+    other_project = tmp_path / "other-project"
+    other_build = other_project / "build" / "lib"
+    other_target = other_build / "negfpy"
+    other_target.mkdir(parents=True)
+    sentinel = other_target / "sentinel.py"
+    sentinel.write_bytes(b"PRESERVE = True\n")
+    (other_build / build_support._BUILD_ROOT_MARKER).write_bytes(valid_for_owner)
+    with pytest.raises(RuntimeError, match="valid marker"):
+        build_support._fresh_package_root(
+            other_build,
+            project_root=other_project,
+        )
+    assert sentinel.read_bytes() == b"PRESERVE = True\n"
+
+    owner_target = owner_build / "negfpy"
+    owner_target.mkdir()
+    owner_sentinel = owner_target / "sentinel.py"
+    owner_sentinel.write_bytes(b"PRESERVE = True\n")
+    owner_marker.unlink()
+    outside_marker = tmp_path / "outside-marker.json"
+    outside_marker.write_bytes(valid_for_owner)
+    owner_marker.symlink_to(outside_marker)
+    with pytest.raises(RuntimeError, match="valid marker"):
+        build_support._fresh_package_root(
+            owner_build,
+            project_root=owner_project,
+        )
+    assert owner_sentinel.read_bytes() == b"PRESERVE = True\n"
 
 
 def test_fresh_build_root_cannot_overlap_canonical_source(
@@ -610,6 +715,52 @@ def test_head_blob_comparison_defeats_hidden_index_mutation(
         package_version="0.1.0rc1",
     )
     assert len(str(record["git_revision"])) == 40
+    assert record["git_dirty"] is True
+
+
+@pytest.mark.parametrize("index_flag", ("--assume-unchanged", "--skip-worktree"))
+@pytest.mark.parametrize("changes_version", (False, True))
+def test_build_record_binds_pyproject_bytes_and_head_version(
+    tmp_path: Path,
+    index_flag: str,
+    changes_version: bool,
+) -> None:
+    project = tmp_path / "checkout"
+    revision = _init_repository(project)
+    project_file = project / "pyproject.toml"
+    _run_git(project, "update-index", index_flag, "pyproject.toml")
+    package_version = "9.9.9" if changes_version else "0.1.0rc1"
+    project_file.write_text(
+        "[project]\n"
+        "name = \"negfpy\"\n"
+        f"version = \"{package_version}\"\n"
+        "# hidden pyproject mutation\n",
+        encoding="ascii",
+    )
+    assert _run_git(project, "status", "--porcelain=v1") == ""
+
+    record = build_provenance_record(
+        project_root=project,
+        package_root=_package(project),
+        package_version=package_version,
+    )
+    assert record["git_revision"] == revision
+    assert record["git_dirty"] is True
+    assert record["package_version"] == package_version
+
+
+def test_build_record_clean_requires_head_declared_package_version(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "checkout"
+    revision = _init_repository(project)
+    record = build_provenance_record(
+        project_root=project,
+        package_root=_package(project),
+        package_version="9.9.9",
+    )
+    assert record["git_revision"] == revision
+    assert record["package_version"] == "9.9.9"
     assert record["git_dirty"] is True
 
 
@@ -675,6 +826,60 @@ def test_live_source_head_comparison_defeats_hidden_index_mutation(
     result = provenance.code_provenance()
     assert result["git_revision"] == revision
     assert result["git_dirty"] is True
+
+
+def test_live_source_clean_version_matches_head_declaration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "checkout"
+    revision = _init_repository(project)
+    package = project / "src" / "negfpy"
+    monkeypatch.setattr(
+        provenance,
+        "__file__",
+        str(package / "anharmonic" / "_provenance.py"),
+    )
+
+    result = provenance.code_provenance()
+    assert result["git_revision"] == revision
+    assert result["git_dirty"] is False
+    assert result["package_version"] == "0.1.0rc1"
+    assert result["declared_package_version"] == "0.1.0rc1"
+
+
+@pytest.mark.parametrize("index_flag", ("--assume-unchanged", "--skip-worktree"))
+@pytest.mark.parametrize("changes_version", (False, True))
+def test_live_source_binds_pyproject_bytes_and_head_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    index_flag: str,
+    changes_version: bool,
+) -> None:
+    project = tmp_path / "checkout"
+    revision = _init_repository(project)
+    package = project / "src" / "negfpy"
+    project_file = project / "pyproject.toml"
+    _run_git(project, "update-index", index_flag, "pyproject.toml")
+    package_version = "9.9.9" if changes_version else "0.1.0rc1"
+    project_file.write_text(
+        "[project]\n"
+        "name = \"negfpy\"\n"
+        f"version = \"{package_version}\"\n"
+        "# hidden runtime pyproject mutation\n",
+        encoding="ascii",
+    )
+    assert _run_git(project, "status", "--porcelain=v1") == ""
+    monkeypatch.setattr(
+        provenance,
+        "__file__",
+        str(package / "anharmonic" / "_provenance.py"),
+    )
+
+    result = provenance.code_provenance()
+    assert result["git_revision"] == revision
+    assert result["git_dirty"] is True
+    assert result["package_version"] == package_version
 
 
 def test_live_source_head_comparison_detects_ignored_extra_payload(

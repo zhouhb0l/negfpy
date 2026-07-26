@@ -340,6 +340,69 @@ def initial_self_energy_hash(
     return digest.hexdigest()
 
 
+def _regular_file_bytes(path: Path) -> bytes | None:
+    """Read a fixed regular non-symlink file, or fail closed."""
+
+    try:
+        mode = path.lstat().st_mode
+        if path.is_symlink() or not stat.S_ISREG(mode):
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _head_regular_blob(
+    repository: Path,
+    git_executable: str,
+    relative: str,
+) -> bytes | None:
+    """Read one exact regular blob from HEAD, bypassing index flags."""
+
+    try:
+        listing = subprocess.run(
+            (
+                git_executable,
+                "ls-tree",
+                "-z",
+                "--full-tree",
+                "HEAD",
+                "--",
+                relative,
+            ),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            timeout=5.0,
+        ).stdout
+        records = tuple(item for item in listing.split(b"\0") if item)
+        if len(records) != 1:
+            return None
+        header, separator, raw_path = records[0].partition(b"\t")
+        mode, kind, object_id = header.split(b" ")
+        if (
+            not separator
+            or raw_path.decode("utf-8") != relative
+            or mode not in {b"100644", b"100755"}
+            or kind != b"blob"
+        ):
+            return None
+        return subprocess.run(
+            (git_executable, "cat-file", "blob", object_id.decode("ascii")),
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            timeout=5.0,
+        ).stdout
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        return None
+
+
 def _head_package_entries(
     repository: Path,
     git_executable: str,
@@ -413,7 +476,7 @@ def _source_repository(package_root: Path) -> Path | None:
             if (
                 not expected.is_symlink()
                 and expected.resolve() == resolved
-                and (candidate / "pyproject.toml").is_file()
+                and _regular_file_bytes(candidate / "pyproject.toml") is not None
             ):
                 return candidate
         except OSError:
@@ -421,13 +484,14 @@ def _source_repository(package_root: Path) -> Path | None:
     return None
 
 
-def _declared_package_version(project_root: Path) -> str:
-    """Read the exact source checkout declaration without consulting cwd."""
+def _declared_package_version_from_bytes(document: bytes | None) -> str:
+    """Extract the static project version from exact pyproject bytes."""
 
-    project_file = project_root / "pyproject.toml"
+    if document is None:
+        return "unknown"
     try:
-        project_text = project_file.read_text(encoding="utf-8")
-    except OSError:
+        project_text = document.decode("utf-8")
+    except UnicodeDecodeError:
         return "unknown"
     project_section = re.search(
         r"(?ms)^\[project\][ \t]*(?:\r?\n)"
@@ -438,11 +502,19 @@ def _declared_package_version(project_root: Path) -> str:
     if project_section is None:
         return "unknown"
     version_match = re.search(
-        r"(?m)^\s*version\s*=\s*[\"\x27]([^\"\x27]+)"
-        r"[\"\x27]\s*(?:\n|\Z)",
+        r'(?m)^\s*version\s*=\s*["\x27]([^"\x27]+)'
+        r'["\x27]\s*(?:\n|\Z)',
         project_section.group("body"),
     )
     return "unknown" if version_match is None else version_match.group(1)
+
+
+def _declared_package_version(project_root: Path) -> str:
+    """Read the exact source checkout declaration without consulting cwd."""
+
+    return _declared_package_version_from_bytes(
+        _regular_file_bytes(project_root / "pyproject.toml")
+    )
 
 
 def code_provenance() -> dict[str, str | bool]:
@@ -592,11 +664,30 @@ def code_provenance() -> dict[str, str | bool]:
         return result
     current_entries = _package_payload_entries(package_root)
     head_entries = _head_package_entries(repository, git_executable)
-    if current_entries is None or head_entries is None:
+    current_project = _regular_file_bytes(repository / "pyproject.toml")
+    head_project = _head_regular_blob(
+        repository,
+        git_executable,
+        "pyproject.toml",
+    )
+    current_version = _declared_package_version_from_bytes(current_project)
+    head_version = _declared_package_version_from_bytes(head_project)
+    if (
+        current_entries is None
+        or head_entries is None
+        or current_project is None
+        or head_project is None
+        or current_version == "unknown"
+        or head_version == "unknown"
+    ):
         result["git_dirty"] = "unknown"
     else:
         result["git_dirty"] = bool(
-            dirty.strip() or current_entries != head_entries
+            dirty.strip()
+            or current_entries != head_entries
+            or current_project != head_project
+            or current_version != head_version
+            or result["package_version"] != head_version
         )
     return result
 

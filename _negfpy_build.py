@@ -21,6 +21,11 @@ from setuptools.command.build_py import build_py as _build_py
 
 _SCHEMA: Final = "negfpy.build_provenance.v1"
 _METADATA_NAME: Final = "_build_provenance.json"
+_BUILD_ROOT_SCHEMA: Final = "negfpy.build_root.v1"
+_BUILD_ROOT_MARKER: Final = ".negfpy-build-root.json"
+_BUILD_ROOT_MARKER_KEYS: Final = frozenset(
+    {"build_root", "project", "project_root", "schema"}
+)
 _HASH_DOMAIN: Final = b"negfpy.package-payload.v1\0"
 _GIT_OBJECT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
@@ -120,6 +125,85 @@ def _git_state(project_root: Path) -> tuple[str, bool | str]:
     return revision, bool(status.strip())
 
 
+def _regular_file_bytes(path: Path) -> bytes | None:
+    """Read a fixed regular non-symlink file, or fail closed."""
+
+    try:
+        mode = path.lstat().st_mode
+        if path.is_symlink() or not stat.S_ISREG(mode):
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _head_regular_blob(project_root: Path, relative: str) -> bytes | None:
+    """Read one exact regular blob from HEAD, bypassing index flags."""
+
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        listing = subprocess.run(
+            (git, "ls-tree", "-z", "--full-tree", "HEAD", "--", relative),
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            timeout=10.0,
+        ).stdout
+        records = tuple(item for item in listing.split(b"\0") if item)
+        if len(records) != 1:
+            return None
+        header, separator, raw_path = records[0].partition(b"\t")
+        mode, kind, object_id = header.split(b" ")
+        if (
+            not separator
+            or raw_path.decode("utf-8") != relative
+            or mode not in {b"100644", b"100755"}
+            or kind != b"blob"
+        ):
+            return None
+        return subprocess.run(
+            (git, "cat-file", "blob", object_id.decode("ascii")),
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            timeout=10.0,
+        ).stdout
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        return None
+
+
+def _declared_package_version(document: bytes | None) -> str | None:
+    """Extract the static project version from exact pyproject bytes."""
+
+    if document is None:
+        return None
+    try:
+        project_text = document.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    project_section = re.search(
+        r"(?ms)^\[project\][ \t]*(?:\r?\n)"
+        r"(?P<body>.*?)"
+        r"(?=^\[[^\]]+\][ \t]*(?:\r?\n)|\Z)",
+        project_text,
+    )
+    if project_section is None:
+        return None
+    version_match = re.search(
+        r'(?m)^\s*version\s*=\s*["\x27]([^"\x27]+)'
+        r'["\x27]\s*(?:\n|\Z)',
+        project_section.group("body"),
+    )
+    return None if version_match is None else version_match.group(1)
+
+
 def _head_package_entries(
     project_root: Path,
 ) -> tuple[tuple[str, bytes], ...] | None:
@@ -188,11 +272,20 @@ def build_provenance_record(
     except (OSError, RuntimeError, ValueError):
         source_entries = ()
     head_entries = _head_package_entries(project)
+    current_project = _regular_file_bytes(project / "pyproject.toml")
+    head_project = _head_regular_blob(project, "pyproject.toml")
+    current_version = _declared_package_version(current_project)
+    head_version = _declared_package_version(head_project)
     if type(dirty) is bool and (
         not source_entries
         or head_entries is None
         or source_entries != head_entries
         or build_entries != source_entries
+        or current_project is None
+        or head_project is None
+        or current_project != head_project
+        or current_version != package_version
+        or head_version != package_version
     ):
         dirty = True
     if dirty == "unknown":
@@ -207,17 +300,119 @@ def build_provenance_record(
     }
 
 
+def _build_root_marker_document(
+    *,
+    project_root: Path,
+    build_root: Path,
+) -> dict[str, str]:
+    return {
+        "build_root": str(build_root),
+        "project": "negfpy",
+        "project_root": str(project_root),
+        "schema": _BUILD_ROOT_SCHEMA,
+    }
+
+
+def _valid_build_root_marker(
+    marker: Path,
+    *,
+    project_root: Path,
+    build_root: Path,
+) -> bool:
+    """Authenticate the exact build root before any generated-tree removal."""
+
+    try:
+        mode = marker.lstat().st_mode
+        if marker.is_symlink() or not stat.S_ISREG(mode):
+            return False
+        raw = marker.read_bytes()
+    except OSError:
+        return False
+    if not raw or len(raw) > 4096:
+        return False
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate marker key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(
+            raw.decode("ascii"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"nonfinite marker value: {value}")
+            ),
+        )
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return bool(
+        isinstance(document, dict)
+        and set(document) == _BUILD_ROOT_MARKER_KEYS
+        and document
+        == _build_root_marker_document(
+            project_root=project_root,
+            build_root=build_root,
+        )
+    )
+
+
+def _create_build_root_marker(
+    marker: Path,
+    *,
+    project_root: Path,
+    build_root: Path,
+) -> None:
+    """Create a project-bound marker without replacing any existing path."""
+
+    payload = (
+        json.dumps(
+            _build_root_marker_document(
+                project_root=project_root,
+                build_root=build_root,
+            ),
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    try:
+        with marker.open("x", encoding="ascii", newline="\n") as stream:
+            stream.write(payload)
+    except FileExistsError as exc:
+        raise RuntimeError(f"build-root marker appeared concurrently: {marker}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"could not create build-root marker: {marker}") from exc
+    if not _valid_build_root_marker(
+        marker,
+        project_root=project_root,
+        build_root=build_root,
+    ):
+        raise RuntimeError(f"new build-root marker failed validation: {marker}")
+
+
 def _fresh_package_root(
     build_lib: str | Path,
     *,
     project_root: Path,
 ) -> Path:
-    """Remove only a generated package tree disjoint from canonical source."""
+    """Prepare only a package tree owned by this exact project build root."""
 
     project = project_root.resolve()
     source_root = (project / "src" / "negfpy").resolve()
-    build_root = Path(build_lib).resolve()
+    requested_build_root = Path(build_lib)
+    if requested_build_root.is_symlink():
+        raise RuntimeError(
+            f"refusing symlinked build root: {requested_build_root}"
+        )
+    build_root = requested_build_root.resolve()
     target = build_root / "negfpy"
+    marker = build_root / _BUILD_ROOT_MARKER
     unsafe_root = (
         build_root == project
         or build_root in source_root.parents
@@ -237,10 +432,53 @@ def _fresh_package_root(
         raise RuntimeError(f"unsafe build package target: {target}")
     if target.is_symlink():
         raise RuntimeError(f"refusing symlinked build package target: {target}")
+
     if target.exists():
         if not target.is_dir():
             raise RuntimeError(f"build package target is not a directory: {target}")
+        if not _valid_build_root_marker(
+            marker,
+            project_root=project,
+            build_root=build_root,
+        ):
+            raise RuntimeError(
+                f"refusing unowned build package target without valid marker: {target}"
+            )
         shutil.rmtree(target)
+        return target
+
+    try:
+        build_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"could not prepare build root: {build_root}") from exc
+    if not build_root.is_dir() or build_root.is_symlink():
+        raise RuntimeError(f"build root is not a regular directory: {build_root}")
+
+    marker_exists = False
+    try:
+        marker.lstat()
+        marker_exists = True
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise RuntimeError(f"could not inspect build-root marker: {marker}") from exc
+    if marker_exists:
+        if not _valid_build_root_marker(
+            marker,
+            project_root=project,
+            build_root=build_root,
+        ):
+            raise RuntimeError(f"invalid build-root ownership marker: {marker}")
+    else:
+        if target.exists() or target.is_symlink():
+            raise RuntimeError(
+                f"build package target appeared before marker creation: {target}"
+            )
+        _create_build_root_marker(
+            marker,
+            project_root=project,
+            build_root=build_root,
+        )
     return target
 
 
