@@ -53,7 +53,7 @@ def _shortest_lattice_translations(
     primitive_lattice: np.ndarray,
     repeats: np.ndarray,
     *,
-    search_radius: int = 2,
+    search_radius: int | None = None,
     distance_tolerance: float = 1e-8,
 ) -> tuple[tuple[int, int, int], ...]:
     """Return phonopy-style shortest image translations for one atom pair.
@@ -62,34 +62,131 @@ def _shortest_lattice_translations(
     between the two atoms, not by the raw supercell index difference. In the
     periodic gauge used by NEGFPy, the fractional basis displacement is removed
     and the remaining integer lattice translations are accumulated as terms.
+
+    The search is finite but has no fixed image radius. An initial integer
+    image supplies an incumbent distance. The reciprocal lattice then gives a
+    rigorous coordinate bound for every image that can improve, or tie within
+    ``distance_tolerance``, that incumbent. This matters for skewed cells: the
+    closest image may have a component far outside ``[-2, 2]``.
+
+    ``search_radius`` is retained only as a compatibility margin around the
+    initial image. It can enlarge the proven search box, but never limits it.
     """
 
-    cell_delta = np.asarray(cell_delta, dtype=int)
-    basis_delta = np.asarray(basis_delta, dtype=float)
-    primitive_lattice = np.asarray(primitive_lattice, dtype=float)
-    repeats = np.asarray(repeats, dtype=int)
+    cell_delta_raw = np.asarray(cell_delta)
+    basis_delta = np.asarray(basis_delta, dtype=np.float64)
+    primitive_lattice = np.asarray(primitive_lattice, dtype=np.float64)
+    repeats_raw = np.asarray(repeats)
 
-    # A repeat of one collapses the raw supercell index, but it does not make
-    # the corresponding primitive-lattice direction nonperiodic. Basis atoms
-    # near opposite cell faces can therefore have their shortest connecting
-    # image at a nonzero translation even on a repeat-one axis.
-    ranges = [range(-search_radius, search_radius + 1) for _ in repeats]
+    if cell_delta_raw.shape != (3,) or basis_delta.shape != (3,):
+        raise ValueError("cell_delta and basis_delta must each have shape (3,).")
+    if repeats_raw.shape != (3,) or primitive_lattice.shape != (3, 3):
+        raise ValueError(
+            "repeats must have shape (3,) and primitive_lattice shape (3,3)."
+        )
+    if not np.all(np.isfinite(basis_delta)) or not np.all(
+        np.isfinite(primitive_lattice)
+    ):
+        raise ValueError("Shortest-vector inputs must be finite.")
+    if not np.all(np.equal(cell_delta_raw, np.rint(cell_delta_raw))):
+        raise ValueError("cell_delta must contain integer lattice indices.")
+    if not np.all(np.equal(repeats_raw, np.rint(repeats_raw))):
+        raise ValueError("repeats must contain integer supercell repeats.")
+    cell_delta = np.asarray(cell_delta_raw, dtype=np.int64)
+    repeats = np.asarray(repeats_raw, dtype=np.int64)
+    if np.any(repeats <= 0):
+        raise ValueError("All supercell repeats must be positive.")
+    if not np.isfinite(distance_tolerance) or distance_tolerance < 0.0:
+        raise ValueError("distance_tolerance must be finite and nonnegative.")
+    if search_radius is not None:
+        if (
+            isinstance(search_radius, bool)
+            or int(search_radius) != search_radius
+            or int(search_radius) < 0
+        ):
+            raise ValueError(
+                "search_radius compatibility margin must be a nonnegative integer."
+            )
+
+    try:
+        inverse_lattice = np.linalg.inv(primitive_lattice)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("primitive_lattice must be nonsingular.") from exc
+    if not np.all(np.isfinite(inverse_lattice)):
+        raise ValueError("primitive_lattice inverse is nonfinite.")
+
+    # With row lattice vectors, v = (a + repeats*n) @ L and therefore
+    # a + repeats*n = v @ inv(L). For ||v|| <= rho, Cauchy--Schwarz gives
+    # |a_j + repeats_j*n_j| <= rho*||inv(L)[:,j]||. The resulting integer
+    # box contains every image capable of matching the incumbent.
+    a = cell_delta.astype(np.float64) + basis_delta
+    continuous_image = -a / repeats.astype(np.float64)
+    initial_image = np.rint(continuous_image).astype(np.int64)
+    initial_cart = (a + repeats * initial_image) @ primitive_lattice
+    initial_dist2 = float(np.dot(initial_cart, initial_cart))
+    eps = np.finfo(np.float64).eps
+    scale = max(1.0, initial_dist2, float(distance_tolerance))
+    rho = float(
+        np.sqrt(
+            max(
+                0.0,
+                initial_dist2 + distance_tolerance + 64.0 * eps * scale,
+            )
+        )
+    )
+    reciprocal_norms = np.linalg.norm(inverse_lattice, axis=0)
+
+    lower_real = (-rho * reciprocal_norms - a) / repeats
+    upper_real = (rho * reciprocal_norms - a) / repeats
+    # ``nextafter`` prevents an exactly integral floating bound from excluding
+    # a boundary image through a last-bit rounding error.
+    lower = np.ceil(np.nextafter(lower_real, -np.inf)).astype(np.int64)
+    upper = np.floor(np.nextafter(upper_real, np.inf)).astype(np.int64)
+    lower = np.minimum(lower, initial_image)
+    upper = np.maximum(upper, initial_image)
+    if search_radius is not None:
+        margin = int(search_radius)
+        lower = np.minimum(lower, initial_image - margin)
+        upper = np.maximum(upper, initial_image + margin)
+
     best_dist2: float | None = None
-    out: list[tuple[int, int, int]] = []
-    for ix in ranges[0]:
-        for iy in ranges[1]:
-            for iz in ranges[2]:
+    best_images: list[tuple[float, np.ndarray]] = []
+    for ix in range(int(lower[0]), int(upper[0]) + 1):
+        for iy in range(int(lower[1]), int(upper[1]) + 1):
+            for iz in range(int(lower[2]), int(upper[2]) + 1):
                 image = np.array([ix, iy, iz], dtype=int)
                 rvec = cell_delta + repeats * image
                 cart = (rvec.astype(float) + basis_delta) @ primitive_lattice
                 dist2 = float(np.dot(cart, cart))
-                if best_dist2 is None or dist2 < best_dist2 - distance_tolerance:
+                comparison_guard = 64.0 * eps * max(
+                    1.0, dist2, best_dist2 or 0.0
+                )
+                if best_dist2 is None or dist2 < best_dist2:
                     best_dist2 = dist2
-                    out = [tuple(int(v) for v in rvec)]
-                elif abs(dist2 - best_dist2) <= distance_tolerance:
-                    out.append(tuple(int(v) for v in rvec))
+                    best_images = [
+                        (old_dist2, old_rvec)
+                        for old_dist2, old_rvec in best_images
+                        if old_dist2 - best_dist2
+                        <= distance_tolerance
+                        + 64.0
+                        * eps
+                        * max(1.0, old_dist2, best_dist2)
+                    ]
+                    best_images.append((dist2, rvec))
+                elif (
+                    abs(dist2 - best_dist2)
+                    <= distance_tolerance + comparison_guard
+                ):
+                    best_images.append((dist2, rvec))
 
-    return tuple(sorted(set(out)))
+    return tuple(
+        sorted(
+            {
+                tuple(int(value) for value in rvec)
+                for _, rvec in best_images
+            }
+        )
+    )
 
 
 def _phonopy_fc_to_qe_factor() -> float:
@@ -118,7 +215,7 @@ def _next_nonempty(lines: list[str], start: int) -> tuple[int, str]:
 
 
 def _parse_poscar(path: Path) -> dict[str, Any]:
-    lines = [ln.rstrip("\n") for ln in path.open("r", encoding="utf-8")]
+    lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 8:
         raise ValueError(f"POSCAR seems too short: '{path}'")
 
@@ -177,7 +274,7 @@ def _parse_poscar(path: Path) -> dict[str, Any]:
 
 
 def _parse_force_constants(path: Path) -> np.ndarray:
-    lines = [ln.rstrip("\n") for ln in path.open("r", encoding="utf-8")]
+    lines = path.read_text(encoding="utf-8").splitlines()
     i, first = _next_nonempty(lines, 0)
     head = first.split()
     if len(head) < 1:
@@ -399,6 +496,7 @@ def _build_ifc_from_phonopy_force_constants(
             "supercell_repeats": (n1, n2, n3),
             "term_generation": "phonopy_shortest_vectors",
             "shortest_vector_multiplicity_counts": dict(sorted(multiplicity_count.items())),
+            "shortest_vector_search": "reciprocal_bound_exact_v1",
             "force_constant_unit_source": "eV/Angstrom^2 (phonopy default)",
             "mass_unit_source": "amu",
             "force_constant_unit_converted": "Ry/bohr^2",
