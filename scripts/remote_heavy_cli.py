@@ -873,8 +873,15 @@ def _validate_scaling_selection(
     )
     scaling_root = selection_path.parent.resolve()
     prefix = environment_prefix.resolve()
-    expected_launcher = (prefix / "bin" / "mpiexec").resolve()
-    expected_python = (prefix / "bin" / "python").resolve()
+    expected_launcher_path = prefix / "bin" / "mpiexec"
+    expected_python_path = prefix / "bin" / "python"
+    expected_launcher = _executable_identity(expected_launcher_path)
+    expected_python = _executable_identity(expected_python_path)
+    _require(
+        pathlib.Path(expected_launcher["resolved_path"]).is_relative_to(prefix)
+        and pathlib.Path(expected_python["resolved_path"]).is_relative_to(prefix),
+        "deployed MPI/Python executable escaped its environment prefix",
+    )
     rank_manifests: list[tuple[pathlib.Path, Mapping[str, Any]]] = []
     for rank_count in remote_mpi_scaling.RANK_LADDER:
         rank_path = scaling_root / f"rank-{rank_count:03d}-manifest.json"
@@ -901,15 +908,23 @@ def _validate_scaling_selection(
             name=f"rank-{rank_count} Python",
         )
         argv = rank_payload.get("argv")
+        binding_arguments = remote_mpi_scaling.openmpi_binding_arguments(
+            rank_count,
+            physical_core_count=physical_core_count,
+            socket_count=socket_count,
+        )
+        expected_argv_prefix = [
+            str(expected_launcher_path),
+            *binding_arguments,
+            "-n",
+            str(rank_count),
+            str(expected_python_path),
+        ]
         _require(
-            pathlib.Path(str(launcher.get("path"))).resolve()
-            == expected_launcher
-            and pathlib.Path(str(python.get("path"))).resolve()
-            == expected_python
+            dict(launcher) == expected_launcher
+            and dict(python) == expected_python
             and isinstance(argv, list)
-            and bool(argv)
-            and pathlib.Path(str(argv[0])).resolve() == expected_launcher
-            and str(expected_python) in argv,
+            and argv[: len(expected_argv_prefix)] == expected_argv_prefix,
             f"rank-{rank_count} did not use the deployed MPI/Python environment",
         )
         rank_manifests.append((rank_path, rank_document))

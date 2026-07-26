@@ -1731,6 +1731,127 @@ def test_lifecycle_rebuilds_scaling_selection_and_rejects_worker_tampering(
         )
 
 
+def test_scaling_validation_accepts_canonical_environment_entry_symlinks(
+    tmp_path: pathlib.Path,
+) -> None:
+    lock_sha = "7" * 64
+    prefix = tmp_path / "environment"
+    binary = prefix / "bin"
+    binary.mkdir(parents=True)
+    for entry_name, target_name in (
+        ("mpiexec", "mpirun"),
+        ("python", "python3.10"),
+    ):
+        target = binary / target_name
+        target.write_text(
+            f"#!/bin/sh\n# synthetic {target_name}\nexit 0\n",
+            encoding="ascii",
+        )
+        target.chmod(0o755)
+        (binary / entry_name).symlink_to(target.name)
+
+    selection = _write_scaling_selection(
+        tmp_path / "scaling",
+        lock_sha,
+        environment_prefix=prefix,
+    )
+    facts = cli._validate_scaling_selection(
+        selection_path=selection,
+        environment_prefix=prefix,
+        source_revision=COMMIT,
+        source_tree_sha256=SOURCE_SHA256,
+        environment_sha256=lock_sha,
+        physical_core_count=76,
+        socket_count=2,
+    )
+    assert facts["toy_rank_count"] == 4
+
+
+def test_scaling_validation_rejects_noncanonical_executable_aliases(
+    tmp_path: pathlib.Path,
+) -> None:
+    lock_sha = "7" * 64
+    canonical_prefix = tmp_path / "environment"
+    canonical_launcher, canonical_python = _fake_mpi_environment(canonical_prefix)
+    alias_prefix = tmp_path / "alias-environment"
+    alias_binary = alias_prefix / "bin"
+    alias_binary.mkdir(parents=True)
+    (alias_binary / "mpiexec").symlink_to(canonical_launcher["resolved_path"])
+    (alias_binary / "python").symlink_to(canonical_python["resolved_path"])
+    selection = _write_scaling_selection(
+        tmp_path / "alias-scaling",
+        lock_sha,
+        environment_prefix=alias_prefix,
+    )
+
+    with pytest.raises(
+        core.RemoteValidationError,
+        match="did not use the deployed MPI/Python environment",
+    ):
+        cli._validate_scaling_selection(
+            selection_path=selection,
+            environment_prefix=canonical_prefix,
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            physical_core_count=76,
+            socket_count=2,
+        )
+
+
+@pytest.mark.parametrize(
+    ("entry_name", "target_name"),
+    (("mpiexec", "mpirun"), ("python", "python3.10")),
+)
+def test_scaling_validation_rejects_executable_target_outside_prefix(
+    entry_name: str,
+    target_name: str,
+    tmp_path: pathlib.Path,
+) -> None:
+    lock_sha = "7" * 64
+    prefix = tmp_path / "environment"
+    binary = prefix / "bin"
+    binary.mkdir(parents=True)
+    for name in ("mpiexec", "python"):
+        if name == entry_name:
+            continue
+        path = binary / name
+        path.write_text(
+            f"#!/bin/sh\n# synthetic {name}\nexit 0\n",
+            encoding="ascii",
+        )
+        path.chmod(0o755)
+    outside = tmp_path / "outside" / target_name
+    outside.parent.mkdir()
+    outside.write_text(
+        f"#!/bin/sh\n# outside {target_name}\nexit 0\n",
+        encoding="ascii",
+    )
+    outside.chmod(0o755)
+    (binary / entry_name).symlink_to(
+        pathlib.Path("../..") / outside.parent.name / outside.name
+    )
+    selection = _write_scaling_selection(
+        tmp_path / f"scaling-{entry_name}",
+        lock_sha,
+        environment_prefix=prefix,
+    )
+
+    with pytest.raises(
+        core.RemoteValidationError,
+        match="executable escaped its environment prefix",
+    ):
+        cli._validate_scaling_selection(
+            selection_path=selection,
+            environment_prefix=prefix,
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            physical_core_count=76,
+            socket_count=2,
+        )
+
+
 def test_lifecycle_rejects_hash_mismatched_mpi_execution_manifest(
     tmp_path: pathlib.Path,
 ) -> None:
