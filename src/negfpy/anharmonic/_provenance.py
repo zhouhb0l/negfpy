@@ -213,6 +213,13 @@ def code_provenance() -> dict[str, str | bool]:
                 )
                 if version_match is not None:
                     declared_version = version_match.group(1)
+    # Installed wheel metadata is generated from the project declaration.
+    # Wheels intentionally omit the repository-level pyproject.toml, so use
+    # that metadata as the authoritative declaration when no source project
+    # file is present.  Exact-commit campaign certification separately
+    # requires clean Git and external bundle/environment receipts.
+    if declared_version == "unknown" and installed_version != "unknown":
+        declared_version = installed_version
     package_version = (
         declared_version
         if declared_version != "unknown"

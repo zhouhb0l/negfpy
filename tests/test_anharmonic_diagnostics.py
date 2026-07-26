@@ -461,7 +461,11 @@ def test_spectral_only_can_pass_but_cannot_be_certified() -> None:
         eta_lead=1.0e-8,
         retarded_strategy="spectral_only",
     )
-    report = check_solution(problem, result, spectral_config)
+    with pytest.warns(
+        RuntimeWarning,
+        match="omits the principal-value Kramers-Kronig term",
+    ):
+        report = check_solution(problem, result, spectral_config)
 
     assert report.passed
     assert not report.release_certified

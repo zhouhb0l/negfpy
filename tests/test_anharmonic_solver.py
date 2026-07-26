@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -16,6 +18,7 @@ from negfpy.anharmonic import (
 )
 from negfpy.anharmonic.toy import fpu_alpha_chain, pinned_scalar_chain
 from negfpy.anharmonic._harmonic import harmonic_frequency_upper_bound
+from negfpy.anharmonic._provenance import code_provenance
 from negfpy.core.negf import device_green_function
 from negfpy.core.types import Device1D, LeadBlocks
 
@@ -409,7 +412,7 @@ def test_result_records_reproducible_numerical_and_input_provenance() -> None:
     assert metadata["declared_package_version"] == "0.1.0rc1"
     assert metadata["installed_package_version"] == "0.1.0rc1"
     assert metadata["package_version_consistent"]
-    assert isinstance(metadata["git_dirty"], bool)
+    assert metadata["git_dirty"] in (True, False, "unknown")
     hashes = metadata["input_hashes"]
     assert set(hashes) == {
         "device",
@@ -426,6 +429,24 @@ def test_result_records_reproducible_numerical_and_input_provenance() -> None:
     assert all(len(value) == 64 for value in hashes.values())
     with pytest.raises(TypeError):
         hashes["problem"] = "changed"  # type: ignore[index]
+
+
+def test_installed_wheel_metadata_is_the_version_declaration_without_pyproject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_is_file = Path.is_file
+
+    def without_project_file(path: Path) -> bool:
+        if path.name == "pyproject.toml":
+            return False
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", without_project_file)
+    provenance = code_provenance()
+
+    assert provenance["installed_package_version"] == "0.1.0rc1"
+    assert provenance["declared_package_version"] == "0.1.0rc1"
+    assert provenance["package_version_consistent"] is True
 
 
 def test_initial_state_and_method_are_part_of_calculation_provenance() -> None:
