@@ -264,20 +264,31 @@ def test_embedded_build_record_rejects_symlink(
 
 def test_source_checkout_prefers_live_git_without_generated_record(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    repository = tmp_path / "checkout"
+    revision = _init_repository(repository)
+    synthetic_module = (
+        repository / "src" / "negfpy" / "anharmonic" / "_provenance.py"
+    )
+
     def fail_if_loaded(*args: object, **kwargs: object) -> None:
         raise AssertionError("source checkout consulted wheel metadata")
 
+    monkeypatch.setattr(provenance, "__file__", str(synthetic_module))
+    monkeypatch.setattr(
+        provenance.importlib_metadata,
+        "version",
+        lambda name: "0.1.0rc1",
+    )
     monkeypatch.setattr(
         provenance,
         "_validated_embedded_build_provenance",
         fail_if_loaded,
     )
     result = provenance.code_provenance()
-    assert result["git_revision"] == _run_git(
-        Path(__file__).resolve().parents[1], "rev-parse", "HEAD"
-    )
-    assert type(result["git_dirty"]) is bool
+    assert result["git_revision"] == revision
+    assert result["git_dirty"] is False
 
 
 def test_present_invalid_record_blocks_ancestor_git_fallback(
