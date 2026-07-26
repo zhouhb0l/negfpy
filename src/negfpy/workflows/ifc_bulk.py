@@ -18,6 +18,7 @@ import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -1037,13 +1038,14 @@ def _unwrap_transport_n1_minimum_image(
     """Optionally reconstruct collapsed IFC axes with repeat 1 via minimum image.
 
     For any lattice axis whose repeat is 1, wrapped FFT indices collapse that
-    shift to zero. This opt-in routine reassigns each atom-pair sub-block along
-    every collapsed axis using the shortest Cartesian image distance over
-    shifts in {-1, 0, +1}, splitting the original weight over exactly tied
-    images. After transport reorientation this covers both the transport axis
-    and any transverse axes with repeat 1.
+    shift to zero. This opt-in routine searches a provably complete finite set
+    of integer shifts in the collapsed lattice-row subspace while holding every
+    noncollapsed translation fixed. It splits the original weight over exactly
+    tied shortest images. After transport reorientation this covers both the
+    transport axis and any transverse axes with repeat 1.
     """
 
+    exact_search = "collapsed_subspace_dual_bound_v1"
     info: dict[str, Any] = {
         "mode": None,
         "applied": False,
@@ -1053,6 +1055,8 @@ def _unwrap_transport_n1_minimum_image(
         "pairs_assigned_nonzero_shift": 0,
         "pairs_assigned_nonzero_dx": 0,
         "degenerate_images_weight_split": False,
+        "minimum_image_search": None,
+        "maximum_candidate_count": 0,
         "collapsed_axes": [],
     }
     mode_raw = None if mode is None else str(mode).strip()
@@ -1101,18 +1105,40 @@ def _unwrap_transport_n1_minimum_image(
 
     lv = np.asarray(ifc.lattice_vectors, dtype=float)
     frac = np.asarray(ifc.atom_positions, dtype=float)
+    tolerance = float(tie_tolerance)
     nat = int(np.asarray(ifc.masses).size)
     dof = int(ifc.dof_per_atom)
     ndof = nat * dof
+    if not np.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("tie_tolerance must be finite and nonnegative.")
     if lv.shape != (3, 3):
         raise ValueError("Invalid IFC lattice_vectors shape; expected (3,3).")
     if frac.shape != (nat, 3):
         raise ValueError(f"Invalid IFC atom_positions shape; expected ({nat},3).")
+    if not np.all(np.isfinite(lv)) or not np.all(np.isfinite(frac)):
+        raise ValueError("IFC lattice vectors and atom positions must be finite.")
+
+    collapsed_indices = np.asarray(collapsed_axes, dtype=int)
+    collapsed_basis = lv[collapsed_indices, :]
+    gram = collapsed_basis @ collapsed_basis.T
+    try:
+        dual_basis = collapsed_basis.T @ np.linalg.inv(gram)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "Collapsed lattice-row subspace must have full row rank."
+        ) from exc
+    if not np.all(np.isfinite(dual_basis)):
+        raise ValueError("Collapsed lattice-row subspace is numerically singular.")
+    subspace_condition = float(np.linalg.cond(gram))
+    if not np.isfinite(subspace_condition):
+        raise ValueError("Collapsed lattice-row subspace is numerically singular.")
+    dual_column_norms = np.linalg.norm(dual_basis, axis=0)
 
     accum: dict[tuple[int, int, int], np.ndarray] = {}
     ambiguous = 0
     reassigned_nonzero = 0
     assigned_nonzero_dx = 0
+    maximum_candidate_count = 0
 
     def _ensure_term(key: tuple[int, int, int]) -> np.ndarray:
         out = accum.get(key)
@@ -1120,6 +1146,87 @@ def _unwrap_transport_n1_minimum_image(
             out = np.zeros((ndof, ndof), dtype=np.complex128)
             accum[key] = out
         return out
+
+    def _bounded_candidate_shifts(
+        ri: np.ndarray,
+        rj: np.ndarray,
+        original_shift: tuple[int, int, int],
+    ) -> list[tuple[tuple[int, int, int], float]]:
+        # Only collapsed components are variables. Contributions from every
+        # noncollapsed integer translation remain part of the fixed Cartesian
+        # displacement.
+        fixed_shift = np.asarray(original_shift, dtype=float)
+        fixed_shift[collapsed_indices] = 0.0
+        fixed_cart = ((rj - ri) + fixed_shift) @ lv
+
+        # Let B contain the collapsed lattice rows and p be fixed_cart. The
+        # projection p_parallel = c B has c = p B^T (B B^T)^-1. For any
+        # candidate inside a Cartesian radius R,
+        #
+        #   |c_i + n_i| <= sqrt(R^2 - |p_perp|^2) ||B_dual[:, i]||.
+        #
+        # A rounded-coordinate lattice image supplies a finite incumbent R.
+        # Since the optimum is no farther away, these coordinate intervals
+        # contain every optimum and every image tied within tie_tolerance.
+        projection_coordinates = fixed_cart @ dual_basis
+        perpendicular_cart = (
+            fixed_cart - projection_coordinates @ collapsed_basis
+        )
+        incumbent_coordinates = tuple(
+            int(round(-float(value))) for value in projection_coordinates
+        )
+        incumbent_cart = fixed_cart + (
+            np.asarray(incumbent_coordinates, dtype=float) @ collapsed_basis
+        )
+        incumbent_distance = float(np.linalg.norm(incumbent_cart))
+        distance_bound = incumbent_distance + tolerance
+        perpendicular_sq = float(perpendicular_cart @ perpendicular_cart)
+        parallel_bound = np.sqrt(
+            max(0.0, distance_bound * distance_bound - perpendicular_sq)
+        )
+        coordinate_extents = parallel_bound * dual_column_norms
+
+        # floor/ceil make these a conservative floating-point superset of the
+        # exact ceil/floor integer bounds. Explicitly retain the incumbent too.
+        lower = tuple(
+            min(
+                int(np.floor(-center - extent)),
+                incumbent,
+            )
+            for center, extent, incumbent in zip(
+                projection_coordinates,
+                coordinate_extents,
+                incumbent_coordinates,
+            )
+        )
+        upper = tuple(
+            max(
+                int(np.ceil(-center + extent)),
+                incumbent,
+            )
+            for center, extent, incumbent in zip(
+                projection_coordinates,
+                coordinate_extents,
+                incumbent_coordinates,
+            )
+        )
+
+        candidates: list[tuple[tuple[int, int, int], float]] = []
+        ranges = tuple(range(lo, hi + 1) for lo, hi in zip(lower, upper))
+        for collapsed_shift in product(*ranges):
+            shift = list(original_shift)
+            for axis, value in zip(collapsed_axes, collapsed_shift):
+                shift[axis] = int(value)
+            dcart = fixed_cart + (
+                np.asarray(collapsed_shift, dtype=float) @ collapsed_basis
+            )
+            candidates.append(
+                (
+                    (int(shift[0]), int(shift[1]), int(shift[2])),
+                    float(np.linalg.norm(dcart)),
+                )
+            )
+        return candidates
 
     for term in ifc.terms:
         dx0, dy, dz = int(term.dx), int(term.dy), int(term.dz)
@@ -1136,19 +1243,18 @@ def _unwrap_transport_n1_minimum_image(
                     continue
                 rj = frac[j, :]
 
-                candidate_shifts = []
-                for sx in ((-1, 0, 1) if 0 in collapsed_axes else (dx0,)):
-                    for sy in ((-1, 0, 1) if 1 in collapsed_axes else (dy,)):
-                        for sz in ((-1, 0, 1) if 2 in collapsed_axes else (dz,)):
-                            dfrac = (rj - ri) + np.asarray([float(sx), float(sy), float(sz)], dtype=float)
-                            dcart = dfrac @ lv
-                            candidate_shifts.append(((int(sx), int(sy), int(sz)), float(np.linalg.norm(dcart))))
+                candidate_shifts = _bounded_candidate_shifts(
+                    ri, rj, (dx0, dy, dz)
+                )
+                maximum_candidate_count = max(
+                    maximum_candidate_count, len(candidate_shifts)
+                )
 
                 dmin = min(d for _, d in candidate_shifts)
                 candidates = sorted(
                     shift
                     for shift, d in candidate_shifts
-                    if abs(d - dmin) <= tie_tolerance
+                    if abs(d - dmin) <= tolerance
                 )
                 if len(candidates) > 1:
                     ambiguous += 1
@@ -1178,6 +1284,9 @@ def _unwrap_transport_n1_minimum_image(
         "pairs_assigned_nonzero_shift": int(reassigned_nonzero),
         "pairs_assigned_nonzero_dx": int(assigned_nonzero_dx),
         "degenerate_images_weight_split": True,
+        "minimum_image_search": exact_search,
+        "maximum_candidate_count": int(maximum_candidate_count),
+        "collapsed_subspace_condition_number": subspace_condition,
     }
     info["applied"] = True
     info["reason"] = "applied"
@@ -1185,6 +1294,9 @@ def _unwrap_transport_n1_minimum_image(
     info["pairs_assigned_nonzero_shift"] = int(reassigned_nonzero)
     info["pairs_assigned_nonzero_dx"] = int(assigned_nonzero_dx)
     info["degenerate_images_weight_split"] = True
+    info["minimum_image_search"] = exact_search
+    info["maximum_candidate_count"] = int(maximum_candidate_count)
+    info["collapsed_subspace_condition_number"] = subspace_condition
     return IFCData(
         masses=np.asarray(ifc.masses, dtype=float),
         dof_per_atom=int(ifc.dof_per_atom),
