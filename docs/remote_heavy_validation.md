@@ -98,12 +98,20 @@ python scripts/remote_heavy_cli.py launch "$commit"
 
 Deployment verifies checksums remotely, checks out exactly the detached clean
 commit in `~/negfpy-validation/<commit>/worktree`, verifies explicit-lock SHA
-`b2ce515e488757f61781a559985d401575aec9dd73507c0c3b71b68746022839`, and
+`aca1a3f7eb7675adb5982d571005cc5ae65ed442b4972ad835f2d4fdf6fa33c1`, and
 creates `~/negfpy-validation/<commit>/environment` from that lock. The worker
 passes the same hash as `NEGFPY_VALIDATION_ENV_SHA256`; no shared scientific
 environment is accepted. Deploy-time and attempt-time identity records must
 agree on the full commit, Git tree, package-source SHA256, lock SHA256,
 interpreter, installed distributions, platform, and thread limits.
+
+The explicit Linux lock pins Python 3.10.19, Open MPI 5.0.10, mpi4py 4.1.1,
+NumPy 2.2.6, SciPy 1.15.2, h5py 3.16.0, threadpoolctl 3.6.0, and pytest 9.0.3.
+Every MPI launch must use the deployed environment's own
+`environment/bin/mpiexec`; a system launcher or launcher from another conda
+environment is forbidden. Deployment records the mpi4py vendor/library
+identity, launcher version, resolved launcher target, and launcher SHA256, and
+attempt-time provenance must match it exactly.
 
 `launch` creates `negf-toy-<12-character-commit>` in detached `tmux`. It fixes
 OpenMP, OpenBLAS, MKL, BLIS, NumExpr, and vecLib thread counts to one and runs

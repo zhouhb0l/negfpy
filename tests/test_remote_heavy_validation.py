@@ -198,6 +198,18 @@ def test_explicit_lock_accepts_standard_comment_header(tmp_path: pathlib.Path) -
     assert lock_validation.validate_explicit_lock(
         lock, expected_sha256=digest
     ) == digest
+
+
+def test_committed_lock_pins_one_openmpi_and_matching_mpi4py() -> None:
+    lock = pathlib.Path(__file__).parents[1] / explicit.DEFAULT_LOCK
+    text = lock.read_text(encoding="utf-8")
+    assert core._sha256(lock) == core.EXPECTED_ENV_LOCK_SHA256
+    assert text.count("/openmpi-5.0.10-") == 1
+    assert text.count("/mpi4py-4.1.1-") == 1
+    assert "/mpi-1.0.1-openmpi." in text
+    assert "mpich" not in text.lower()
+
+
 def test_remote_machine_probe_is_valid_and_complete_python() -> None:
     compile(explicit._MACHINE_PROGRAM, "<remote-machine-probe>", "exec")
     for field in (
@@ -300,6 +312,15 @@ def _worker_identity(lock_sha: str) -> dict[str, object]:
         "python_executable": "/validation/environment/bin/python",
         "python_version": "3.10.0",
         "distributions": {"numpy": "1.0", "negfpy": "0.1"},
+        "mpi": {
+            "vendor": "Open MPI",
+            "version": [5, 0, 10],
+            "library_version": "Open MPI v5.0.10",
+            "launcher": "/validation/environment/bin/mpiexec",
+            "launcher_target": "/validation/environment/bin/mpirun",
+            "launcher_sha256": "c" * 64,
+            "launcher_version": "mpiexec (Open MPI) 5.0.10",
+        },
         "package_source": "/validation/worktree/src/negfpy/__init__.py",
         "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
     }
@@ -652,6 +673,14 @@ def test_worker_identity_drift_is_terminal_and_releases_lock(
     ).read_text(encoding="utf-8")
     verified = core.verify_sha256sums(artifacts)
     assert "attempts/attempt-001/status.json" in verified
+
+
+def test_mpi_identity_is_an_immutable_deployment_field() -> None:
+    baseline = _worker_identity("d" * 64)
+    changed = json.loads(json.dumps(baseline))
+    changed["mpi"]["version"] = [5, 0, 9]
+    with pytest.raises(ValueError, match="mpi"):
+        identity.compare_environment_identity(baseline, changed)
 
 
 def test_worker_rejects_hash_valid_but_uncertified_current_report(

@@ -249,6 +249,7 @@ def _record_remote_environment(
             "python_executable": sys.executable,
             "python_version": platform.python_version(),
             "distributions": versions,
+            "mpi": core.mpi_environment_identity(),
             "deployment_disk_total_bytes": disk.total,
             "deployment_disk_free_bytes": disk.free,
             "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),

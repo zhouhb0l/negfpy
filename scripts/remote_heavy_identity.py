@@ -18,6 +18,7 @@ IMMUTABLE_FIELDS = (
     "python_executable",
     "python_version",
     "distributions",
+    "mpi",
     "package_source",
     "thread_limits",
 )

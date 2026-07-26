@@ -46,7 +46,7 @@ EXPECTED_ED25519_FINGERPRINT = (
     "SHA256:sJide2AQhTe8oH2XWtayraDdUsde/LV2HOfUeMeWd70"
 )
 EXPECTED_ENV_LOCK_SHA256 = (
-    "b2ce515e488757f61781a559985d401575aec9dd73507c0c3b71b68746022839"
+    "aca1a3f7eb7675adb5982d571005cc5ae65ed442b4972ad835f2d4fdf6fa33c1"
 )
 REMOTE_ROOT_RELATIVE = "negfpy-validation"
 REMOTE_TOOLS_BIN = "/home/hangbo/micromamba/envs/negf-tools/bin"
@@ -55,12 +55,15 @@ REMOTE_GIT = f"{REMOTE_TOOLS_BIN}/git"
 REMOTE_TMUX = f"{REMOTE_TOOLS_BIN}/tmux"
 REMOTE_RSYNC = f"{REMOTE_TOOLS_BIN}/rsync"
 REQUIREMENTS_DISTRIBUTIONS = (
+    "mpi4py",
     "numpy",
     "scipy",
     "threadpoolctl",
     "h5py",
     "pytest",
 )
+EXPECTED_MPI_VENDOR = "Open MPI"
+EXPECTED_MPI_VERSION = (5, 0, 10)
 THREAD_LIMIT_ENV = {
     "BLIS_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
@@ -426,6 +429,74 @@ def _environment_lock() -> tuple[str, dict[str, Any]]:
         "thread_limits": dict(sorted(THREAD_LIMIT_ENV.items())),
     }
     return text, manifest
+
+
+def mpi_environment_identity() -> dict[str, Any]:
+    """Return and validate the lock environment's MPI implementation.
+
+    The launcher and the Python binding must come from the same environment.
+    This rejects combining an unrelated launcher with an ABI-incompatible
+    ``mpi4py`` build.
+    """
+
+    try:
+        from mpi4py import MPI
+    except ImportError as error:
+        raise RemoteValidationError(
+            "the remote validation environment requires mpi4py"
+        ) from error
+
+    vendor, version = MPI.get_vendor()
+    normalized_version = tuple(int(item) for item in version)
+    if vendor != EXPECTED_MPI_VENDOR or normalized_version != EXPECTED_MPI_VERSION:
+        raise RemoteValidationError(
+            "mpi4py MPI vendor mismatch: "
+            f"{vendor} {normalized_version} != "
+            f"{EXPECTED_MPI_VENDOR} {EXPECTED_MPI_VERSION}"
+        )
+
+    environment_bin = pathlib.Path(sys.executable).resolve().parent
+    launcher = environment_bin / "mpiexec"
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise RemoteValidationError(
+            f"environment-local mpiexec is missing or not executable: {launcher}"
+        )
+    resolved_launcher = launcher.resolve(strict=True)
+    if resolved_launcher.parent != environment_bin:
+        raise RemoteValidationError(
+            "environment-local mpiexec resolves outside the environment bin"
+        )
+    completed = subprocess.run(
+        (str(launcher), "--version"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    launcher_version = (completed.stdout or completed.stderr).strip()
+    expected_text = ".".join(str(item) for item in EXPECTED_MPI_VERSION)
+    if (
+        completed.returncode
+        or "Open MPI" not in launcher_version
+        or expected_text not in launcher_version
+    ):
+        raise RemoteValidationError(
+            "environment-local mpiexec does not report the pinned Open MPI "
+            f"{expected_text}: {launcher_version!r}"
+        )
+    library_version = MPI.Get_library_version().rstrip("\x00\n")
+    if "Open MPI" not in library_version or expected_text not in library_version:
+        raise RemoteValidationError(
+            "mpi4py library identity does not match the pinned launcher"
+        )
+    return {
+        "vendor": vendor,
+        "version": list(normalized_version),
+        "library_version": library_version,
+        "launcher": str(launcher),
+        "launcher_target": str(resolved_launcher),
+        "launcher_sha256": _sha256(resolved_launcher),
+        "launcher_version": launcher_version,
+    }
 
 
 def _write_sha256sums(
