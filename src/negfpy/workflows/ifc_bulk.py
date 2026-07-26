@@ -230,6 +230,182 @@ def _prepare_kmesh(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _periodic_kmesh_has_duplicates(kpoints: list[tuple[float, ...]]) -> bool:
+    """Return whether a transverse mesh repeats a point modulo ``2 pi``."""
+
+    if len(kpoints) <= 1:
+        return False
+    canonical: list[tuple[float, ...]] = []
+    for kpoint in kpoints:
+        values = np.asarray(kpoint, dtype=float)
+        wrapped = np.mod(values + np.pi, 2.0 * np.pi) - np.pi
+        wrapped[np.isclose(wrapped, np.pi, rtol=0.0, atol=1.0e-12)] = -np.pi
+        canonical.append(tuple(float(v) for v in np.round(wrapped, decimals=12)))
+    return len(set(canonical)) != len(canonical)
+
+
+def _harmonic_release_preflight(
+    cfg: dict[str, Any],
+    *,
+    calculation: str,
+    kmesh: dict[str, Any] | None,
+    results: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Enforce and document the release-safe harmonic transport contract.
+
+    The gate is opt-in through ``run.release_preflight`` so historical and
+    diagnostic configurations remain runnable. Once requested, unsafe
+    controls fail before the numerical solve and incomplete output grids fail
+    before a result can be treated as release evidence.
+    """
+
+    run_cfg = dict(cfg.get("run", {}))
+    solver_cfg = dict(cfg.get("solver", {}))
+    requested = bool(run_cfg.get("release_preflight", False))
+    phase = "results" if results is not None else "controls"
+    failures: list[str] = []
+    pass_reasons: list[str] = []
+    checks: dict[str, bool] = {}
+
+    def record(name: str, passed: bool, *, failure: str, success: str) -> None:
+        checks[name] = bool(passed)
+        if passed:
+            pass_reasons.append(success)
+        else:
+            failures.append(failure)
+
+    record(
+        "requested",
+        requested,
+        failure=(
+            "run.release_preflight is not enabled; this run is not release "
+            "certified"
+        ),
+        success="run.release_preflight is explicitly enabled",
+    )
+
+    supported = calculation in {"transmission", "dos", "fcs"}
+    record(
+        "supported_calculation",
+        supported,
+        failure=(
+            "harmonic release preflight supports only transmission, DOS, and "
+            "FCS calculations"
+        ),
+        success=f"{calculation} has complete-grid release checks",
+    )
+
+    eta_scheme = str(
+        solver_cfg.get("eta_scheme", "adaptive_global")
+    ).lower().replace("-", "_")
+    global_eta = eta_scheme in {"fixed", "adaptive_global"}
+    record(
+        "global_eta",
+        global_eta,
+        failure=(
+            "solver.eta_scheme must be 'fixed' or 'adaptive_global'; per-q "
+            "adaptive eta is not release-safe"
+        ),
+        success="one eta is shared by the complete q grid at each frequency",
+    )
+
+    min_fraction_raw = solver_cfg.get("min_success_fraction", 1.0)
+    try:
+        min_fraction = float(min_fraction_raw)
+    except (TypeError, ValueError):
+        min_fraction = np.nan
+    complete_fraction = bool(np.isfinite(min_fraction) and min_fraction == 1.0)
+    record(
+        "complete_success_fraction",
+        complete_fraction,
+        failure="solver.min_success_fraction must equal 1.0 for release runs",
+        success="all q points are required to succeed",
+    )
+
+    eta_device_raw = solver_cfg.get("eta_device", None)
+    try:
+        eta_device = 0.0 if eta_device_raw is None else float(eta_device_raw)
+    except (TypeError, ValueError):
+        eta_device = np.nan
+    zero_device_eta = bool(np.isfinite(eta_device) and eta_device == 0.0)
+    record(
+        "zero_device_eta",
+        zero_device_eta,
+        failure=(
+            "solver.eta_device must be null or exactly zero; a finite device "
+            "regulator is an unaccounted bath"
+        ),
+        success="the finite device has no unaccounted regulator bath",
+    )
+
+    duplicate_sections: list[str] = []
+    if kmesh is not None:
+        for section in ("low", "high"):
+            mesh = dict(kmesh.get(section, {}))
+            points = list(mesh.get("kpoints", ()))
+            if _periodic_kmesh_has_duplicates(points):
+                duplicate_sections.append(section)
+    unique_q_grid = bool(kmesh is not None and not duplicate_sections)
+    record(
+        "unique_periodic_q_grid",
+        unique_q_grid,
+        failure=(
+            "transverse q grid is unavailable or contains periodic duplicate "
+            "points; legacy_endpoint meshes are not release-safe"
+        ),
+        success="transverse q meshes contain each periodic point exactly once",
+    )
+
+    if results is not None:
+        summary = dict(results.get("summary", {}))
+        record(
+            "complete_frequency_grid",
+            summary.get("complete_frequency_grid") is True,
+            failure="result has an incomplete frequency grid",
+            success="every requested frequency has a finite result",
+        )
+        complete_q = bool(
+            summary.get("complete_q_grid") is True
+            and summary.get("complete_kmesh") is True
+        )
+        record(
+            "complete_q_grid",
+            complete_q,
+            failure="result omits one or more requested transverse q points",
+            success="every requested transverse q point is represented",
+        )
+        record(
+            "solver_release_safe",
+            summary.get("release_safe") is True,
+            failure="solver summary does not mark the result release-safe",
+            success="solver completeness summary is release-safe",
+        )
+
+    passed = bool(requested and not failures)
+    report = {
+        "schema": "negfpy.harmonic_release_preflight",
+        "schema_version": 1,
+        "requested": requested,
+        "enforced": requested,
+        "phase": phase,
+        "calculation": calculation,
+        "passed": passed,
+        "release_certified": bool(passed and phase == "results"),
+        "checks": checks,
+        "pass_reasons": pass_reasons,
+        "failure_reasons": failures,
+        "controls": {
+            "eta_scheme": eta_scheme,
+            "min_success_fraction": min_fraction_raw,
+            "eta_device": eta_device_raw,
+            "duplicate_qmesh_sections": duplicate_sections,
+        },
+    }
+    if requested and failures:
+        raise ValueError("Harmonic release preflight failed: " + "; ".join(failures))
+    return report
+
+
 def _default_kgrid(nk: int, centered: bool) -> np.ndarray:
     if nk <= 0:
         raise ValueError("nk must be positive.")
@@ -1207,6 +1383,14 @@ def _lead_surface_dos_kavg_adaptive_global_eta(
                 "n_success": int(n_success),
                 "n_failed": int(n_total - n_success),
                 "success_fraction": success_fraction,
+                "complete_kmesh": bool(n_success == n_total),
+                "complete_q_grid": bool(n_success == n_total),
+                "release_safe": bool(n_success == n_total),
+                "release_unsafe_reason": (
+                    None
+                    if n_success == n_total
+                    else "Brillouin-zone average omits failed k-points"
+                ),
                 "eta_selected": float(eta),
                 "eta_histogram": {float(e): (int(n_success) if float(e) == float(eta) else 0) for e in eta_values},
             }
@@ -1266,8 +1450,17 @@ def _run_transmission_omega_task(task: dict[str, Any]) -> dict[str, Any]:
     eta_record = {
         "omega_qe": w,
         "omega_cm1": w_cm1,
+        "n_total_kpoints": int(info.get("n_total", len(task["kpoints"]))),
+        "n_success_kpoints": int(info.get("n_success", 0)),
         "n_failed_kpoints": int(info.get("n_failed", 0)),
         "success_fraction": float(info.get("success_fraction", 0.0)),
+        "complete_kmesh": bool(info.get("complete_kmesh", False)),
+        "complete_q_grid": bool(info.get("complete_q_grid", False)),
+        "release_safe": bool(info.get("release_safe", False)),
+        "release_unsafe_reason": info.get(
+            "release_unsafe_reason",
+            None,
+        ),
         "eta_histogram": hist,
         "eta_selected": info.get("eta_selected", None),
         "max_eta_used": None if not np.isfinite(max_eta_used) else float(max_eta_used),
@@ -1334,12 +1527,12 @@ def _run_transmission(
 ) -> dict[str, Any]:
     scfg = dict(cfg.get("solver", {}))
     sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
-    eta_scheme = str(scfg.get("eta_scheme", "adaptive")).lower().replace("-", "_")
+    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
     eta_fixed = float(scfg.get("eta_fixed", 1e-4))
     eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
     eta_device_raw = scfg.get("eta_device", None)
     eta_device = None if eta_device_raw is None else float(eta_device_raw)
-    min_success_fraction = float(scfg.get("min_success_fraction", 0.7))
+    min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
     nonnegative_tolerance = float(scfg.get("nonnegative_tolerance", 1e-8))
     max_channel_factor_raw = scfg.get("max_channel_factor", 1.5)
     max_channel_factor = None if max_channel_factor_raw is None else float(max_channel_factor_raw)
@@ -1530,6 +1723,21 @@ def _run_transmission(
     vals = np.where(vals < 0.0, np.maximum(vals, -1e-12), vals)
     vals = np.where(np.isfinite(vals), np.clip(vals, 0.0, None), np.nan)
     max_ratio = max((r["max_eta_over_omega"] for r in eta_records if r["max_eta_over_omega"] is not None), default=None)
+    positive_omega_count = int(np.count_nonzero(omegas > 0.0))
+    complete_frequency_grid = bool(np.all(np.isfinite(vals)) and not omega_failures)
+    complete_kmesh = bool(
+        len(eta_records) == positive_omega_count
+        and all(record["complete_kmesh"] for record in eta_records)
+    )
+    complete_q_grid = bool(
+        len(eta_records) == positive_omega_count
+        and all(record["complete_q_grid"] for record in eta_records)
+    )
+    release_safe = bool(
+        complete_frequency_grid
+        and complete_q_grid
+        and all(record["release_safe"] for record in eta_records)
+    )
     return {
         "values": vals,
         "eta_records": eta_records,
@@ -1541,6 +1749,7 @@ def _run_transmission(
             "eta_fixed": eta_fixed,
             "eta_values_base": eta_values_base,
             "eta_device": eta_device,
+            "min_success_fraction": min_success_fraction,
             "parallel": {
                 "enabled": bool(parallel_cfg["enabled"]),
                 "backend": str(parallel_cfg["backend"]),
@@ -1549,6 +1758,10 @@ def _run_transmission(
             },
             "max_eta_over_omega": max_ratio,
             "n_omega_failures": len(omega_failures),
+            "complete_frequency_grid": complete_frequency_grid,
+            "complete_kmesh": complete_kmesh,
+            "complete_q_grid": complete_q_grid,
+            "release_safe": release_safe,
         },
     }
 
@@ -1563,10 +1776,10 @@ def _run_dos(
     dcfg = dict(cfg.get("dos", {}))
 
     sgf_method = str(scfg.get("surface_gf_method", "generalized_eigen_svd"))
-    eta_scheme = str(scfg.get("eta_scheme", "adaptive")).lower().replace("-", "_")
+    eta_scheme = str(scfg.get("eta_scheme", "adaptive_global")).lower().replace("-", "_")
     eta_fixed = float(scfg.get("eta_fixed", 1e-4))
     eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
-    min_success_fraction = float(scfg.get("min_success_fraction", 0.7))
+    min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
     max_eta_over_omega_raw = scfg.get("max_eta_over_omega", None)
     max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
     eta_ratio_cm1_min_raw = scfg.get("eta_ratio_cm1_min", None)
@@ -1619,6 +1832,9 @@ def _run_dos(
                     "n_success": int(len(kpts)),
                     "n_failed": 0,
                     "success_fraction": 1.0,
+                    "complete_kmesh": True,
+                    "complete_q_grid": True,
+                    "release_safe": True,
                     "eta_selected": float(eta_fixed),
                     "eta_histogram": {float(eta_fixed): int(len(kpts))},
                 }
@@ -1666,8 +1882,17 @@ def _run_dos(
             {
                 "omega_qe": float(w),
                 "omega_cm1": w_cm1,
+                "n_total_kpoints": int(info.get("n_total", len(kpts))),
+                "n_success_kpoints": int(info.get("n_success", 0)),
                 "n_failed_kpoints": int(info.get("n_failed", 0)),
                 "success_fraction": float(info.get("success_fraction", 0.0)),
+                "complete_kmesh": bool(info.get("complete_kmesh", False)),
+                "complete_q_grid": bool(info.get("complete_q_grid", False)),
+                "release_safe": bool(info.get("release_safe", False)),
+                "release_unsafe_reason": info.get(
+                    "release_unsafe_reason",
+                    None,
+                ),
                 "eta_histogram": hist,
                 "eta_selected": info.get("eta_selected", None),
                 "max_eta_used": None if not np.isfinite(max_eta_used) else float(max_eta_used),
@@ -1690,6 +1915,21 @@ def _run_dos(
     if np.all(~np.isfinite(vals)):
         raise RuntimeError("DOS calculation failed for all omega points.")
     max_ratio = max((r["max_eta_over_omega"] for r in eta_records if r["max_eta_over_omega"] is not None), default=None)
+    nonnegative_omega_count = int(np.count_nonzero(omegas >= 0.0))
+    complete_frequency_grid = bool(np.all(np.isfinite(vals)) and not omega_failures)
+    complete_kmesh = bool(
+        len(eta_records) == nonnegative_omega_count
+        and all(record["complete_kmesh"] for record in eta_records)
+    )
+    complete_q_grid = bool(
+        len(eta_records) == nonnegative_omega_count
+        and all(record["complete_q_grid"] for record in eta_records)
+    )
+    release_safe = bool(
+        complete_frequency_grid
+        and complete_q_grid
+        and all(record["release_safe"] for record in eta_records)
+    )
     return {
         "values": vals,
         "eta_records": eta_records,
@@ -1699,9 +1939,14 @@ def _run_dos(
             "eta_scheme": eta_scheme,
             "eta_fixed": eta_fixed,
             "eta_values_base": eta_values_base,
+            "min_success_fraction": min_success_fraction,
             "normalize_per_mode": normalize_per_mode,
             "max_eta_over_omega": max_ratio,
             "n_omega_failures": len(omega_failures),
+            "complete_frequency_grid": complete_frequency_grid,
+            "complete_kmesh": complete_kmesh,
+            "complete_q_grid": complete_q_grid,
+            "release_safe": release_safe,
         },
     }
 
@@ -1969,7 +2214,7 @@ def _compute_fcs_k_moments(
     eta_values_base = tuple(float(v) for v in scfg.get("eta_values", DEFAULT_ETA_VALUES))
     eta_device_raw = scfg.get("eta_device", None)
     eta_device = None if eta_device_raw is None else float(eta_device_raw)
-    min_success_fraction = float(scfg.get("min_success_fraction", 0.7))
+    min_success_fraction = float(scfg.get("min_success_fraction", 1.0))
     nonnegative_tolerance = float(scfg.get("nonnegative_tolerance", 1e-8))
     max_eta_over_omega_raw = scfg.get("max_eta_over_omega", None)
     max_eta_over_omega = None if max_eta_over_omega_raw is None else float(max_eta_over_omega_raw)
@@ -1984,6 +2229,7 @@ def _compute_fcs_k_moments(
     t2_mean = np.full((n_omega,), np.nan, dtype=float)
     eta_selected = np.full((n_omega,), np.nan, dtype=float)
     n_k_success = np.zeros((n_omega,), dtype=int)
+    n_k_total = np.zeros((n_omega,), dtype=int)
     omega_failures: list[dict[str, Any]] = []
 
     for i, w in enumerate(omegas):
@@ -1993,6 +2239,7 @@ def _compute_fcs_k_moments(
             continue
         w_cm1 = float(np.asarray(qe_omega_to_cm1(w), dtype=float))
         kpts = kmesh["low"]["kpoints"] if w_cm1 <= float(kmesh["low_cm1"]) else kmesh["high"]["kpoints"]
+        n_k_total[i] = int(len(kpts))
         eta_values = _resolve_eta_values_for_omega(
             float(w),
             w_cm1,
@@ -2045,6 +2292,7 @@ def _compute_fcs_k_moments(
         "t2_mean": t2_mean,
         "eta_selected": eta_selected,
         "n_k_success": n_k_success,
+        "n_k_total": n_k_total,
         "omega_failures": omega_failures,
     }
 
@@ -2091,6 +2339,20 @@ def _run_fcs(
 
     omega_rad_s = np.asarray(qe_omega_to_rad_s(omegas), dtype=float)
     valid = np.isfinite(moments["t_mean"]) & np.isfinite(moments["t2_mean"])
+    positive = omegas > 0.0
+    complete_kmesh = bool(
+        np.all(
+            np.asarray(moments["n_k_success"])[positive]
+            == np.asarray(moments["n_k_total"])[positive]
+        )
+    )
+    complete_q_grid = complete_kmesh
+    complete_frequency_grid = bool(np.all(valid))
+    release_safe = bool(
+        complete_q_grid
+        and complete_frequency_grid
+        and not moments["omega_failures"]
+    )
     if int(np.sum(valid)) < 2:
         raise RuntimeError("FCS failed: insufficient converged omega points.")
     om = omega_rad_s[valid]
@@ -2188,6 +2450,7 @@ def _run_fcs(
         "t2_mean": np.asarray(moments["t2_mean"], dtype=float),
         "eta_selected": np.asarray(moments["eta_selected"], dtype=float),
         "n_k_success": np.asarray(moments["n_k_success"], dtype=int),
+        "n_k_total": np.asarray(moments["n_k_total"], dtype=int),
         "omega_failures": list(moments["omega_failures"]),
         "n_omega_converged": int(np.sum(valid)),
         "n_omega_total": int(len(omegas)),
@@ -2197,6 +2460,10 @@ def _run_fcs(
             "measurement_time_s": float(tau_s),
             "n_omega_converged": int(np.sum(valid)),
             "n_omega_total": int(len(omegas)),
+            "complete_frequency_grid": complete_frequency_grid,
+            "complete_kmesh": complete_kmesh,
+            "complete_q_grid": complete_q_grid,
+            "release_safe": release_safe,
         },
     }
 
@@ -2217,6 +2484,7 @@ def _default_template() -> dict[str, Any]:
             "write_plot_per_area": True,
             "write_data": True,
             "write_report": True,
+            "release_preflight": True,
             "x_unit": "cm-1",
             "progress_omega": True,
             "progress_every": 1,
@@ -2266,11 +2534,11 @@ def _default_template() -> dict[str, Any]:
         },
         "solver": {
             "surface_gf_method": "generalized_eigen_svd",
-            "eta_scheme": "adaptive",
+            "eta_scheme": "adaptive_global",
             "eta_fixed": 1e-4,
             "eta_values": list(DEFAULT_ETA_VALUES),
             "eta_device": None,
-            "min_success_fraction": 0.7,
+            "min_success_fraction": 1.0,
             "max_channel_factor": 1.5,
             "nonnegative_tolerance": 1e-8,
             "collect_rejected": False,
@@ -2368,6 +2636,12 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         raise ValueError("run.x_unit must be one of: cm-1, thz, qe.")
 
     if calc_type == "thermal_conductance":
+        _harmonic_release_preflight(
+            cfg,
+            calculation=calc_type,
+            kmesh=None,
+            results=None,
+        )
         t0 = time.perf_counter()
         started = _utc_now_iso()
         cfg_path_abs = cfg_path.resolve()
@@ -2377,6 +2651,12 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         git_is_dirty = _git_dirty(workspace_root)
 
         results = _run_thermal_conductance(cfg, cfg_dir=cfg_dir)
+        release_preflight = _harmonic_release_preflight(
+            cfg,
+            calculation=calc_type,
+            kmesh=None,
+            results=results,
+        )
         temperatures_k = np.asarray(results["temperatures_k"], dtype=float)
         g_lattice = np.asarray(results["conductance_w_per_k"], dtype=float)
         g_area = results.get("conductance_per_area_w_m2_k", None)
@@ -2441,6 +2721,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "outputs": outputs,
             "provenance": {
                 "config_sha256": cfg_sha256,
+                "release_preflight": release_preflight,
                 "git_head": git_head,
                 "git_dirty": git_is_dirty,
                 "hostname": socket.gethostname(),
@@ -2470,6 +2751,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
                     "run_dir": str(output_dir.resolve()),
                     "config_path": str(cfg_path_abs),
                     "config_sha256": cfg_sha256,
+                    "release_preflight": release_preflight,
                     "git_head": git_head,
                     "git_dirty": git_is_dirty,
                 },
@@ -2555,6 +2837,12 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
     device = material_kspace_device(n_layers=n_layers, params=params)
 
     kmesh_info = _prepare_kmesh(cfg)
+    _harmonic_release_preflight(
+        cfg,
+        calculation=calc_type,
+        kmesh=kmesh_info,
+        results=None,
+    )
     results: dict[str, Any]
     omega_info: dict[str, Any] | None = None
     omegas: np.ndarray | None = None
@@ -2604,6 +2892,13 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             results = _run_dos(cfg, lead=lead_right, omegas=omegas, kmesh=kmesh_info)
     else:
         results = _run_dispersion(cfg, lead=lead_right)
+
+    release_preflight = _harmonic_release_preflight(
+        cfg,
+        calculation=calc_type,
+        kmesh=kmesh_info,
+        results=results,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if write_input_snapshot:
@@ -2704,6 +2999,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
                 "eta_records": results.get("eta_records", []),
                 "omega_failures": results.get("omega_failures", []),
                 "n_rejected_total": results.get("n_rejected_total", 0),
+                "summary": results.get("summary", {}),
             },
         )
         outputs["eta_diagnostics"] = str(eta_diag_path)
@@ -2753,6 +3049,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             t2_mean=np.asarray(results.get("t2_mean", []), dtype=float),
             eta_selected=np.asarray(results.get("eta_selected", []), dtype=float),
             n_k_success=np.asarray(results.get("n_k_success", []), dtype=int),
+            n_k_total=np.asarray(results.get("n_k_total", []), dtype=int),
         )
         outputs["moments"] = str(moments_path)
 
@@ -2766,6 +3063,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
                 "measurement_time_s": results.get("measurement_time_s"),
                 "n_omega_converged": results.get("n_omega_converged"),
                 "n_omega_total": results.get("n_omega_total"),
+                "summary": results.get("summary", {}),
                 "omega_failures": results.get("omega_failures", []),
             },
         )
@@ -2854,6 +3152,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
         "solver_summary": results.get("summary", {}),
         "provenance": {
             "config_sha256": cfg_sha256,
+            "release_preflight": release_preflight,
             "workspace": str(workspace_root.resolve()),
             "git_head": git_head,
             "git_dirty": git_is_dirty,
@@ -2884,6 +3183,7 @@ def run_ifc_bulk(config_path: str | Path) -> dict[str, Any]:
             "report": report["outputs"].get("report", None),
             "ifc_path": str(ifc_path),
             "ifc_sha256": ifc_sha256,
+            "release_preflight": release_preflight,
             "git_head": git_head,
             "git_dirty": git_is_dirty,
         }

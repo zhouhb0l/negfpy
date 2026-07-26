@@ -98,7 +98,11 @@ def lead_surface_dos_kavg_adaptive(
     normalize_per_mode: bool = False,
     surface_gf_method: str = "sancho_rubio",
 ) -> tuple[float, dict[str, object]]:
-    """Return adaptive k-averaged lead surface DOS and convergence statistics."""
+    """Return legacy per-k adaptive surface-DOS convergence statistics.
+
+    Different k-points may use different broadenings, so this diagnostic
+    routine is never release-safe even when every k-point succeeds.
+    """
 
     if len(kpoints) == 0:
         raise ValueError("kpoints must contain at least one k-point.")
@@ -154,6 +158,10 @@ def lead_surface_dos_kavg_adaptive(
         "n_failed": int(failed_kpoints),
         "success_fraction": success_fraction,
         "eta_histogram": eta_histogram,
+        "complete_kmesh": bool(n_success == n_total),
+        "complete_q_grid": bool(n_success == n_total),
+        "release_safe": False,
+        "release_unsafe_reason": "eta selected independently at each k-point",
     }
     return float(np.mean(vals)), info
 

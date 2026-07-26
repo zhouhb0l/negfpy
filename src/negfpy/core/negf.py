@@ -436,9 +436,13 @@ def transmission_kavg_adaptive(
     max_channel_factor: float | None = None,
     collect_rejected: bool = False,
 ) -> tuple[float, dict[str, object]]:
-    """Return adaptive k-averaged transmission and convergence statistics.
+    """Return legacy per-k adaptive transmission and convergence statistics.
 
     For each k-point, tries ``eta_values`` in order until transmission converges.
+    Because different k-points may use different broadenings, this routine is
+    retained for diagnostics and backward compatibility but is not a
+    release-safe Brillouin-zone average. Production calculations should use
+    :func:`transmission_kavg_adaptive_global_eta`.
     """
 
     if len(kpoints) == 0:
@@ -556,6 +560,10 @@ def transmission_kavg_adaptive(
         "n_failed": int(failed_kpoints),
         "success_fraction": success_fraction,
         "eta_histogram": eta_histogram,
+        "complete_kmesh": bool(n_success == n_total),
+        "complete_q_grid": bool(n_success == n_total),
+        "release_safe": False,
+        "release_unsafe_reason": "eta selected independently at each k-point",
     }
     if collect_rejected:
         info["n_rejected"] = int(len(rejected))
@@ -571,7 +579,7 @@ def transmission_kavg_adaptive_global_eta(
     kpoints: list[tuple[float, ...]],
     eta_values: tuple[float, ...] = (1e-8, 1e-7, 1e-6, 1e-5),
     eta_device: float | None = None,
-    min_success_fraction: float = 0.0,
+    min_success_fraction: float = 1.0,
     device_to_lead_left: DeviceToLeadLike | None = None,
     device_to_lead_right: DeviceToLeadLike | None = None,
     contact_left_indices: ContactIndices = None,
@@ -587,7 +595,9 @@ def transmission_kavg_adaptive_global_eta(
     Tries eta values in order; for each eta, computes transmissions on all
     k-points and checks quality filters. The first eta meeting the required
     success fraction is accepted, so all accepted k-points for this omega
-    share the same broadening.
+    share the same broadening. The default requires the complete supplied
+    k-mesh; choosing a smaller ``min_success_fraction`` is an explicit
+    non-production diagnostic mode.
     """
 
     if len(kpoints) == 0:
@@ -696,7 +706,14 @@ def transmission_kavg_adaptive_global_eta(
                 "success_fraction": success_fraction,
                 "eta_selected": float(eta),
                 "eta_histogram": {float(e): (int(n_success) if float(e) == float(eta) else 0) for e in eta_values},
+                "complete_kmesh": bool(n_success == n_total),
+                "complete_q_grid": bool(n_success == n_total),
+                "release_safe": bool(n_success == n_total),
             }
+            if n_success != n_total:
+                info["release_unsafe_reason"] = (
+                    "Brillouin-zone average omits failed k-points"
+                )
             if collect_rejected:
                 info["n_rejected"] = int(len(rejected_all))
                 info["rejected"] = rejected_all

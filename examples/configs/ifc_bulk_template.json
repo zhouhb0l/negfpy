@@ -13,6 +13,7 @@
     "write_plot": true,
     "write_data": true,
     "write_report": true,
+    "release_preflight": true,
     "x_unit": "cm-1"
   },
   "ifc": {
@@ -55,7 +56,7 @@
   },
   "solver": {
     "surface_gf_method": "generalized_eigen_svd",
-    "eta_scheme": "adaptive",
+    "eta_scheme": "adaptive_global",
     "eta_fixed": 0.0001,
     "eta_device": null,
     "eta_values": [
@@ -66,7 +67,7 @@
       0.0001,
       0.001
     ],
-    "min_success_fraction": 0.7,
+    "min_success_fraction": 1.0,
     "max_channel_factor": 1.5,
     "nonnegative_tolerance": 1e-08,
     "collect_rejected": false,
