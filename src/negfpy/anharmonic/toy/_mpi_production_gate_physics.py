@@ -241,7 +241,13 @@ class ProductionToyPhysicsExecutor:
     def _preflight(self, task: Any) -> ProductionToyCaseResult:
         kind = task.payload["kind"]
         if kind == "harmonic_preflight":
-            if self.config.certification_eligible:
+            full_physics_profile = bool(
+                self.config.profile == "full_preregistered"
+                and self.config.run_preregistered_refinements
+            )
+            if self.config.certification_eligible or full_physics_profile:
+                # Remote scaling is noncertifying, but must execute the real
+                # harmonic physics. Bounded PR fixtures retain smoke semantics.
                 evidence = _harmonic_same_grid_preflight(
                     self.config,
                     self.environment_sha256,
