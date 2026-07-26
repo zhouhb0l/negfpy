@@ -204,3 +204,87 @@ python scripts/remote_heavy_cli.py fetch "$commit" --dry-run
 
 The full toy gate remains a workstation release operation. GitHub pull-request
 and scheduled workflows retain only bounded tests and smoke calculations.
+
+## Task-level MPI scaling and certification runner
+
+The task scheduler stays above the SCBA solver. A worker rank receives only a
+case identifier, executes that complete case with the unchanged FFT/SCBA
+implementation, and publishes its own atomic HDF5 outcome. Green functions and
+self-energies are never sent through MPI or combined by a floating-point MPI
+reduction.
+
+Before release certification, run the representative rank ladder with the
+exact deployed environment and source identities:
+
+```bash
+environment/bin/python scripts/remote_toy_mpi_runner.py scale \
+  --environment-prefix "$PWD/environment" \
+  --run-directory "$PWD/artifacts/mpi-scaling/scale-001" \
+  --source-revision "$commit" \
+  --source-tree-sha256 "$source_tree_sha256" \
+  --environment-sha256 "$environment_lock_sha256" \
+  --physical-core-count 76 \
+  --socket-count 2
+```
+
+`scale` itself launches fresh, isolated repetitions with 1, 2, 4, 8, and 16
+ranks through `environment/bin/mpiexec`. Each rank is bound to one physical
+core, ranks are distributed across both sockets, and all BLAS/OpenMP thread
+limits are one. No repetition resumes or shares checkpoints with another rank
+count. The outer process measures the complete launcher wall time.
+
+The representative campaign is explicitly noncertifying, but it retains the
+full physical and orchestration topology: two preflights, a hardest direct-zero
+endpoint, the five-point coupling/bias continuation, one Born-start and six independently varied
+nine-DOF outcomes, and the 13 signed-coupling/temperature open-system cases.
+The multidimensional controls are:
+
+```text
+base:       dw=0.0125, cutoff=5, eta_lead=0.025, mixing=0.2
+spacing:    0.025, 0.0125, 0.00625
+cutoff:     5, 6
+eta_lead:   0.05, 0.025, 0.0125
+mixing:     0.2, 0.1
+solver:     FFT convolution/Hilbert, complex128, max_iterations=200
+thresholds: production fixed-point and conservation tolerances unchanged
+```
+
+The open-system base grid is `dw=0.00125`, cutoff 5, and
+`eta_lead=0.0008`. It uses the existing ten-case Cartesian matrix of
+`T=(0,0.7)` and signed `g=(-0.02,-0.01,0,0.01,0.02)`, plus independent
+half-spacing, cutoff-6, and half-eta cases.
+
+Every repetition writes an immutable hashed worker result and an outer
+`rank-NNN-manifest.json`. `scaling-selection.json` is published only after all
+28 outcomes complete for every rank count and every repetition has the same
+canonical `production_toy_physics_sha256`. The selected count is the smallest
+within 5% of the fastest wall time. Toy MPI is enabled only for at least a
+2x end-to-end speedup; otherwise toy certification remains serial/FFT while
+the selected task-MPI count is retained for the silicon target-q workload.
+
+The full certification invocation exposes no grid, eta, mixing, backend, or
+solver-tolerance options. Launch it with the rank count selected above and the
+same environment-local MPI executable. For an eight-rank example on the
+confirmed two-socket workstation:
+
+```bash
+environment/bin/mpiexec \
+  --nooversubscribe --bind-to core \
+  --map-by ppr:4:socket:PE=1 --report-bindings -n 8 \
+  environment/bin/python scripts/remote_toy_mpi_runner.py release \
+  --run-directory "$PWD/artifacts/toy-release/gate-001" \
+  --source-revision "$commit" \
+  --source-tree-sha256 "$source_tree_sha256" \
+  --environment-sha256 "$environment_lock_sha256" \
+  --execution-id gate-001 \
+  --expected-ranks 8
+```
+
+The release directory must be fresh or contain an exact campaign manifest for
+checkpoint resume. A nonempty unrelated directory is rejected. A new
+execution identifier is required for each exact-resume attempt, while the
+scientific task identities and controls remain fixed. Rank zero writes
+`runner-results/<execution-id>.json`, references the strict production report
+and MPI execution manifest by relative path and SHA256, records the canonical
+physics digest, and returns success only when the locked report has
+`release_certified=true`.

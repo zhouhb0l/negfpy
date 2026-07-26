@@ -103,3 +103,32 @@ def test_rank_ladder_truncates_without_oversubscription() -> None:
     assert scaling.required_rank_ladder(6) == (1, 2, 4)
     with pytest.raises(ValueError, match="positive"):
         scaling.required_rank_ladder(0)
+
+
+def test_physics_digest_gate_requires_complete_identical_rank_ladder() -> None:
+    digest = "a" * 64
+    complete = {rank: digest for rank in scaling.RANK_LADDER}
+    assert scaling.require_identical_physics_digests(
+        complete,
+        physical_core_count=76,
+    ) == digest
+
+    changed = dict(complete)
+    changed[8] = "b" * 64
+    with pytest.raises(scaling.MPIScalingError, match="differs"):
+        scaling.require_identical_physics_digests(
+            changed,
+            physical_core_count=76,
+        )
+    with pytest.raises(scaling.MPIScalingError, match="incomplete"):
+        scaling.require_identical_physics_digests(
+            {rank: digest for rank in scaling.RANK_LADDER[:-1]},
+            physical_core_count=76,
+        )
+    invalid = dict(complete)
+    invalid[2] = "not-a-digest"
+    with pytest.raises(scaling.MPIScalingError, match="invalid"):
+        scaling.require_identical_physics_digests(
+            invalid,
+            physical_core_count=76,
+        )

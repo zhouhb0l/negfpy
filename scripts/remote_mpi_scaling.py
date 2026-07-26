@@ -9,11 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import pathlib
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
 RANK_LADDER = (1, 2, 4, 8, 16)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MPIScalingError(RuntimeError):
@@ -204,6 +206,45 @@ def select_rank_count(
     )
 
 
+def require_identical_physics_digests(
+    digests: Mapping[int, str],
+    *,
+    physical_core_count: int,
+) -> str:
+    """Validate the timing-independent physics identity for every rank.
+
+    Rank scaling is meaningful only when each fresh repetition produced the
+    same canonical production-toy physics document. The digest deliberately
+    excludes timing and orchestration metadata; its definition lives beside
+    the production MPI bridge rather than in this policy module.
+    """
+
+    expected = required_rank_ladder(physical_core_count)
+    observed = tuple(sorted(digests))
+    if observed != expected:
+        raise MPIScalingError(
+            "physics-digest rank ladder is incomplete or duplicated: "
+            f"{observed} != {expected}"
+        )
+    invalid = [
+        rank
+        for rank in expected
+        if not isinstance(digests[rank], str)
+        or _SHA256.fullmatch(digests[rank]) is None
+    ]
+    if invalid:
+        raise MPIScalingError(
+            "rank measurements have invalid physics SHA256 values: "
+            + ", ".join(str(rank) for rank in invalid)
+        )
+    unique = {digests[rank] for rank in expected}
+    if len(unique) != 1:
+        raise MPIScalingError(
+            "production_toy_physics_sha256 differs across rank repetitions"
+        )
+    return next(iter(unique))
+
+
 __all__ = [
     "MPIScalingError",
     "RANK_LADDER",
@@ -212,5 +253,6 @@ __all__ = [
     "environment_mpi_argv",
     "openmpi_binding_arguments",
     "required_rank_ladder",
+    "require_identical_physics_digests",
     "select_rank_count",
 ]
