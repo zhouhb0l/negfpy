@@ -314,6 +314,7 @@ def _code_provenance(
         and bool(installed)
         and installed != "unknown"
         and consistent is True
+        and metadata.get("git_dirty") is False
     )
     return (
         {

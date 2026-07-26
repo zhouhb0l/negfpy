@@ -21,6 +21,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+negfpy = ["_build_provenance.json"]
+
 [tool.pytest.ini_options]
 markers = [
   "nightly: bounded validation cases that are too costly for pull-request CI",

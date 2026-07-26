@@ -524,7 +524,7 @@ def _code_provenance(metadata: Mapping[str, Any]) -> tuple[dict[str, Any], bool]
     revision = metadata.get("git_revision")
     revision_valid = bool(
         isinstance(revision, str)
-        and 7 <= len(revision) <= 64
+        and len(revision) in {40, 64}
         and all(character in "0123456789abcdef" for character in revision)
     )
     raw_blas = metadata.get("blas_runtime")

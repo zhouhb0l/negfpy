@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import negfpy.anharmonic.toy.release_report as release_report
+
 from negfpy.anharmonic.toy.cubic_chain import pinned_scalar_chain
 from negfpy.anharmonic.toy.refinement import (
     RefinementSpec,
@@ -391,3 +393,35 @@ def test_one_candidate_cannot_cover_all_independent_controls() -> None:
         "spacing": False,
     }
     assert not report.refinement_passed
+
+
+def test_dense_report_code_provenance_rejects_dirty_build(
+    coarse_mixing_study: RefinementStudy,
+) -> None:
+    observation = coarse_mixing_study.reference
+    metadata = dict(observation.result.metadata)
+    metadata.update(
+        {
+            "declared_package_version": "0.1.0rc1",
+            "installed_package_version": "0.1.0rc1",
+            "package_version_consistent": True,
+            "source_tree_sha256": "b" * 64,
+            "git_revision": "a" * 40,
+            "git_dirty": False,
+        }
+    )
+    clean = replace(
+        observation,
+        result=replace(observation.result, metadata=metadata),
+    )
+    _, clean_complete = release_report._code_provenance(clean)
+    assert clean_complete
+
+    metadata["git_dirty"] = True
+    dirty = replace(
+        observation,
+        result=replace(observation.result, metadata=metadata),
+    )
+    dirty_record, dirty_complete = release_report._code_provenance(dirty)
+    assert dirty_record["git_dirty"] is True
+    assert not dirty_complete
