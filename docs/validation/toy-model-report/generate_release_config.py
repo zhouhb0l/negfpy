@@ -395,6 +395,7 @@ def _verify_checksum_tree(
     name: str,
     *,
     fetched: bool = False,
+    allowed_nested_manifests: frozenset[str] = frozenset(),
 ) -> ChecksumTree:
     expected_anchor = _sha(expected_raw_sha256, f"{name} caller anchor")
     resolved = _absolute_no_symlinks(root, name, directory=True)
@@ -422,7 +423,11 @@ def _verify_checksum_tree(
         digest, relative_text = match.groups()
         pure = _relative(relative_text, f"{name} checksum path")
         _require(
-            pure.name != "SHA256SUMS" and relative_text not in entries,
+            (
+                pure.name != "SHA256SUMS"
+                or relative_text in allowed_nested_manifests
+            )
+            and relative_text not in entries,
             f"{name} checksum path is forbidden or duplicated: {relative_text}",
         )
         path = _absolute_no_symlinks(
@@ -2641,6 +2646,18 @@ def _validate_publication_chain(
     }
 
 
+def _validate_staging_source_manifest(
+    tree: ChecksumTree,
+    artifact_anchor: str,
+) -> None:
+    _tree_file(
+        tree,
+        "source/SHA256SUMS",
+        "preserved fetched SHA256SUMS",
+        expected_sha256=_sha(artifact_anchor, "fetched artifact SHA256SUMS"),
+    )
+
+
 def _validate_staging(
     tree: ChecksumTree,
     *,
@@ -2658,6 +2675,7 @@ def _validate_staging(
     remote_environment: Mapping[str, Any],
     source_records: Mapping[str, Any],
 ) -> str:
+    _validate_staging_source_manifest(tree, artifact_anchor)
     importer, importer_sha = _load_committed_module(
         IMPORTER_SOURCE, source_records, name="production-importer"
     )
@@ -3347,6 +3365,7 @@ def generate_config(
         target.parent / staging_relative,
         expected_staging_sha256sums_sha256,
         "production staging",
+        allowed_nested_manifests=frozenset({"source/SHA256SUMS"}),
     )
     production_tree = _verify_checksum_tree(
         target.parent / production_relative,
@@ -3451,13 +3470,13 @@ def generate_config(
             "MPILaunchEnvironmentSHA",
             publication_chain["launch_environment_sha256"],
         ),
-        ("ArtifactSHA256SUMSRawSHA", artifact_tree.raw_manifest_sha256),
+        ("ArtifactChecksumManifestSHA", artifact_tree.raw_manifest_sha256),
         ("ArtifactFetchReceiptSHA", str(artifact_tree.local_receipt_sha256)),
-        ("StagingSHA256SUMSRawSHA", staging_tree.raw_manifest_sha256),
+        ("StagingChecksumManifestSHA", staging_tree.raw_manifest_sha256),
         ("StagingImportReceiptSHA", staging_receipt_sha),
-        ("ProductionFiguresSHA256SUMSRawSHA", production_tree.raw_manifest_sha256),
+        ("ProductionFiguresChecksumManifestSHA", production_tree.raw_manifest_sha256),
         ("ProductionFiguresReceiptSHA", production_receipt_sha),
-        ("HistoricalFiguresSHA256SUMSRawSHA", historical_tree.raw_manifest_sha256),
+        ("HistoricalFiguresChecksumManifestSHA", historical_tree.raw_manifest_sha256),
         ("HistoricalFiguresReceiptSHA", historical_receipt_sha),
         ("HistoricalMetricsManifestSHA", historical_tree.entries[HISTORICAL_METRICS]),
         (
@@ -3469,23 +3488,23 @@ def generate_config(
             f"{historical_metrics['wang_harmonic_max_abs_error_nW_per_K']:.6f}",
         ),
         (
-            "HistoricalWangBornErrorAt100K",
+            "HistoricalWangBornErrorAtOneHundredK",
             f"{historical_metrics['wang_born_t2_relative_error_percent_100K']:.2f}",
         ),
         (
-            "HistoricalWangBornErrorAt300K",
+            "HistoricalWangBornErrorAtThreeHundredK",
             f"{historical_metrics['wang_born_t2_relative_error_percent_300K']:.2f}",
         ),
         (
-            "HistoricalWangBornErrorAt500K",
+            "HistoricalWangBornErrorAtFiveHundredK",
             f"{historical_metrics['wang_born_t2_relative_error_percent_500K']:.2f}",
         ),
         (
-            "HistoricalWangMeanFieldErrorAt300K",
+            "HistoricalWangMeanFieldErrorAtThreeHundredK",
             f"{historical_metrics['wang_selective_mean_field_relative_error_percent_300K']:.2f}",
         ),
         (
-            "HistoricalWangMeanFieldErrorAt400K",
+            "HistoricalWangMeanFieldErrorAtFourHundredK",
             f"{historical_metrics['wang_selective_mean_field_relative_error_percent_400K']:.2f}",
         ),
         (
@@ -3512,6 +3531,10 @@ def generate_config(
         ("MPIBindingPassed", "true"),
         ("MPIMemoryPreflightPassed", "true"),
         ("MPIRunnerReleaseCertified", "true"),
+    )
+    _require(
+        all(re.fullmatch(r"[A-Za-z]+", name) is not None for name, _ in macros),
+        "generated LaTeX macro name is not a TeX control word",
     )
     text = "\n".join(
         [

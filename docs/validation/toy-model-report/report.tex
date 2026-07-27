@@ -7,6 +7,8 @@
 \usepackage[a4paper,margin=22mm,headheight=15pt]{geometry}
 \usepackage{amsmath,amssymb,bm,mathtools}
 \usepackage{booktabs,tabularx,array,multirow}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \usepackage{siunitx}
 \usepackage{graphicx}
 \usepackage{xcolor}
@@ -74,14 +76,14 @@
   MPIReleaseLaunchSHA,MPIReleaseLaunchPayloadSHA,%
   MPIExecutionSourceIdentitySHA,MPIEnvironmentPrefixManifestSHA,%
   MPILaunchEnvironmentSHA,%
-  ArtifactSHA256SUMSRawSHA,ArtifactFetchReceiptSHA,%
-  StagingSHA256SUMSRawSHA,StagingImportReceiptSHA,%
-  ProductionFiguresSHA256SUMSRawSHA,ProductionFiguresReceiptSHA,%
-  HistoricalFiguresSHA256SUMSRawSHA,HistoricalFiguresReceiptSHA,%
+  ArtifactChecksumManifestSHA,ArtifactFetchReceiptSHA,%
+  StagingChecksumManifestSHA,StagingImportReceiptSHA,%
+  ProductionFiguresChecksumManifestSHA,ProductionFiguresReceiptSHA,%
+  HistoricalFiguresChecksumManifestSHA,HistoricalFiguresReceiptSHA,%
   HistoricalMetricsManifestSHA,HistoricalWangHarmonicRMSError,%
-  HistoricalWangHarmonicMaxError,HistoricalWangBornErrorAt100K,%
-  HistoricalWangBornErrorAt300K,HistoricalWangBornErrorAt500K,%
-  HistoricalWangMeanFieldErrorAt300K,HistoricalWangMeanFieldErrorAt400K,%
+  HistoricalWangHarmonicMaxError,HistoricalWangBornErrorAtOneHundredK,%
+  HistoricalWangBornErrorAtThreeHundredK,HistoricalWangBornErrorAtFiveHundredK,%
+  HistoricalWangMeanFieldErrorAtThreeHundredK,HistoricalWangMeanFieldErrorAtFourHundredK,%
   HistoricalMingoPrintedRMSError,HistoricalMingoPrintedMaxError,%
   HistoricalMingoHalfWeightRMSError,HistoricalMingoHalfWeightMaxError,%
   ReleaseStrictReportFileSHA,ReleaseStrictReportBodySHA,%
@@ -233,6 +235,7 @@ toy-model formulation and validation}
 \date{\ReportDate}
 
 \begin{document}
+\raggedbottom
 \hypersetup{pageanchor=false}
 
 \begin{titlepage}
@@ -249,6 +252,7 @@ toy-model formulation and validation}
 
   \fcolorbox{negfblue}{statusbg}{
     \begin{minipage}{0.84\textwidth}
+      \raggedright
       \textbf{Assessment.}
       The imported immutable campaign declares
       \texttt{release\_certified=\ToyGateReleaseCertified}. It closes the
@@ -597,7 +601,7 @@ from the production Guo-convention solver. ``Validated'' below refers only
 to the stated toy evidence, not to real-material FC3 calculations.}
 \label{tab:approximations}
 \small
-\begin{tabularx}{\textwidth}{@{}p{29mm}p{28mm}p{29mm}p{27mm}X@{}}
+\begin{tabularx}{\textwidth}{@{}L{29mm}L{28mm}L{29mm}L{27mm}Y@{}}
 \toprule
 Method & Dynamic term & Propagators & Static term & Status \\
 \midrule
@@ -766,7 +770,7 @@ generated from the same validated JSON document.
 Absolute tolerances remain active wherever a relative quantity is near zero.}
 \label{tab:acceptance-contract}
 \small
-\begin{tabularx}{\textwidth}{@{}p{39mm}p{54mm}X@{}}
+\begin{tabularx}{\textwidth}{@{}L{39mm}L{54mm}Y@{}}
 \toprule
 Gate family & Threshold & Scope \\
 \midrule
@@ -1079,7 +1083,7 @@ dense-algorithm scaling. The timings are not controlled speedups and do not
 change the scientific role of any method.}
 \label{tab:cost-accuracy}
 \scriptsize
-\begin{tabularx}{\textwidth}{@{}p{19mm}Xccp{34mm}rrX@{}}
+\begin{tabularx}{\textwidth}{@{}L{19mm}YccL{34mm}rrY@{}}
 \toprule
 Method & accuracy role & SC & conserving & dense time & count & total (s) &
 release use \\
@@ -1221,17 +1225,17 @@ Execution-source / environment-prefix / scrubbed-launch environment: \\[-1mm]
 \quad{\scriptsize\texttt{\MPIEnvironmentPrefixManifestSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\MPILaunchEnvironmentSHA}} \\[1mm]
 Fetched artifact raw \code{SHA256SUMS}: \\[-1mm]
-\quad{\scriptsize\texttt{\ArtifactSHA256SUMSRawSHA}} \\[1mm]
+\quad{\scriptsize\texttt{\ArtifactChecksumManifestSHA}} \\[1mm]
 Local fetch receipt: \\[-1mm]
 \quad{\scriptsize\texttt{\ArtifactFetchReceiptSHA}} \\[1mm]
 Production staging raw \code{SHA256SUMS} / import receipt: \\[-1mm]
-\quad{\scriptsize\texttt{\StagingSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\StagingChecksumManifestSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\StagingImportReceiptSHA}} \\[1mm]
 Production figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
-\quad{\scriptsize\texttt{\ProductionFiguresSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\ProductionFiguresChecksumManifestSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\ProductionFiguresReceiptSHA}} \\[1mm]
 Historical figures raw \code{SHA256SUMS} / render receipt: \\[-1mm]
-\quad{\scriptsize\texttt{\HistoricalFiguresSHA256SUMSRawSHA}} \\[-1mm]
+\quad{\scriptsize\texttt{\HistoricalFiguresChecksumManifestSHA}} \\[-1mm]
 \quad{\scriptsize\texttt{\HistoricalFiguresReceiptSHA}} \\[1mm]
 Historical metrics manifest: \\[-1mm]
 \quad{\scriptsize\texttt{\HistoricalMetricsManifestSHA}} \\[1mm]
@@ -1262,10 +1266,10 @@ inferred onsite-unit convention, the independent harmonic calculation over
 all 51 vector-path temperatures has RMS/max errors
 \(\HistoricalWangHarmonicRMSError/\HistoricalWangHarmonicMaxError\;\mathrm{nW\,K^{-1}}\). The complete historical
 \(O(T^2)\) bubble-plus-tadpole result differs from the interpolated path by
-\HistoricalWangBornErrorAt100K\%, \HistoricalWangBornErrorAt300K\%, and
-\HistoricalWangBornErrorAt500K\% at 100, 300, and 500 K; selective mean field
-differs by \HistoricalWangMeanFieldErrorAt300K\% and
-\HistoricalWangMeanFieldErrorAt400K\% at 300 and 400 K. These are useful
+\HistoricalWangBornErrorAtOneHundredK\%, \HistoricalWangBornErrorAtThreeHundredK\%, and
+\HistoricalWangBornErrorAtFiveHundredK\% at 100, 300, and 500 K; selective mean field
+differs by \HistoricalWangMeanFieldErrorAtThreeHundredK\% and
+\HistoricalWangMeanFieldErrorAtFourHundredK\% at 300 and 400 K. These are useful
 source-limited regressions, but not a same-input reproduction because the
 onsite assignment and plotted-run settings are not uniquely fixed by the
 recoverable source. Wang \(O(T^4)\) remains unimplemented and nonblocking.

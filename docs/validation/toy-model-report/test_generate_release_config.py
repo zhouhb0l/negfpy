@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import shutil
@@ -1398,6 +1399,10 @@ class CanonicalFixture:
         for filename in MODULE.REQUIRED_TEX:
             _write_bytes(staging / "tex" / filename, f"% {filename}\n".encode("ascii"))
         shutil.copyfile(self.release_report, staging / "production_toy_gate.json")
+        _write_bytes(
+            staging / "source" / "SHA256SUMS",
+            (self.artifacts / "SHA256SUMS").read_bytes(),
+        )
         staged_records = {
             path.relative_to(staging).as_posix(): {"sha256": _file_hash(path)}
             for path in sorted(staging.rglob("*"))
@@ -1565,11 +1570,11 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(f"\\newcommand{{\\ExpectedToyGateCommit}}{{{COMMIT}}}", text)
         self.assertIn("\\newcommand{\\MPIReleaseRankCount}{8}", text)
         self.assertIn(
-            f"\\newcommand{{\\ArtifactSHA256SUMSRawSHA}}{{{self.fixture.artifact_anchor}}}",
+            f"\\newcommand{{\\ArtifactChecksumManifestSHA}}{{{self.fixture.artifact_anchor}}}",
             text,
         )
         self.assertIn(
-            f"\\newcommand{{\\StagingSHA256SUMSRawSHA}}{{{self.fixture.staging_anchor}}}",
+            f"\\newcommand{{\\StagingChecksumManifestSHA}}{{{self.fixture.staging_anchor}}}",
             text,
         )
         self.assertIn(
@@ -1599,8 +1604,64 @@ class ReleaseConfigTests(unittest.TestCase):
             text,
         )
         self.assertFalse(any(self.fixture.report.glob(".release_config.tex.*.tmp")))
-        self.assertIn("\\newcommand{\\HistoricalWangBornErrorAt100K}{0.49}", text)
+        self.assertIn("\\newcommand{\\HistoricalWangBornErrorAtOneHundredK}{0.49}", text)
         self.assertIn("\\newcommand{\\HistoricalMingoPrintedRMSError}{3.2301}", text)
+        macro_names = re.findall(r"\\newcommand\{\\([^}]+)\}", text)
+        self.assertTrue(macro_names)
+        self.assertTrue(
+            all(name.isascii() and name.isalpha() for name in macro_names)
+        )
+
+    def test_checksum_tree_allows_only_declared_nested_manifest(self) -> None:
+        allowed = self.root / "allowed-nested-manifest"
+        source_bytes = b"raw remote ledger\n"
+        source_digest = hashlib.sha256(source_bytes).hexdigest()
+        _write_bytes(allowed / "source" / "SHA256SUMS", source_bytes)
+        anchor, _ = _refresh_checksums(allowed)
+        tree = MODULE._verify_checksum_tree(
+            allowed,
+            anchor,
+            "allowed nested manifest",
+            allowed_nested_manifests=frozenset({"source/SHA256SUMS"}),
+        )
+        self.assertIn("source/SHA256SUMS", tree.entries)
+        MODULE._validate_staging_source_manifest(tree, source_digest)
+
+        resealed = self.root / "resealed-staging-manifest"
+        _write_bytes(
+            resealed / "source" / "SHA256SUMS",
+            b"coherently checksummed but wrong ledger\n",
+        )
+        resealed_anchor, _ = _refresh_checksums(resealed)
+        resealed_tree = MODULE._verify_checksum_tree(
+            resealed,
+            resealed_anchor,
+            "resealed staging manifest",
+            allowed_nested_manifests=frozenset({"source/SHA256SUMS"}),
+        )
+        with self.assertRaisesRegex(
+            MODULE.ReleaseConfigError,
+            "preserved fetched SHA256SUMS record SHA256 mismatch",
+        ):
+            MODULE._validate_staging_source_manifest(resealed_tree, source_digest)
+
+        for index, relative in enumerate(
+            ("other/SHA256SUMS", "source/nested/SHA256SUMS")
+        ):
+            with self.subTest(relative=relative):
+                rejected = self.root / f"rejected-nested-manifest-{index}"
+                _write_bytes(rejected / relative, b"forged nested ledger\n")
+                rejected_anchor, _ = _refresh_checksums(rejected)
+                with self.assertRaisesRegex(
+                    MODULE.ReleaseConfigError,
+                    "checksum path is forbidden",
+                ):
+                    MODULE._verify_checksum_tree(
+                        rejected,
+                        rejected_anchor,
+                        "rejected nested manifest",
+                        allowed_nested_manifests=frozenset({"source/SHA256SUMS"}),
+                    )
 
     def _assert_configuration_fault_rejected(
         self,

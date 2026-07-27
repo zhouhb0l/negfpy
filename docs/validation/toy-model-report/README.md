@@ -27,6 +27,8 @@ publication:
    `source/fetched-artifact-index.json` containing the path, byte count, and
    SHA256 of every fetched artifact. Large HDF5 files remain in the externally
    anchored fetched tree rather than being duplicated.
+   The preserved `source/SHA256SUMS` is the sole permitted nested checksum
+   manifest; every other nested manifest remains a hard error.
 3. `render_production_toy_gate_figures.py` re-derives every plotted CSV and
    manuscript TeX input from the raw strict report, then emits three native
    vector-PDF/450-DPI-RGB-PNG pairs.
