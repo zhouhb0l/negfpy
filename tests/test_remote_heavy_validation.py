@@ -2340,6 +2340,113 @@ def test_fetch_allows_archived_failure_with_complete_checksums(
     )
 
 
+def test_fetch_prunes_unhashed_empty_directories_to_file_projection(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _terminal_artifacts(tmp_path)
+    (source / "attempts" / "attempt-001" / "runtime-tmp").mkdir(
+        parents=True
+    )
+    (
+        source
+        / "attempts"
+        / "attempt-001"
+        / "runtime-config"
+        / "matplotlib"
+    ).mkdir(parents=True)
+    monkeypatch.setattr(
+        operations,
+        "status",
+        lambda **_kwargs: {
+            "state": "failed", "commit": COMMIT, "returncode": 1
+        },
+    )
+    destination = operations.fetch(
+        commit=COMMIT,
+        destination_root=tmp_path / "fetched",
+        runner=_ArtifactCopyRunner(source),
+    )
+    observed_directories = {
+        path.relative_to(destination).as_posix()
+        for path in destination.rglob("*")
+        if path.is_dir()
+    }
+    assert observed_directories == set()
+    assert core.verify_sha256sums(destination) == (
+        "job-status.json",
+        "production_toy_gate.log",
+    )
+
+
+def test_fetch_rejects_unprunable_empty_directory_without_receipt(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _terminal_artifacts(tmp_path)
+    (source / "runtime-tmp").mkdir()
+    monkeypatch.setattr(
+        operations,
+        "status",
+        lambda **_kwargs: {
+            "state": "failed", "commit": COMMIT, "returncode": 1
+        },
+    )
+    original_rmdir = pathlib.Path.rmdir
+
+    def fail_runtime_rmdir(path: pathlib.Path) -> None:
+        if path.name == "runtime-tmp":
+            raise PermissionError("fault-injected rmdir failure")
+        original_rmdir(path)
+
+    monkeypatch.setattr(pathlib.Path, "rmdir", fail_runtime_rmdir)
+    destination = tmp_path / "fetched" / COMMIT
+    with pytest.raises(
+        core.RemoteValidationError,
+        match="empty or unreferenced directory",
+    ):
+        operations.fetch(
+            commit=COMMIT,
+            destination_root=tmp_path / "fetched",
+            runner=_ArtifactCopyRunner(source),
+        )
+    assert destination.is_dir()
+    assert not (destination / "fetch-receipt.json").exists()
+
+
+def test_fetch_rejects_special_entry_without_receipt(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _terminal_artifacts(tmp_path)
+    monkeypatch.setattr(
+        operations,
+        "status",
+        lambda **_kwargs: {
+            "state": "failed", "commit": COMMIT, "returncode": 1
+        },
+    )
+
+    class SpecialEntryRunner(_ArtifactCopyRunner):
+        def run(self, argv, **kwargs):
+            completed = super().run(argv, **kwargs)
+            os.mkfifo(pathlib.Path(argv[-1]) / "unlisted.pipe")
+            return completed
+
+    destination = tmp_path / "fetched" / COMMIT
+    with pytest.raises(
+        core.RemoteValidationError,
+        match="special filesystem entries",
+    ):
+        operations.fetch(
+            commit=COMMIT,
+            destination_root=tmp_path / "fetched",
+            runner=SpecialEntryRunner(source),
+        )
+    assert destination.is_dir()
+    assert not (destination / "fetch-receipt.json").exists()
+
+
 def test_fetch_rejects_incomplete_checksum_coverage(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

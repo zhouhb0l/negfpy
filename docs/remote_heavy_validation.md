@@ -221,8 +221,10 @@ Inspect state without changing the job:
 python scripts/remote_heavy_cli.py status "$commit"
 ```
 
-After completion or failure, retrieve the complete artifact tree and verify
-every advertised SHA256:
+After completion or failure, retrieve the checksum-covered regular-file
+projection of the complete artifact tree and verify every advertised SHA256.
+Transport-only empty runtime directories are omitted because directory entries
+cannot be represented in `SHA256SUMS`; no regular file is omitted or changed:
 
 ```bash
 python scripts/remote_heavy_cli.py fetch "$commit"

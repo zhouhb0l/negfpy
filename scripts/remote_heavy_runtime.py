@@ -87,6 +87,73 @@ def _fresh_fetch_destination(
     return destination
 
 
+def _prune_empty_directories(root: pathlib.Path) -> None:
+    """Canonicalize a fresh fetch to its checksum-covered file projection.
+
+    ``scp -r`` preserves runtime scratch directories even when they contain no
+    files. Directory entries are not representable in ``SHA256SUMS`` and the
+    publication importer deliberately rejects such unreferenced topology.
+    Remove empty directories bottom-up; ``rmdir`` cannot remove a directory
+    containing a file, symlink, special entry, or nonempty child.
+    """
+
+    directories = sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.relative_to(root).parts),
+        reverse=True,
+    )
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _validate_checksum_file_projection(
+    root: pathlib.Path,
+    *,
+    expected_regular_files: set[str],
+) -> None:
+    """Require an exact regular-file tree after empty-directory pruning."""
+
+    symlinks = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_symlink()
+    }
+    special_entries = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if not path.is_symlink()
+        and not path.is_file()
+        and not path.is_dir()
+    }
+    regular_files = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    required_directories: set[str] = set()
+    for relative in regular_files:
+        parent = pathlib.PurePosixPath(relative).parent
+        while parent != pathlib.PurePosixPath("."):
+            required_directories.add(parent.as_posix())
+            parent = parent.parent
+    observed_directories = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_dir() and not path.is_symlink()
+    }
+    if symlinks or special_entries or regular_files != expected_regular_files:
+        raise core.RemoteValidationError(
+            "fetched artifact file projection changed during validation"
+        )
+    if observed_directories != required_directories:
+        raise core.RemoteValidationError(
+            "fetched artifacts retain an empty or unreferenced directory"
+        )
+
+
 def fetch(
     *,
     commit: str,
@@ -146,6 +213,18 @@ def fetch(
                 "nested SHA256SUMS files are forbidden: "
                 + ", ".join(nested_manifests)
             )
+        special_entries = [
+            path.relative_to(destination).as_posix()
+            for path in destination.rglob("*")
+            if not path.is_symlink()
+            and not path.is_file()
+            and not path.is_dir()
+        ]
+        if special_entries:
+            raise core.RemoteValidationError(
+                "fetched artifacts contain special filesystem entries: "
+                + ", ".join(special_entries)
+            )
         verified = core.verify_sha256sums(destination)
         regular = {
             path.relative_to(destination).as_posix()
@@ -161,6 +240,11 @@ def fetch(
                 "SHA256SUMS does not cover exactly all fetched regular files; "
                 f"unlisted={missing}, nonexistent={stale}"
             )
+        _prune_empty_directories(destination)
+        _validate_checksum_file_projection(
+            destination,
+            expected_regular_files=regular | {"SHA256SUMS"},
+        )
         core._atomic_write_json(
             destination / "fetch-receipt.json",
             {
