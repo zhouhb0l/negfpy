@@ -1532,6 +1532,11 @@ def _validate_release_launch_receipt(
     )
     _require(
         post_run.get("passed") is True
+        and isinstance(post_run.get("checked_utc"), str)
+        and bool(post_run["checked_utc"])
+        and payload["started_utc"]
+        <= post_run["checked_utc"]
+        <= payload["finished_utc"]
         and post_run.get("execution_source_identity_sha256")
         == launch_binding["execution_source_identity_sha256"]
         and post_run.get("environment_prefix_manifest_sha256")
@@ -2615,7 +2620,6 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                     for stream in (stdout, stderr):
                         stream.flush()
                         os.fsync(stream.fileno())
-                release_finished = core._utc_now()
                 returncode = int(completed_release.returncode)
                 try:
                     post_identity = _record_remote_environment(
@@ -2635,17 +2639,19 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                         post_identity.get("environment_prefix_manifest"),
                         name="post-run environment prefix manifest",
                     )
+                    post_source_sha256 = _verified_manifest_digest(
+                        post_source,
+                        name="post-run execution source identity",
+                    )
+                    post_prefix_sha256 = _verified_manifest_digest(
+                        post_prefix,
+                        name="post-run environment prefix manifest",
+                    )
                     post_run_verification = {
                         "passed": True,
                         "checked_utc": core._utc_now(),
-                        "execution_source_identity_sha256": _verified_manifest_digest(
-                            post_source,
-                            name="post-run execution source identity",
-                        ),
-                        "environment_prefix_manifest_sha256": _verified_manifest_digest(
-                            post_prefix,
-                            name="post-run environment prefix manifest",
-                        ),
+                        "execution_source_identity_sha256": post_source_sha256,
+                        "environment_prefix_manifest_sha256": post_prefix_sha256,
                     }
                 except Exception as error:
                     post_run_verification = {
@@ -2654,6 +2660,7 @@ def _worker(*, deployment_dir: pathlib.Path, commit: str) -> int:
                         "error_type": type(error).__name__,
                         "error": str(error),
                     }
+                release_finished = core._utc_now()
                 _write_release_launch_receipt(
                     path=release_receipt_path,
                     intent_path=release_intent_path,

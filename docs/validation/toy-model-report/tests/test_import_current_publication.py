@@ -452,6 +452,10 @@ def test_current_publication_accepts_prior_attempt_scaling_and_full_mpi_chain(
     ("mutation", "message"),
     (
         ("post_run_failed", "post-run source/environment revalidation did not pass"),
+        (
+            "post_run_after_finished",
+            "post-run source/environment revalidation did not pass",
+        ),
         ("source_drift", "execution source identity differs from the release source"),
         (
             "environment_drift",
@@ -473,6 +477,14 @@ def test_v2_release_provenance_tampering_is_rejected(
         receipt_path = attempt / "mpi-release-launch.json"
         receipt = json.loads(receipt_path.read_text(encoding="ascii"))
         receipt["payload"]["post_run_verification"]["passed"] = False
+        _write_hashed_manifest(receipt_path, receipt["payload"])
+        _refresh_publication_hashes(root, "mpi_release_launch")
+    elif mutation == "post_run_after_finished":
+        receipt_path = attempt / "mpi-release-launch.json"
+        receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+        receipt["payload"]["post_run_verification"][
+            "checked_utc"
+        ] = "2026-07-26T00:00:02Z"
         _write_hashed_manifest(receipt_path, receipt["payload"])
         _refresh_publication_hashes(root, "mpi_release_launch")
     elif mutation == "source_drift":

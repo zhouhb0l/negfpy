@@ -1223,6 +1223,9 @@ def _validate_release_launch_provenance(
         and post_run.get("passed") is True
         and isinstance(post_run.get("checked_utc"), str)
         and bool(post_run["checked_utc"])
+        and receipt_payload["started_utc"]
+        <= post_run["checked_utc"]
+        <= receipt_payload["finished_utc"]
         and post_run.get("execution_source_identity_sha256")
         == source.get("manifest_sha256")
         and post_run.get("environment_prefix_manifest_sha256")

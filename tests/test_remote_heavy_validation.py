@@ -1497,6 +1497,15 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     monkeypatch.setattr(cli.subprocess, "run", _mock_successful_mpi_commands(
         root=root, lock_sha=lock_sha, captured=captured
     ))
+    clock_tick = 0
+
+    def ordered_utc_now() -> str:
+        nonlocal clock_tick
+        value = f"2026-07-26T00:00:00.{clock_tick:06d}+00:00"
+        clock_tick += 1
+        return value
+
+    monkeypatch.setattr(core, "_utc_now", ordered_utc_now)
     assert cli._worker(deployment_dir=root, commit=COMMIT) == 0
     assert len(captured) == 2
     scale_argv, scale_environment = captured[0]
@@ -1547,6 +1556,14 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
         expected_environment
     )
     attempt_root = root / "artifacts" / "attempts" / "attempt-001"
+    receipt = toy_mpi.read_hashed_manifest(
+        attempt_root / "mpi-release-launch.json"
+    )["payload"]
+    assert (
+        receipt["started_utc"]
+        <= receipt["post_run_verification"]["checked_utc"]
+        <= receipt["finished_utc"]
+    )
     intent = toy_mpi.read_hashed_manifest(
         attempt_root / "mpi-release-launch-intent.json"
     )
@@ -1928,6 +1945,55 @@ def test_release_launch_receipt_rejects_tampering(
         environment_prefix=deployment / "environment",
     )
     with pytest.raises(core.RemoteValidationError):
+        cli._validate_release_launch_receipt(
+            path=receipt,
+            intent_path=receipt.parent / "mpi-release-launch-intent.json",
+            attempt_root=receipt.parent,
+            environment_prefix=deployment / "environment",
+            selected_rank=4,
+            physical_core_count=76,
+            socket_count=2,
+            source_revision=COMMIT,
+            source_tree_sha256=SOURCE_SHA256,
+            environment_sha256=lock_sha,
+            execution_id=execution_id,
+            release_root=release_root,
+            mpi_runner=pathlib.Path(toy_mpi.__file__).resolve(),
+            execution_source_identity=identity["execution_source_identity"],
+            environment_prefix_manifest=identity["environment_prefix_manifest"],
+            launch_environment=launch_environment,
+        )
+
+
+def test_release_launch_receipt_rejects_post_run_check_after_finish(
+    tmp_path: pathlib.Path,
+) -> None:
+    deployment = tmp_path / COMMIT
+    release_root = deployment / "artifacts" / "toy-release"
+    execution_id = "release-attempt-001"
+    lock_sha = "7" * 64
+    receipt, _stdout, _facts = _write_release_launch_facts(
+        deployment=deployment,
+        release_root=release_root,
+        execution_id=execution_id,
+        rank_count=4,
+        lock_sha=lock_sha,
+    )
+    document = toy_mpi.read_hashed_manifest(receipt)
+    payload = json.loads(json.dumps(document["payload"]))
+    payload["post_run_verification"]["checked_utc"] = "2026-07-26T00:00:02Z"
+    receipt.unlink()
+    toy_mpi.write_hashed_manifest(receipt, payload)
+    identity = _worker_identity(lock_sha)
+    launch_environment = cli._scientific_launch_environment(
+        root=deployment,
+        attempt_root=receipt.parent,
+        environment_prefix=deployment / "environment",
+    )
+    with pytest.raises(
+        core.RemoteValidationError,
+        match="post-run source/environment revalidation did not pass",
+    ):
         cli._validate_release_launch_receipt(
             path=receipt,
             intent_path=receipt.parent / "mpi-release-launch-intent.json",

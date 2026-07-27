@@ -115,7 +115,8 @@ figures. The generator independently checks:
 - the immutable pre-launch intent and terminal MPI launch-v2 envelope,
   deployed launcher/Python/runner identities, exact argv and Open MPI binding,
   the clean tracked/full-worktree/orchestration manifests, exhaustive environment
-  prefix manifest, exact scrubbed child environment, post-run revalidation,
+  prefix manifest, exact scrubbed child environment, post-run revalidation with
+  `started_utc <= checked_utc <= finished_utc`,
   thread caps, stdout/stderr hashes, and equality with terminal facts; and
 - receipt-bound exact coverage of every generated TeX row and every PDF/PNG
   figure byte used by the manuscript.
