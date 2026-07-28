@@ -1230,20 +1230,52 @@ def _group_for_band(
     raise AssertionError("Every band must belong to one degeneracy group.")
 
 
+def _frequencies_match_with_cutoff(
+    candidate_frequencies: Array,
+    reference_frequencies: Array,
+    *,
+    cutoff_frequency_thz: float,
+    frequency_atol_thz: float,
+) -> bool:
+    """Compare frequencies after canonicalizing only cutoff-inactive modes."""
+
+    candidate_values = np.asarray(candidate_frequencies)
+    reference_values = np.asarray(reference_frequencies)
+    candidate_comparison = np.where(
+        np.abs(candidate_values) <= cutoff_frequency_thz,
+        0.0,
+        candidate_values,
+    )
+    reference_comparison = np.where(
+        np.abs(reference_values) <= cutoff_frequency_thz,
+        0.0,
+        reference_values,
+    )
+    return bool(
+        np.allclose(
+            candidate_comparison,
+            reference_comparison,
+            rtol=0.0,
+            atol=frequency_atol_thz,
+        )
+    )
+
+
 def _matching_group(
     *,
     candidate_frequencies: Array,
     reference_frequencies: Array,
     band: int,
     tolerance: float,
+    cutoff_frequency_thz: float,
     frequency_atol: float,
     label: str,
 ) -> Array:
-    if not np.allclose(
+    if not _frequencies_match_with_cutoff(
         candidate_frequencies,
         reference_frequencies,
-        rtol=0.0,
-        atol=frequency_atol,
+        cutoff_frequency_thz=cutoff_frequency_thz,
+        frequency_atol_thz=frequency_atol,
     ):
         raise ValueError(
             f"Candidate/reference phonon frequencies differ at {label}; "
@@ -1437,6 +1469,7 @@ def compare_interaction_strengths(
                     reference_frequencies=reference_frequencies[q0],
                     band=sample.target_band,
                     tolerance=degeneracy,
+                    cutoff_frequency_thz=reference.cutoff_frequency_thz,
                     frequency_atol=frequency_atol,
                     label=f"q0={q0}",
                 ),
@@ -1445,6 +1478,7 @@ def compare_interaction_strengths(
                     reference_frequencies=reference_frequencies[q1],
                     band=sample.band1,
                     tolerance=degeneracy,
+                    cutoff_frequency_thz=reference.cutoff_frequency_thz,
                     frequency_atol=frequency_atol,
                     label=f"q1={q1}",
                 ),
@@ -1453,6 +1487,7 @@ def compare_interaction_strengths(
                     reference_frequencies=reference_frequencies[q2],
                     band=sample.band2,
                     tolerance=degeneracy,
+                    cutoff_frequency_thz=reference.cutoff_frequency_thz,
                     frequency_atol=frequency_atol,
                     label=f"q2={q2}",
                 ),
@@ -1902,11 +1937,11 @@ def compare_linewidths(
 
     for target_position, target in enumerate(reference.grid_points_grg):
         target = int(target)
-        if not np.allclose(
+        if not _frequencies_match_with_cutoff(
             candidate_frequencies[target],
             reference_frequencies[target],
-            rtol=0.0,
-            atol=frequency_atol,
+            cutoff_frequency_thz=reference.cutoff_frequency_thz,
+            frequency_atol_thz=frequency_atol,
         ):
             raise ValueError(
                 f"Candidate/reference frequencies differ at target GRG {target}."

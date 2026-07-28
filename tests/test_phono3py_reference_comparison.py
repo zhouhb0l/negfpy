@@ -63,17 +63,22 @@ def _write_reference(
     include_fc2_random_q: bool = False,
     phase_compatible: bool = False,
     reference_gamma: np.ndarray | None = None,
+    frequencies: np.ndarray | None = None,
     selected_bands: tuple[int, ...] = (0, 1, 2),
 ) -> Path:
     path = tmp_path / "si-phono3py-reference.hdf5"
     grg2bzg = np.array([1, 0], dtype=np.int64)
     # BZG index 2 is a non-primary surface image of GRG index 1.
     bzg2grg = np.array([1, 0, 1], dtype=np.int64)
-    frequencies_grg = np.array(
-        [
-            [1.0, 1.0, 2.0],
-            [1.5, 1.5, 3.0],
-        ]
+    frequencies_grg = (
+        np.array(
+            [
+                [1.0, 1.0, 2.0],
+                [1.5, 1.5, 3.0],
+            ]
+        )
+        if frequencies is None
+        else np.asarray(frequencies, dtype=float)
     )
     frequencies_bzg = frequencies_grg[bzg2grg]
     gamma = (
@@ -261,21 +266,26 @@ def _candidate(
     *,
     gamma: np.ndarray | None = None,
     strength_offset: float = 0.0,
+    frequencies: np.ndarray | None = None,
 ) -> tuple[
     BulkPhononSpectrum,
     BulkThreePhononInteractions,
     BulkThreePhononLinewidths,
 ]:
-    frequencies = np.array(
-        [
-            [1.0, 1.0, 2.0],
-            [1.5, 1.5, 3.0],
-        ]
+    frequency_values = (
+        np.array(
+            [
+                [1.0, 1.0, 2.0],
+                [1.5, 1.5, 3.0],
+            ]
+        )
+        if frequencies is None
+        else np.asarray(frequencies, dtype=float)
     )
     phonons = BulkPhononSpectrum(
         qpoints=[[0.0, 0.0, 0.0], [-0.5, 0.0, 0.0]],
         dynamical_matrices=np.zeros((2, 3, 3), dtype=np.complex128),
-        frequencies=frequencies,
+        frequencies=frequency_values,
         eigenvectors=np.repeat(
             np.eye(3, dtype=np.complex128)[None],
             2,
@@ -514,6 +524,98 @@ def test_interaction_comparison_maps_grg_to_bzg_and_sums_degenerate_blocks(
     ]
     assert [block.reference_sum_ev2 for block in result.blocks] == [8.0, 16.0]
     assert [block.candidate_sum_ev2 for block in result.blocks] == [8.0, 16.0]
+
+
+def test_frequency_matching_canonicalizes_subcutoff_acoustic_noise(
+    tmp_path,
+) -> None:
+    reference_frequencies = np.array(
+        [
+            [-0.75e-4, 0.10e-4, 2.0],
+            [1.5, 1.5, 3.0],
+        ]
+    )
+    candidate_frequencies = np.array(
+        [
+            [0.75e-4, -0.10e-4, 2.0],
+            [1.5, 1.5, 3.0],
+        ]
+    )
+    reference = read_phono3py_silicon_reference(
+        _write_reference(tmp_path, frequencies=reference_frequencies)
+    )
+    _, interactions, linewidths = _candidate(
+        frequencies=candidate_frequencies
+    )
+
+    interaction_result = compare_interaction_strengths(
+        reference,
+        interactions,
+        [(0, 0, 0, 0, 0)],
+    )
+    linewidth_result = compare_linewidths(reference, linewidths)
+
+    assert interaction_result.passed
+    assert linewidth_result.passed
+
+
+def test_frequency_matching_rejects_one_mode_crossing_cutoff(tmp_path) -> None:
+    cutoff = 1.0e-4
+    reference_frequencies = np.array(
+        [
+            [cutoff, 1.0, 2.0],
+            [1.5, 1.5, 3.0],
+        ]
+    )
+    candidate_frequencies = np.array(
+        [
+            [np.nextafter(cutoff, np.inf), 1.0, 2.0],
+            [1.5, 1.5, 3.0],
+        ]
+    )
+    reference = read_phono3py_silicon_reference(
+        _write_reference(tmp_path, frequencies=reference_frequencies)
+    )
+    _, interactions, linewidths = _candidate(
+        frequencies=candidate_frequencies
+    )
+
+    with pytest.raises(ValueError, match="frequencies differ"):
+        compare_interaction_strengths(
+            reference,
+            interactions,
+            [(0, 0, 0, 0, 0)],
+        )
+    with pytest.raises(ValueError, match="frequencies differ"):
+        compare_linewidths(reference, linewidths)
+
+
+def test_frequency_matching_rejects_active_mode_beyond_tolerance(
+    tmp_path,
+) -> None:
+    reference_frequencies = np.array(
+        [
+            [-1.0, 1.0, 2.0],
+            [1.5, 1.5, 3.0],
+        ]
+    )
+    candidate_frequencies = reference_frequencies.copy()
+    candidate_frequencies[0, 0] -= 2.0e-8
+    reference = read_phono3py_silicon_reference(
+        _write_reference(tmp_path, frequencies=reference_frequencies)
+    )
+    _, interactions, linewidths = _candidate(
+        frequencies=candidate_frequencies
+    )
+
+    with pytest.raises(ValueError, match="frequencies differ"):
+        compare_interaction_strengths(
+            reference,
+            interactions,
+            [(0, 0, 0, 0, 0)],
+        )
+    with pytest.raises(ValueError, match="frequencies differ"):
+        compare_linewidths(reference, linewidths)
 
 
 def test_interaction_relative_gate_detects_subspace_sum_error(tmp_path) -> None:
