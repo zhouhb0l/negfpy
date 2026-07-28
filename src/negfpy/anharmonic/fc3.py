@@ -167,6 +167,15 @@ class FC3Data:
         Optional phonopy-style map from every supercell atom to a
         representative supercell atom (i.e. its values belong to
         ``p2s_map``).
+    version
+        Source phono3py version, when present in the HDF5 file.
+    fc3_nonzero_indices
+        Optional byte mask with shape equal to the three atom dimensions.
+        It is preserved as metadata and is never applied by the reader.
+    fc3_cutoff
+        Optional source cutoff distance. No truncation is performed here.
+    source_attributes
+        Detached immutable file and dataset attributes retained by a reader.
     """
 
     values: Array
@@ -177,6 +186,10 @@ class FC3Data:
     s2p_map: Array | None = None
     provenance: Metadata = field(default_factory=dict)
     mass_units: str = "amu"
+    version: str | None = None
+    fc3_nonzero_indices: Array | None = None
+    fc3_cutoff: float | None = None
+    source_attributes: Metadata = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.compact, (bool, np.bool_)):
@@ -199,6 +212,45 @@ class FC3Data:
             "s2p_map",
             None if self.s2p_map is None else _readonly_copy(self.s2p_map),
         )
+        version = self.version
+        if isinstance(version, (bytes, np.bytes_)):
+            version = bytes(version).decode("utf-8", errors="replace")
+        elif isinstance(version, np.generic):
+            version = version.item()
+        if version is not None:
+            if not isinstance(version, str) or not version.strip():
+                raise ValueError("version must be None or a non-empty string.")
+            version = version.strip()
+        object.__setattr__(self, "version", version)
+        object.__setattr__(
+            self,
+            "fc3_nonzero_indices",
+            (
+                None
+                if self.fc3_nonzero_indices is None
+                else _readonly_copy(self.fc3_nonzero_indices)
+            ),
+        )
+        cutoff = self.fc3_cutoff
+        if cutoff is not None:
+            if isinstance(cutoff, (bool, np.bool_)):
+                raise TypeError("fc3_cutoff must be a finite non-negative real scalar.")
+            try:
+                cutoff = float(cutoff)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    "fc3_cutoff must be a finite non-negative real scalar."
+                ) from exc
+            if not np.isfinite(cutoff) or cutoff < 0.0:
+                raise ValueError(
+                    "fc3_cutoff must be a finite non-negative real scalar."
+                )
+        object.__setattr__(self, "fc3_cutoff", cutoff)
+        object.__setattr__(
+            self,
+            "source_attributes",
+            _freeze_mapping(self.source_attributes),
+        )
         object.__setattr__(self, "provenance", _freeze_mapping(self.provenance))
 
     @property
@@ -217,7 +269,34 @@ class FC3Data:
     def n_primitive_atoms(self) -> int | None:
         if self.values.ndim != 6:
             return None
-        return int(self.values.shape[0] if self.compact else self.values.shape[1])
+        if self.compact:
+            return int(self.values.shape[0])
+        if self.p2s_map is None:
+            return None
+        mapping = np.asarray(self.p2s_map)
+        if mapping.ndim != 1:
+            return None
+        return int(mapping.size)
+
+    @property
+    def cutoff(self) -> float | None:
+        """Alias for phono3py's ``fc3_cutoff`` metadata."""
+
+        return self.fc3_cutoff
+
+    @property
+    def source_file_attributes(self) -> Metadata:
+        """Immutable HDF5 file attributes, when provided by a reader."""
+
+        value = self.source_attributes.get("file", MappingProxyType({}))
+        return value if isinstance(value, Mapping) else MappingProxyType({})
+
+    @property
+    def source_dataset_attributes(self) -> Metadata:
+        """Immutable attributes of the source FC3 dataset."""
+
+        value = self.source_attributes.get("dataset", MappingProxyType({}))
+        return value if isinstance(value, Mapping) else MappingProxyType({})
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -473,7 +552,9 @@ def validate_fc3(
     else:
         npatom = int(values.shape[0])
         ns = int(values.shape[1])
-        metrics["n_primitive_atoms"] = float(npatom if data.compact else ns)
+        primitive_count = data.n_primitive_atoms
+        if primitive_count is not None:
+            metrics["n_primitive_atoms"] = float(primitive_count)
         metrics["n_supercell_atoms"] = float(ns)
         metrics["element_count"] = float(values.size)
         if min(values.shape) < 1:
@@ -494,6 +575,22 @@ def validate_fc3(
         elif values.shape[:3] != (ns, ns, ns):
             errors.append(
                 "A full FC3 tensor must have shape (Ns, Ns, Ns, 3, 3, 3)."
+            )
+            dimension_valid = False
+
+    nonzero_indices = data.fc3_nonzero_indices
+    if nonzero_indices is not None:
+        mask = np.asarray(nonzero_indices)
+        expected_mask_shape = values.shape[:3] if values.ndim >= 3 else None
+        if expected_mask_shape is None or mask.shape != expected_mask_shape:
+            errors.append(
+                "fc3_nonzero_indices shape must match the three FC3 atom "
+                f"dimensions {expected_mask_shape}."
+            )
+            dimension_valid = False
+        if mask.dtype != np.dtype(np.byte):
+            errors.append(
+                "fc3_nonzero_indices must use NumPy byte (int8) dtype."
             )
             dimension_valid = False
 

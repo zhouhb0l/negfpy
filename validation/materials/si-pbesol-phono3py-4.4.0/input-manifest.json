@@ -1,0 +1,30 @@
+{
+  "dataset_id": "phono3py-4.4.0-Si-PBEsol",
+  "schema_version": 1,
+  "source": {
+    "commit": "302ad205452ee36e57887b10bbf4a0289dd037bb",
+    "files": {
+      "forces_fc3": {
+        "path": "example/Si-PBEsol/FORCES_FC3",
+        "sha256": "d53c5443f028c5d66c70adff20191e00b54af56a81e93d8d20e28f9320c94039"
+      },
+      "phono3py_yaml": {
+        "path": "example/Si-PBEsol/phono3py_disp.yaml",
+        "sha256": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7"
+      },
+      "poscar_unitcell": {
+        "path": "example/Si-PBEsol/POSCAR-unitcell",
+        "sha256": "0840b7748c1eff72c9237a2d4d074f7a7f38f8c1ed6501fea69cd647d7a5fcb8"
+      },
+      "readme": {
+        "path": "example/Si-PBEsol/README.md",
+        "sha256": "4b68f565c6c30075adb2ed8ec5d7a4684b64e5427bf7fc946b919edcb79d2188"
+      }
+    },
+    "repository": "https://github.com/phonopy/phono3py.git"
+  },
+  "versions": {
+    "phono3py": "4.4.0",
+    "phonopy": "4.4.0"
+  }
+}
