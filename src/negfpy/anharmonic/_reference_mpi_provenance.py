@@ -1072,35 +1072,99 @@ def _validate_canonical_hdf5_merge(
         prefix="negfpy-reference-mpi-verify-"
     ) as temporary:
         temporary_root = Path(temporary)
-        if (
-            np.asarray(merged["settings/mesh"][...], dtype=np.int64).tolist()
-            != list(map(int, merged["settings/mesh"][...]))
-        ):
-            raise ReferenceMPIProvenanceError(
-                "merged reference mesh has an invalid integer representation."
+        merged_mesh_raw = np.asarray(merged["settings/mesh"][...])
+        merged_mesh = np.asarray(merged_mesh_raw, dtype=np.int64)
+        merged_d_diag_raw = np.asarray(merged["grid/D_diag"][...])
+        merged_d_diag = np.asarray(merged_d_diag_raw, dtype=np.int64)
+        merged_grg2bzg_raw = np.asarray(merged["grid/grg2bzg"][...])
+        merged_bzg2grg_raw = np.asarray(merged["grid/bzg2grg"][...])
+        merged_grid_addresses_raw = np.asarray(merged["grid/addresses"][...])
+        merged_phonon_addresses_raw = np.asarray(
+            merged["phonons/bz_grid_addresses"][...]
+        )
+        mapping_dtypes_are_integer = all(
+            array.dtype.kind in "iu"
+            for array in (
+                merged_mesh_raw,
+                merged_d_diag_raw,
+                merged_grg2bzg_raw,
+                merged_bzg2grg_raw,
+                merged_grid_addresses_raw,
+                merged_phonon_addresses_raw,
             )
+        )
+        merged_grg2bzg = np.asarray(
+            merged_grg2bzg_raw,
+            dtype=np.int64,
+        )
+        merged_bzg2grg = np.asarray(
+            merged_bzg2grg_raw,
+            dtype=np.int64,
+        )
+        merged_grid_addresses = np.asarray(
+            merged_grid_addresses_raw,
+            dtype=np.int64,
+        )
+        merged_phonon_addresses = np.asarray(
+            merged_phonon_addresses_raw,
+            dtype=np.int64,
+        )
+        n_bzg = int(merged_bzg2grg.size)
+        reference_settings = _mapping(
+            _strict_json_bytes(
+                (root / "reference-settings.json").read_bytes(),
+                name="reference-settings.json",
+            ),
+            name="reference-settings.json",
+        )
         if (
-            tuple(int(value) for value in merged["settings/mesh"][...])
+            not mapping_dtypes_are_integer
+            or merged_mesh.shape != (3,)
+            or np.any(merged_mesh <= 0)
+            or merged_d_diag.shape != (3,)
+            or not np.array_equal(merged_d_diag, merged_mesh)
+            or tuple(int(value) for value in merged_mesh)
             != tuple(
                 int(value)
-                for value in _mapping(
-                    _strict_json_bytes(
-                        (root / "reference-settings.json").read_bytes(),
-                        name="reference-settings.json",
-                    ),
-                    name="reference-settings.json",
-                )["mesh"]
+                for value in reference_settings["mesh"]
+            )
+            or math.prod(int(value) for value in merged_mesh) != n_qpoints
+            or merged_grg2bzg.shape != (n_qpoints,)
+            or merged_bzg2grg.ndim != 1
+            or n_bzg <= 0
+            or merged_grid_addresses.shape != (n_bzg, 3)
+            or merged_phonon_addresses.shape != (n_bzg, 3)
+            or not np.array_equal(
+                merged_grid_addresses,
+                merged_phonon_addresses,
+            )
+            or np.any(
+                (merged_grg2bzg < 0) | (merged_grg2bzg >= n_bzg)
+            )
+            or np.any(
+                (merged_bzg2grg < 0)
+                | (merged_bzg2grg >= n_qpoints)
+            )
+            or not np.array_equal(
+                merged_bzg2grg[merged_grg2bzg],
+                np.arange(n_qpoints, dtype=np.int64),
             )
             or np.asarray(
                 merged["settings/grid_points_grg"][...], dtype=np.int64
             ).tolist()
             != list(grid_points)
             or np.asarray(
+                merged["settings/grid_points_bzg"][...], dtype=np.int64
+            ).tolist()
+            != merged_grg2bzg[np.asarray(grid_points, dtype=np.int64)].tolist()
+            or np.asarray(
                 merged["settings/band_indices"][...], dtype=np.int64
             ).tolist()
             != list(bands)
             or merged["phonons/frequencies"].shape
-            != (n_qpoints, n_bands)
+            != (n_bzg, n_bands)
+            or merged["phonons/eigenvectors"].shape
+            != (n_bzg, n_bands, n_bands)
             or set(merged["target_q"].keys())
             != {f"grg_{point:08d}" for point in grid_points}
         ):
@@ -1283,6 +1347,14 @@ def _validate_canonical_hdf5_merge(
                         merged_target[ordinal],
                         equal_nan=True,
                     )
+                    or not np.array_equal(
+                        source_target[0],
+                        source["phonons/frequencies"][
+                            int(source_bzg[0]),
+                            np.asarray(bands, dtype=np.int64),
+                        ],
+                        equal_nan=True,
+                    )
                 ):
                     raise ReferenceMPIProvenanceError(
                         f"task {point} target frequencies do not canonically merge."
@@ -1357,6 +1429,55 @@ def _validate_canonical_hdf5_merge(
                     raise ReferenceMPIProvenanceError(
                         f"task {point} target ordinal does not canonically merge."
                     )
+                runtime_targets = runtime.get("targets")
+                runtime_target = (
+                    runtime_targets[0]
+                    if isinstance(runtime_targets, list)
+                    and len(runtime_targets) == 1
+                    and isinstance(runtime_targets[0], Mapping)
+                    else None
+                )
+                source_mesh = [
+                    int(value) for value in source["settings/mesh"][...]
+                ]
+                source_bands = [
+                    int(value)
+                    for value in source["settings/band_indices"][...]
+                ]
+                if (
+                    runtime.get("mesh") != source_mesh
+                    or runtime.get("grid_points_grg") != [point]
+                    or runtime.get("grid_points_bzg")
+                    != [int(source_bzg[0])]
+                    or runtime.get("band_indices") != source_bands
+                    or runtime.get("gamma_shape")
+                    != list(source_gamma.shape)
+                    or runtime.get("phonon_frequency_shape")
+                    != list(source["phonons/frequencies"].shape)
+                    or runtime.get("phonon_eigenvector_shape")
+                    != list(source["phonons/eigenvectors"].shape)
+                    or runtime.get("number_of_mesh_points")
+                    != math.prod(source_mesh)
+                    or runtime.get("number_of_bz_grid_points")
+                    != int(source["grid/bzg2grg"].shape[0])
+                    or runtime.get("effective_band_indices")
+                    != source_bands
+                    or runtime_target is None
+                    or runtime_target.get("grid_point_grg") != point
+                    or runtime_target.get("grid_point_bzg")
+                    != int(source_bzg[0])
+                    or runtime_target.get("triplets")
+                    != int(source_group["triplets_bzg"].shape[0])
+                    or runtime_target.get("triplet_weight_sum")
+                    != int(np.sum(source_group["triplet_weights"][...]))
+                    or runtime_target.get("interaction_strength_shape")
+                    != list(source_group["interaction_strength"].shape)
+                    or runtime_target.get("integration_weights_shape")
+                    != list(source_group["integration_weights"].shape)
+                ):
+                    raise ReferenceMPIProvenanceError(
+                        f"task {point} runtime metadata conflicts with its HDF5."
+                    )
                 _compare_hdf_node(
                     source_group,
                     merged_group,
@@ -1372,7 +1493,7 @@ def _validate_canonical_hdf5_merge(
                     "grid_point_bzg": int(source_bzg[0]),
                     "bands": list(bands),
                     "n_qpoints": int(
-                        source["phonons/frequencies"].shape[0]
+                        np.prod(source["settings/mesh"][...])
                     ),
                     "n_bands": int(
                         source["phonons/frequencies"].shape[1]

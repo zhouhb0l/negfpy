@@ -16,6 +16,7 @@ import h5py
 import numpy as np
 import pytest
 
+from negfpy.anharmonic import _reference_mpi_provenance as mpi_provenance
 from negfpy.anharmonic import silicon_mpi_oracle_validation as external_validator
 from negfpy.anharmonic._reference_mpi_provenance import (
     ReferenceMPIProvenanceError,
@@ -219,6 +220,8 @@ def _runtime_metadata(
     point: int,
     bzg: int,
     config: serial.GeneratorConfig,
+    *,
+    n_bzg: int = 2,
 ) -> dict:
     return {
         "implementation": "synthetic_phono3py_4_4_0",
@@ -236,10 +239,10 @@ def _runtime_metadata(
         "make_r0_average": True,
         "symmetrize_fc3q": False,
         "gamma_shape": [1, len(config.temperatures), 1, 2],
-        "phonon_frequency_shape": [2, 2],
-        "phonon_eigenvector_shape": [2, 2, 2],
+        "phonon_frequency_shape": [n_bzg, 2],
+        "phonon_eigenvector_shape": [n_bzg, 2, 2],
         "number_of_mesh_points": 2,
-        "number_of_bz_grid_points": 2,
+        "number_of_bz_grid_points": n_bzg,
         "effective_band_indices": [0, 1],
         "targets": [
             {
@@ -267,9 +270,43 @@ def _write_one_q(
     identity: mpi_reference.CampaignIdentity,
     config: serial.GeneratorConfig,
     point: int,
+    bzg2grg: tuple[int, ...] = (0, 1),
 ) -> None:
-    bzg = point
-    runtime = _runtime_metadata(point, bzg, config)
+    bzg2grg_array = np.asarray(bzg2grg, dtype=np.int64)
+    n_qpoints = int(np.prod(config.mesh))
+    if (
+        bzg2grg_array.ndim != 1
+        or np.any((bzg2grg_array < 0) | (bzg2grg_array >= n_qpoints))
+        or set(bzg2grg_array.tolist()) != set(range(n_qpoints))
+    ):
+        raise ValueError("Synthetic bzg2grg fixture is invalid.")
+    grg2bzg = np.asarray(
+        [
+            int(np.flatnonzero(bzg2grg_array == grg)[0])
+            for grg in range(n_qpoints)
+        ],
+        dtype=np.int64,
+    )
+    bzg = int(grg2bzg[point])
+    runtime = _runtime_metadata(
+        point,
+        bzg,
+        config,
+        n_bzg=int(bzg2grg_array.size),
+    )
+    primary_frequencies = np.asarray(
+        [[1.0, 2.0], [1.5, 2.5]],
+        dtype=np.float64,
+    )
+    frequencies = primary_frequencies[bzg2grg_array]
+    primary_addresses = np.asarray(
+        [[0, 0, 0], [1, 0, 0]],
+        dtype=np.int64,
+    )
+    addresses = np.array(primary_addresses[bzg2grg_array], copy=True)
+    for bzg_index, grg in enumerate(bzg2grg_array):
+        if bzg_index != int(grg2bzg[int(grg)]):
+            addresses[bzg_index, 0] += n_qpoints
     with h5py.File(path, "w") as h5:
         h5.attrs.update(
             {
@@ -295,7 +332,10 @@ def _write_one_q(
         crystal = h5.create_group("crystal")
         _dataset(crystal, "common", np.arange(6).reshape(2, 3))
         grid = h5.create_group("grid")
-        _dataset(grid, "grg2bzg", [0, 1])
+        _dataset(grid, "D_diag", config.mesh)
+        _dataset(grid, "grg2bzg", grg2bzg)
+        _dataset(grid, "bzg2grg", bzg2grg_array)
+        _dataset(grid, "addresses", addresses)
         fc2 = h5.create_group("fc2_random_q")
         _dataset(fc2, "qpoints", [[0.125, 0.0, 0.0]])
         _dataset(
@@ -317,19 +357,23 @@ def _write_one_q(
         _dataset(
             phonons,
             "frequencies",
-            [[1.0, 2.0], [1.5, 2.5]],
+            frequencies,
             units="cyclic_THz",
         )
         _dataset(
             phonons,
             "eigenvectors",
-            np.repeat(np.eye(2, dtype=np.complex128)[None], 2, axis=0),
+            np.repeat(
+                np.eye(2, dtype=np.complex128)[None],
+                bzg2grg_array.size,
+                axis=0,
+            ),
         )
-        _dataset(phonons, "bz_grid_addresses", [[0, 0, 0], [1, 0, 0]])
+        _dataset(phonons, "bz_grid_addresses", addresses)
         _dataset(
             phonons,
             "target_band_frequencies",
-            [[1.0 + point / 2, 2.0 + point / 2]],
+            frequencies[[bzg]],
             units="cyclic_THz",
         )
 
@@ -401,6 +445,7 @@ def _publish_task(
     point: int,
     *,
     execution_id: str | None = None,
+    bzg2grg: tuple[int, ...] = (0, 1),
 ) -> dict:
     hdf5_path, record_path, _ = mpi_reference._task_paths(
         campaign.run_dir,
@@ -411,6 +456,7 @@ def _publish_task(
         identity=campaign.identity,
         config=campaign.config,
         point=point,
+        bzg2grg=bzg2grg,
     )
     origin_identity = None
     origin = None
@@ -472,6 +518,8 @@ def _publish_task(
 def _finalized_mpi_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    bzg2grg: tuple[int, ...] = (0, 1),
 ) -> tuple[mpi_reference.PreparedCampaign, Path, dict[str, object]]:
     for name in (
         "OMP_NUM_THREADS",
@@ -486,6 +534,7 @@ def _finalized_mpi_bundle(
             campaign,
             point,
             execution_id="run-001",
+            bzg2grg=bzg2grg,
         )
         for point in campaign.config.grid_points
     }
@@ -1194,6 +1243,160 @@ def test_canonical_merge_matches_one_q_fields(tmp_path, monkeypatch) -> None:
         assert h5["target_q/grg_00000001"].attrs["target_ordinal"] == 1
         assert not any(
             name.startswith("mpi_reference_") for name in h5.attrs
+        )
+
+
+def test_boundary_duplicate_bzg_rows_pass_task_merge_and_provenance(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    campaign, output, document = _finalized_mpi_bundle(
+        tmp_path,
+        monkeypatch,
+        bzg2grg=(1, 0, 1),
+    )
+
+    validated = validate_reference_mpi_evidence(
+        output,
+        document,
+        **_validation_controls(),
+    )
+
+    assert validated["canonical_merge"]["n_qpoints"] == 2
+    assert document["selection"]["n_qpoints"] == 2
+    with h5py.File(
+        output / serial.REFERENCE_FILENAME,
+        "r",
+    ) as h5:
+        np.testing.assert_array_equal(h5["grid/grg2bzg"], [1, 0])
+        np.testing.assert_array_equal(h5["grid/bzg2grg"], [1, 0, 1])
+        np.testing.assert_array_equal(
+            h5["settings/grid_points_bzg"],
+            [1, 0],
+        )
+        assert h5["phonons/frequencies"].shape == (3, 2)
+        assert h5["phonons/eigenvectors"].shape == (3, 2, 2)
+        np.testing.assert_array_equal(
+            h5["phonons/target_band_frequencies"],
+            [[1.0, 2.0], [1.5, 2.5]],
+        )
+        assert h5["target_q/grg_00000000"].attrs["grid_point_bzg"] == 1
+        assert h5["target_q/grg_00000001"].attrs["grid_point_bzg"] == 0
+        assert h5["target_q/grg_00000000"].attrs["target_ordinal"] == 0
+        assert h5["target_q/grg_00000001"].attrs["target_ordinal"] == 1
+    for point in campaign.config.grid_points:
+        _, record_path, _ = mpi_reference._task_paths(
+            campaign.run_dir,
+            point,
+        )
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        assert record["scientific"]["n_qpoints"] == 2
+        assert record["scientific"]["grid_point_bzg"] == (1 - point)
+        assert record["runtime"]["number_of_bz_grid_points"] == 3
+
+
+def test_provenance_replay_rejects_noncanonical_duplicate_bzg_selector(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, output, document = _finalized_mpi_bundle(
+        tmp_path,
+        monkeypatch,
+        bzg2grg=(1, 0, 1),
+    )
+    original = mpi_provenance._validate_canonical_hdf5_merge
+
+    def mutate_after_evidence_authentication(*args, **kwargs):
+        with h5py.File(
+            output / serial.REFERENCE_FILENAME,
+            "r+",
+        ) as h5:
+            # BZG 2 maps to GRG 1, but the canonical grg2bzg[1] is BZG 0.
+            h5["settings/grid_points_bzg"][1] = 2
+            h5.flush()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        mpi_provenance,
+        "_validate_canonical_hdf5_merge",
+        mutate_after_evidence_authentication,
+    )
+    with pytest.raises(
+        ReferenceMPIProvenanceError,
+        match="selectors or dimensions",
+    ):
+        validate_reference_mpi_evidence(
+            output,
+            document,
+            **_validation_controls(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("broken_inverse", "BZG/GRG mapping"),
+        ("address_mismatch", "BZG/GRG mapping"),
+        ("alternate_duplicate_bzg", "BZG/GRG mapping"),
+        ("phonon_row_count", "target-axis shape"),
+        ("eigenvector_row_count", "target-axis shape"),
+        ("target_frequency_mismatch", "target-axis shape"),
+        ("runtime_bzg_count", "runtime metadata"),
+    ),
+)
+def test_task_validation_rejects_corrupt_bzg_maps_and_phonon_shapes(
+    tmp_path,
+    mutation,
+    message,
+) -> None:
+    campaign = _campaign(tmp_path)
+    hdf5_path, _, _ = mpi_reference._task_paths(campaign.run_dir, 0)
+    _write_one_q(
+        hdf5_path,
+        identity=campaign.identity,
+        config=campaign.config,
+        point=0,
+        bzg2grg=(0, 1, 0),
+    )
+    with h5py.File(hdf5_path, "r+") as h5:
+        if mutation == "broken_inverse":
+            h5["grid/bzg2grg"][0] = 1
+        elif mutation == "address_mismatch":
+            h5["phonons/bz_grid_addresses"][0, 0] += 1
+        elif mutation == "alternate_duplicate_bzg":
+            h5["settings/grid_points_bzg"][0] = 2
+            h5["target_q/grg_00000000"].attrs["grid_point_bzg"] = 2
+        elif mutation == "phonon_row_count":
+            values = np.asarray(h5["phonons/frequencies"][:2])
+            del h5["phonons/frequencies"]
+            _dataset(h5["phonons"], "frequencies", values)
+        elif mutation == "eigenvector_row_count":
+            values = np.asarray(h5["phonons/eigenvectors"][:2])
+            del h5["phonons/eigenvectors"]
+            _dataset(h5["phonons"], "eigenvectors", values)
+        elif mutation == "target_frequency_mismatch":
+            h5["phonons/target_band_frequencies"][0, 0] += 1.0
+        elif mutation == "runtime_bzg_count":
+            runtime = json.loads(h5.attrs["mpi_reference_runtime_json"])
+            runtime["number_of_bz_grid_points"] = 2
+            h5.attrs["mpi_reference_runtime_json"] = json.dumps(
+                runtime,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        else:  # pragma: no cover - guarded by the parameter table.
+            raise AssertionError(mutation)
+        h5.flush()
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match=message,
+    ):
+        mpi_reference._validate_task_hdf5(
+            hdf5_path,
+            campaign_sha256=campaign.identity.sha256,
+            config=campaign.config,
+            grid_point=0,
         )
 
 

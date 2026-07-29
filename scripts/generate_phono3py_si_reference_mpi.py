@@ -2115,19 +2115,87 @@ def _validate_task_hdf5(
         phonon_shape = tuple(
             int(value) for value in h5["phonons/frequencies"].shape
         )
+        phonon_frequencies = np.asarray(
+            h5["phonons/frequencies"][...]
+        )
+        eigenvector_shape = tuple(
+            int(value) for value in h5["phonons/eigenvectors"].shape
+        )
+        grid = h5["grid"]
+        d_diag_raw = np.asarray(grid["D_diag"][...])
+        grg2bzg_raw = np.asarray(grid["grg2bzg"][...])
+        bzg2grg_raw = np.asarray(grid["bzg2grg"][...])
+        grid_addresses_raw = np.asarray(grid["addresses"][...])
+        phonon_addresses_raw = np.asarray(
+            h5["phonons/bz_grid_addresses"][...]
+        )
+        n_qpoints = math.prod(mesh)
+        mapping_dtypes_are_integer = all(
+            array.dtype.kind in "iu"
+            for array in (
+                d_diag_raw,
+                grg2bzg_raw,
+                bzg2grg_raw,
+                grid_addresses_raw,
+                phonon_addresses_raw,
+            )
+        )
+        d_diag = np.asarray(d_diag_raw, dtype=np.int64)
+        grg2bzg = np.asarray(grg2bzg_raw, dtype=np.int64)
+        bzg2grg = np.asarray(bzg2grg_raw, dtype=np.int64)
+        grid_addresses = np.asarray(grid_addresses_raw, dtype=np.int64)
+        phonon_addresses = np.asarray(
+            phonon_addresses_raw,
+            dtype=np.int64,
+        )
+        n_bzg = int(bzg2grg.size)
+        if (
+            not mapping_dtypes_are_integer
+            or d_diag.shape != (3,)
+            or tuple(int(value) for value in d_diag) != mesh
+            or grg2bzg.shape != (n_qpoints,)
+            or bzg2grg.ndim != 1
+            or n_bzg <= 0
+            or grid_addresses.shape != (n_bzg, 3)
+            or phonon_addresses.shape != (n_bzg, 3)
+            or not np.array_equal(grid_addresses, phonon_addresses)
+            or np.any((grg2bzg < 0) | (grg2bzg >= n_bzg))
+            or np.any((bzg2grg < 0) | (bzg2grg >= n_qpoints))
+            or not np.array_equal(
+                bzg2grg[grg2bzg],
+                np.arange(n_qpoints, dtype=np.int64),
+            )
+            or int(bzg[0]) != int(grg2bzg[grid_point])
+        ):
+            raise ReferenceMPIError(
+                f"Task BZG/GRG mapping is invalid for GRG {grid_point}."
+            )
         target_frequency_shape = tuple(
             int(value)
             for value in h5["phonons/target_band_frequencies"].shape
+        )
+        target_frequencies = np.asarray(
+            h5["phonons/target_band_frequencies"][...]
         )
         if (
             len(gamma_shape) != 4
             or gamma_shape[2] != 1
             or len(phonon_shape) != 2
-            or phonon_shape[0] != math.prod(mesh)
+            or phonon_shape[0] != n_bzg
             or phonon_shape[1] <= 0
+            or eigenvector_shape
+            != (n_bzg, phonon_shape[1], phonon_shape[1])
             or np.any(bands < 0)
             or np.any(bands >= phonon_shape[1])
             or target_frequency_shape != (1, len(bands))
+            or not np.array_equal(
+                target_frequencies,
+                phonon_frequencies[
+                    int(bzg[0]),
+                    bands,
+                ][None, :],
+                equal_nan=True,
+            )
         ):
             raise ReferenceMPIError(
                 f"Task target-axis shape is invalid for GRG {grid_point}."
@@ -2144,6 +2212,45 @@ def _validate_task_hdf5(
             raise ReferenceMPIError("Task runtime metadata is invalid.") from exc
         if not isinstance(runtime, dict):
             raise ReferenceMPIError("Task runtime metadata must be an object.")
+        runtime_targets = runtime.get("targets")
+        runtime_target = (
+            runtime_targets[0]
+            if isinstance(runtime_targets, list)
+            and len(runtime_targets) == 1
+            and isinstance(runtime_targets[0], Mapping)
+            else None
+        )
+        if (
+            runtime.get("mesh") != list(mesh)
+            or runtime.get("grid_points_grg") != [grid_point]
+            or runtime.get("grid_points_bzg") != [int(bzg[0])]
+            or runtime.get("band_indices") != [
+                int(value) for value in bands
+            ]
+            or runtime.get("gamma_shape") != list(gamma_shape)
+            or runtime.get("phonon_frequency_shape") != list(phonon_shape)
+            or runtime.get("phonon_eigenvector_shape")
+            != list(eigenvector_shape)
+            or runtime.get("number_of_mesh_points") != n_qpoints
+            or runtime.get("number_of_bz_grid_points") != n_bzg
+            or runtime.get("effective_band_indices")
+            != [int(value) for value in bands]
+            or runtime_target is None
+            or runtime_target.get("grid_point_grg") != grid_point
+            or runtime_target.get("grid_point_bzg") != int(bzg[0])
+            or runtime_target.get("triplets")
+            != int(target["triplets_bzg"].shape[0])
+            or runtime_target.get("triplet_weight_sum")
+            != int(np.sum(target["triplet_weights"][...]))
+            or runtime_target.get("interaction_strength_shape")
+            != list(target["interaction_strength"].shape)
+            or runtime_target.get("integration_weights_shape")
+            != list(target["integration_weights"].shape)
+        ):
+            raise ReferenceMPIError(
+                f"Task runtime metadata conflicts with HDF5 for GRG "
+                f"{grid_point}."
+            )
         origin_text = h5.attrs.get(
             "mpi_reference_origin_assignment_json",
             "",
@@ -2194,7 +2301,7 @@ def _validate_task_hdf5(
             "grid_point_grg": grid_point,
             "grid_point_bzg": int(bzg[0]),
             "bands": [int(value) for value in bands],
-            "n_qpoints": int(phonon_shape[0]),
+            "n_qpoints": int(n_qpoints),
             "n_bands": int(phonon_shape[1]),
             "gamma_shape": list(gamma_shape),
             "target_frequency_shape": list(target_frequency_shape),
