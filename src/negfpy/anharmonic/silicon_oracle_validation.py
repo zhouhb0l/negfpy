@@ -213,13 +213,25 @@ def _manifest_identity(path: Path, yaml_sha256: str) -> dict[str, Any]:
         raise ValueError(
             "The crystal-mapping YAML does not match the pinned manifest."
         )
+    # The normalized file is hashed independently in report["inputs"].
+    # This embedded digest identifies the immutable manifest it was derived
+    # from and must not be replaced by the normalized file's own digest.
+    source_manifest_sha256 = manifest.get("input_manifest_sha256")
+    if (
+        not isinstance(source_manifest_sha256, str)
+        or _SHA256_RE.fullmatch(source_manifest_sha256.lower()) is None
+    ):
+        raise ValueError(
+            "The normalized input manifest does not identify its immutable "
+            "source manifest."
+        )
     return {
         "dataset_id": manifest["dataset_id"],
         "source_repository": source["repository"],
         "source_commit": source["commit"],
         "phono3py_yaml_relative_path": yaml_record.get("path"),
         "phono3py_yaml_sha256": expected_yaml_sha.lower(),
-        "input_manifest_sha256": _sha256(path),
+        "input_manifest_sha256": source_manifest_sha256.lower(),
     }
 
 

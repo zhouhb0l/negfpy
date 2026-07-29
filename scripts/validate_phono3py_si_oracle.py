@@ -30,7 +30,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--fc3-compact", required=True, type=Path)
     parser.add_argument("--fc3-full", required=True, type=Path)
     parser.add_argument("--phono3py-yaml", required=True, type=Path)
-    parser.add_argument("--input-manifest", required=True, type=Path)
+    parser.add_argument(
+        "--input-manifest",
+        required=True,
+        type=Path,
+        help="Generated input-manifest.normalized.json from the reference bundle.",
+    )
     parser.add_argument("--checksums", required=True, type=Path)
     parser.add_argument("--environment-lock", required=True, type=Path)
     parser.add_argument(

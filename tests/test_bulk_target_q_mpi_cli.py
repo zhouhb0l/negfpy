@@ -482,7 +482,7 @@ def test_target_source_manifest_binds_qualified_dataset_and_yaml() -> None:
     yaml_identity = SimpleNamespace(sha256="f" * 64)
     report = {
         "source_manifest": {
-            "input_manifest_sha256": "a" * 64,
+            "input_manifest_sha256": "b" * 64,
             "phono3py_yaml_sha256": "f" * 64,
         }
     }
@@ -495,7 +495,7 @@ def test_target_source_manifest_binds_qualified_dataset_and_yaml() -> None:
     normalized = {
         "schema_version": 1,
         "dataset_id": driver.PINNED_SILICON_DATASET_ID,
-        "input_manifest_sha256": "a" * 64,
+        "input_manifest_sha256": "b" * 64,
         "versions": {"phono3py": "4.4.0", "phonopy": "4.4.0"},
         "source": {
             "repository": driver.PINNED_SILICON_REPOSITORY,
@@ -526,6 +526,18 @@ def test_target_source_manifest_binds_qualified_dataset_and_yaml() -> None:
         )
         == driver.PINNED_SILICON_SOURCE_COMMIT
     )
+    normalized["input_manifest_sha256"] = "c" * 64
+    with pytest.raises(
+        driver.SiliconTargetQCLIError,
+        match="pinned silicon",
+    ):
+        driver._validate_target_source_records(
+            normalized_manifest=normalized,
+            source_verification=verified,
+            serial_report=report,
+            yaml_identity=yaml_identity,
+        )
+    normalized["input_manifest_sha256"] = "b" * 64
     normalized["source"]["commit"] = "0" * 40
     with pytest.raises(
         driver.SiliconTargetQCLIError,
@@ -536,6 +548,41 @@ def test_target_source_manifest_binds_qualified_dataset_and_yaml() -> None:
             source_verification=verified,
             serial_report=report,
             yaml_identity=yaml_identity,
+        )
+
+
+def test_target_normalized_manifest_must_be_exact_qualified_file() -> None:
+    target_records = {
+        "target_environment_lock": SimpleNamespace(sha256="1" * 64),
+        "target_phono3py_yaml": SimpleNamespace(sha256="2" * 64),
+        "target_bundle_input-manifest.normalized.json": SimpleNamespace(
+            sha256="3" * 64
+        ),
+        "target_bundle_fc2.compact.hdf5": SimpleNamespace(sha256="4" * 64),
+        "target_bundle_fc3.compact.hdf5": SimpleNamespace(sha256="5" * 64),
+    }
+    qualified_records = {
+        "qualification_environment_lock": SimpleNamespace(sha256="1" * 64),
+        "qualification_phono3py_yaml": SimpleNamespace(sha256="2" * 64),
+        "qualification_input_manifest": SimpleNamespace(sha256="3" * 64),
+        "qualification_fc2_compact_hdf5": SimpleNamespace(sha256="4" * 64),
+        "qualification_fc3_compact_hdf5": SimpleNamespace(sha256="5" * 64),
+    }
+
+    driver._validate_qualified_target_inputs(
+        identities=target_records,
+        report_records=qualified_records,
+    )
+    target_records[
+        "target_bundle_input-manifest.normalized.json"
+    ] = SimpleNamespace(sha256="6" * 64)
+    with pytest.raises(
+        driver.SiliconTargetQCLIError,
+        match="exact qualified silicon input",
+    ):
+        driver._validate_qualified_target_inputs(
+            identities=target_records,
+            report_records=qualified_records,
         )
 
 

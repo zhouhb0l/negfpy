@@ -361,6 +361,7 @@ def _pinned_input_manifest(yaml_sha256: str) -> dict:
     return {
         "schema_version": 1,
         "dataset_id": driver.PINNED_SILICON_DATASET_ID,
+        "input_manifest_sha256": "8" * 64,
         "versions": {"phono3py": "4.4.0", "phonopy": "4.4.0"},
         "source": {
             "repository": driver.PINNED_SILICON_REPOSITORY,
@@ -373,6 +374,33 @@ def _pinned_input_manifest(yaml_sha256: str) -> dict:
             },
         },
     }
+
+
+def test_manifest_identity_keeps_source_and_normalized_hashes_distinct(
+    tmp_path: Path,
+) -> None:
+    yaml_path = tmp_path / "phono3py_disp.yaml"
+    yaml_path.write_bytes(b"yaml")
+    manifest_path = tmp_path / "input-manifest.normalized.json"
+    payload = _pinned_input_manifest(_sha256(yaml_path))
+    _write_json(manifest_path, payload)
+
+    identity = driver._manifest_identity(
+        manifest_path,
+        _sha256(yaml_path),
+    )
+    assert identity["input_manifest_sha256"] == "8" * 64
+    assert identity["input_manifest_sha256"] != _sha256(manifest_path)
+
+    for invalid_digest in (None, 7, "a" * 63, "g" * 64):
+        payload["input_manifest_sha256"] = invalid_digest
+        _write_json(manifest_path, payload)
+        with pytest.raises(ValueError, match="immutable source manifest"):
+            driver._manifest_identity(manifest_path, _sha256(yaml_path))
+    del payload["input_manifest_sha256"]
+    _write_json(manifest_path, payload)
+    with pytest.raises(ValueError, match="immutable source manifest"):
+        driver._manifest_identity(manifest_path, _sha256(yaml_path))
 
 
 def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
@@ -674,6 +702,15 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
 
     assert report["validation_passed"]
     assert report["certification_eligible"]
+    assert report["source_manifest"]["input_manifest_sha256"] == "8" * 64
+    assert (
+        report["inputs"]["input_manifest"]["sha256"]
+        == _sha256(input_manifest_path)
+    )
+    assert (
+        report["source_manifest"]["input_manifest_sha256"]
+        != report["inputs"]["input_manifest"]["sha256"]
+    )
     assert calls["make_r0_average"] == [True, True]
     selectors = calls["linewidth_selectors"]
     np.testing.assert_array_equal(

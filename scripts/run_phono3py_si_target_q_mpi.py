@@ -957,6 +957,36 @@ def _validate_target_settings(
         )
 
 
+def _validate_qualified_target_inputs(
+    *,
+    identities: Mapping[str, FileIdentity],
+    report_records: Mapping[str, FileIdentity],
+) -> None:
+    for target_role, qualified_role in (
+        ("target_environment_lock", "qualification_environment_lock"),
+        ("target_phono3py_yaml", "qualification_phono3py_yaml"),
+        (
+            "target_bundle_input-manifest.normalized.json",
+            "qualification_input_manifest",
+        ),
+        (
+            "target_bundle_fc2.compact.hdf5",
+            "qualification_fc2_compact_hdf5",
+        ),
+        (
+            "target_bundle_fc3.compact.hdf5",
+            "qualification_fc3_compact_hdf5",
+        ),
+    ):
+        if identities[target_role].sha256 != report_records[
+            qualified_role
+        ].sha256:
+            raise SiliconTargetQCLIError(
+                f"Target input {target_role!r} differs from the exact "
+                "qualified silicon input."
+            )
+
+
 def _verify_target_bundle(
     *,
     reference_path: Path,
@@ -1016,26 +1046,10 @@ def _verify_target_bundle(
                 f"Explicit target input {name!r} is not the checksummed "
                 "bundle artifact."
             )
-    for target_role, qualified_role in (
-        ("target_environment_lock", "qualification_environment_lock"),
-        ("target_phono3py_yaml", "qualification_phono3py_yaml"),
-        (
-            "target_bundle_fc2.compact.hdf5",
-            "qualification_fc2_compact_hdf5",
-        ),
-        (
-            "target_bundle_fc3.compact.hdf5",
-            "qualification_fc3_compact_hdf5",
-        ),
-    ):
-        if (
-            identities[target_role].sha256
-            != report_records[qualified_role].sha256
-        ):
-            raise SiliconTargetQCLIError(
-                f"Target input {target_role!r} differs from the exact "
-                "qualified silicon input."
-            )
+    _validate_qualified_target_inputs(
+        identities=identities,
+        report_records=report_records,
+    )
     if (
         identities["target_environment_lock"].sha256
         != PINNED_SILICON_ENVIRONMENT_LOCK_SHA256
