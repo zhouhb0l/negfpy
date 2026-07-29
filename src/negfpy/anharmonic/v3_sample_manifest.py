@@ -6,7 +6,8 @@ independent phono3py reference*, before a NEGFPy interaction tensor exists.
 Consequently, a candidate calculation cannot influence which coordinates are
 tested.
 
-Selection is deliberately stricter than random scalar sampling:
+The archived v1 selection is deliberately stricter than random scalar
+sampling:
 
 * exact promoted blocks are deduplicated before selection;
 * a robust nonzero floor is derived from the reference itself;
@@ -17,6 +18,12 @@ Selection is deliberately stricter than random scalar sampling:
 * every archived target q point and target band is represented; and
 * all empty strata and all consumed-input identities are recorded.
 
+For meshes whose target-q count alone can exceed the 512-record reader limit,
+the explicitly selected v2 algorithm makes two streaming passes, retains only
+fixed-size deterministic reservoirs, preserves the physical-stratum,
+strength-range, global-maximum, and target-band gates, and deliberately does
+not claim coverage of every target q point.
+
 The JSON schema and strict reader live in :mod:`silicon_oracle_validation`.
 Keeping one reader avoids two subtly incompatible release-provenance formats.
 """
@@ -24,12 +31,13 @@ Keeping one reader avoids two subtly incompatible release-provenance formats.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -44,6 +52,8 @@ from .momentum import (
     shortest_bz_address_images,
 )
 from .silicon_oracle_validation import (
+    V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM,
+    V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM_VERSION,
     V3_SAMPLE_MANIFEST_SCHEMA,
     V3_SAMPLE_SELECTION_ALGORITHM,
     V3_SAMPLE_SELECTION_ALGORITHM_VERSION,
@@ -59,13 +69,20 @@ _DEGENERACY_TOLERANCE_THZ = 1.0e-4
 _ABSOLUTE_NONZERO_FLOOR_EV2 = 1.0e-30
 _RELATIVE_NONZERO_FLOOR = 1.0e-12
 _DEFAULT_MINIMUM_PROMOTED_BLOCKS = 64
+_MAXIMUM_PROMOTED_BLOCKS = 512
 _SAMPLES_PER_POPULATED_STRATUM = 2
+_STRENGTH_BINS_PER_PROCESS = 8
+_SAMPLES_PER_STRENGTH_BIN = 2
+_TARGET_BAND_RESERVOIR_SIZE = 16
 _QUANTILES = (0.1, 0.5, 0.9)
 _Q_REGIONS = ("gamma", "near", "generic")
 _TARGET_CHARACTERS = ("acoustic", "optical")
 _INTERNAL_CHARACTERS = ("aa", "ao", "oo")
 _PROCESSES = ("normal", "umklapp")
 _SHA256_HEX = frozenset("0123456789abcdef")
+
+LEGACY_FULL_COVERAGE_SELECTION = "legacy_full_coverage_v1"
+LARGE_MESH_BOUNDED_SELECTION = "large_mesh_streaming_bounded_v2"
 
 
 class V3SampleCoverageError(ValueError):
@@ -120,6 +137,24 @@ class _PromotedBlock:
             "reference_invariant_block_sum_ev2": self.strength_ev2,
             "stratum": self.stratum,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _PromotedScanContext:
+    """Read-only mesh and degeneracy data shared by promoted-block scans."""
+
+    reference_sha256: str
+    degeneracy_tolerance_thz: float
+    primitive_lattice_sha256: str
+    frequencies: np.ndarray
+    groups_by_q: tuple[tuple[tuple[int, ...], ...], ...]
+    target_band_positions: Mapping[int, int]
+    selected_target_bands: frozenset[int]
+    periods: np.ndarray
+    mesh: UniformBZMesh
+    reduced_reciprocal_lattice: np.ndarray
+    address_images: tuple[tuple[Any, ...], ...]
+    regions: Mapping[int, str]
 
 
 def _regular_file(path: str | os.PathLike[str], *, name: str) -> Path:
@@ -344,19 +379,21 @@ def _all_strata() -> tuple[str, ...]:
     )
 
 
-def _enumerate_promoted_blocks(
+def _array_identity_sha256(values: Any) -> str:
+    array = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _prepare_promoted_scan(
     reference: Phono3pySiliconReference,
     *,
     degeneracy_tolerance_thz: float,
     primitive_lattice: Any,
-) -> tuple[_PromotedBlock, ...]:
-    try:
-        import h5py
-    except ImportError as exc:  # pragma: no cover - optional dependency guard
-        raise RuntimeError(
-            "V3 sample selection requires the optional h5py package."
-        ) from exc
-
+) -> _PromotedScanContext:
     frequencies = reference.frequencies_in_grg_order()
     groups_by_q = tuple(
         _degenerate_groups(row, degeneracy_tolerance_thz)
@@ -366,7 +403,6 @@ def _enumerate_promoted_blocks(
         int(band): position
         for position, band in enumerate(reference.band_indices)
     }
-    selected_target_bands = set(target_band_positions)
     periods = np.asarray(reference.d_diag, dtype=np.int64)
     mesh = UniformBZMesh(reference.mesh)
     reduced_reciprocal_lattice = niggli_reduced_reciprocal_lattice(
@@ -382,14 +418,118 @@ def _enumerate_promoted_blocks(
         primitive_lattice=primitive_lattice,
         address_images=address_images,
     )
-    result: list[_PromotedBlock] = []
-    seen: set[
-        tuple[int, int, tuple[int, ...], tuple[int, ...], tuple[int, ...]]
-    ] = set()
+    return _PromotedScanContext(
+        reference_sha256=reference.sha256,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice_sha256=_array_identity_sha256(primitive_lattice),
+        frequencies=frequencies,
+        groups_by_q=groups_by_q,
+        target_band_positions=target_band_positions,
+        selected_target_bands=frozenset(target_band_positions),
+        periods=periods,
+        mesh=mesh,
+        reduced_reciprocal_lattice=reduced_reciprocal_lattice,
+        address_images=address_images,
+        regions=regions,
+    )
+
+
+def _validated_scan_context(
+    reference: Phono3pySiliconReference,
+    *,
+    degeneracy_tolerance_thz: float,
+    primitive_lattice: Any,
+    scan_context: _PromotedScanContext | None,
+) -> _PromotedScanContext:
+    if scan_context is None:
+        return _prepare_promoted_scan(
+            reference,
+            degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+            primitive_lattice=primitive_lattice,
+        )
+    if not isinstance(scan_context, _PromotedScanContext):
+        raise TypeError("scan_context must be a _PromotedScanContext.")
+    if (
+        scan_context.reference_sha256 != reference.sha256
+        or scan_context.degeneracy_tolerance_thz
+        != degeneracy_tolerance_thz
+        or scan_context.primitive_lattice_sha256
+        != _array_identity_sha256(primitive_lattice)
+    ):
+        raise ValueError("scan_context does not identify this exact scan.")
+    return scan_context
+
+
+def _selected_target_grid_points(
+    reference: Phono3pySiliconReference,
+    target_grid_points: Sequence[int] | None,
+) -> tuple[int, ...]:
+    archived = tuple(int(value) for value in reference.grid_points_grg)
+    if target_grid_points is None:
+        return archived
+    if isinstance(target_grid_points, (str, bytes)):
+        raise TypeError("target_grid_points must be an integer sequence.")
+    selected = tuple(int(value) for value in target_grid_points)
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError("target_grid_points must be nonempty and unique.")
+    if any(value not in reference.target_groups for value in selected):
+        raise ValueError(
+            "target_grid_points contains a q point absent from the reference."
+        )
+    return selected
+
+
+def _iter_promoted_blocks(
+    reference: Phono3pySiliconReference,
+    *,
+    degeneracy_tolerance_thz: float,
+    primitive_lattice: Any,
+    track_duplicates: bool,
+    target_grid_points: Sequence[int] | None = None,
+    scan_context: _PromotedScanContext | None = None,
+    verify_reference_hash: bool = True,
+) -> Iterator[_PromotedBlock]:
+    """Yield promoted blocks in the legacy canonical traversal order.
+
+    ``track_duplicates`` is retained for the legacy materializing selector,
+    whose exact defensive behavior is part of the archived v1 contract.  The
+    bounded selector disables it: the already-validated one-to-one q1 route
+    map and disjoint degeneracy partitions make duplicate keys impossible,
+    and retaining every key would defeat streaming memory bounds.
+    """
+
+    try:
+        import h5py
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError(
+            "V3 sample selection requires the optional h5py package."
+        ) from exc
+
+    context = _validated_scan_context(
+        reference,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice=primitive_lattice,
+        scan_context=scan_context,
+    )
+    selected_q0 = _selected_target_grid_points(
+        reference,
+        target_grid_points,
+    )
+    seen: (
+        set[
+            tuple[
+                int,
+                int,
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+            ]
+        ]
+        | None
+    ) = set() if track_duplicates else None
 
     with h5py.File(reference.path, "r") as h5:
-        for q0_value in reference.grid_points_grg:
-            q0 = int(q0_value)
+        for q0 in selected_q0:
             group = h5[reference.target_groups[q0]]
             triplets_bzg = np.asarray(group["triplets_bzg"], dtype=np.int64)
             triplets_grg = reference.bzg2grg[triplets_bzg]
@@ -418,7 +558,7 @@ def _enumerate_promoted_blocks(
                 raise Phono3pyReferenceSchemaError(
                     f"{group.name} has duplicate or missing q1 routes."
                 )
-            production_routes = mesh.triplets_at_q(q0)
+            production_routes = context.mesh.triplets_at_q(q0)
 
             for q1 in range(reference.n_qpoints):
                 route_position = route_for_q1[q1]
@@ -428,7 +568,7 @@ def _enumerate_promoted_blocks(
                     axis=0,
                     dtype=np.int64,
                 )
-                if np.any(np.mod(address_sum, periods) != 0):
+                if np.any(np.mod(address_sum, context.periods) != 0):
                     raise Phono3pyReferenceSchemaError(
                         f"{group.name} contains a triplet that violates "
                         "mesh momentum conservation."
@@ -440,28 +580,30 @@ def _enumerate_promoted_blocks(
                     )
                 process = _production_process(
                     production_triplet,
-                    address_images=address_images,
+                    address_images=context.address_images,
                     primitive_lattice=primitive_lattice,
                     reduced_reciprocal_lattice=(
-                        reduced_reciprocal_lattice
+                        context.reduced_reciprocal_lattice
                     ),
                 )
                 values = strengths[route_position]
-                for target_subspace in groups_by_q[q0]:
-                    if not set(target_subspace).issubset(selected_target_bands):
+                for target_subspace in context.groups_by_q[q0]:
+                    if not set(target_subspace).issubset(
+                        context.selected_target_bands
+                    ):
                         # An incomplete degenerate target block is gauge
                         # dependent and therefore cannot enter the manifest.
                         continue
                     target_axis = tuple(
-                        target_band_positions[band]
+                        context.target_band_positions[band]
                         for band in target_subspace
                     )
                     target_character = _branch_character(
                         target_subspace,
                         n_bands=reference.n_bands,
                     )
-                    for band1_subspace in groups_by_q[q1]:
-                        for band2_subspace in groups_by_q[q2]:
+                    for band1_subspace in context.groups_by_q[q1]:
+                        for band2_subspace in context.groups_by_q[q2]:
                             block_values = values[
                                 np.ix_(
                                     target_axis,
@@ -479,7 +621,7 @@ def _enumerate_promoted_blocks(
                                 n_bands=reference.n_bands,
                             )
                             stratum = (
-                                f"{regions[q0]}.{target_character}."
+                                f"{context.regions[q0]}.{target_character}."
                                 f"{internal}.{process}"
                             )
                             key = (
@@ -489,14 +631,220 @@ def _enumerate_promoted_blocks(
                                 band1_subspace,
                                 band2_subspace,
                             )
-                            if key in seen:
+                            if seen is not None and key in seen:
                                 raise Phono3pyReferenceSchemaError(
                                     "Reference routes produced a duplicate "
                                     "gauge-invariant promoted block."
                                 )
-                            seen.add(key)
-                            result.append(
-                                _PromotedBlock(
+                            if seen is not None:
+                                seen.add(key)
+                            yield _PromotedBlock(
+                                q0=q0,
+                                q1=q1,
+                                q2=q2,
+                                target_subspace=target_subspace,
+                                band1_subspace=band1_subspace,
+                                band2_subspace=band2_subspace,
+                                seed_b0=target_subspace[0],
+                                seed_b1=band1_subspace[0],
+                                seed_b2=band2_subspace[0],
+                                process=process,
+                                strength_ev2=strength,
+                                stratum=stratum,
+                                coordinate_sha256=_coordinate_sha256(
+                                    q0,
+                                    q1,
+                                    q2,
+                                    target_subspace,
+                                    band1_subspace,
+                                    band2_subspace,
+                                ),
+                            )
+    if (
+        verify_reference_hash
+        and _file_sha256(reference.path) != reference.sha256
+    ):
+        raise Phono3pyReferenceSchemaError(
+            "Reference HDF5 changed while V3 samples were selected."
+        )
+
+
+def _vectorized_maximum_promoted_block(
+    reference: Phono3pySiliconReference,
+    *,
+    degeneracy_tolerance_thz: float,
+    primitive_lattice: Any,
+    target_grid_points: Sequence[int] | None = None,
+    scan_context: _PromotedScanContext | None = None,
+    verify_reference_hash: bool = True,
+) -> _PromotedBlock:
+    """Find the exact promoted-block maximum with vectorized q-route slabs.
+
+    NumPy is used only to shortlist candidates.  The selected maxima are
+    recomputed with the same ``math.fsum`` and SHA256 tie rule as the full
+    promoted-block iterator, so this optimization does not alter v2 bytes.
+    """
+
+    try:
+        import h5py
+    except ImportError as exc:  # pragma: no cover - optional dependency guard
+        raise RuntimeError(
+            "V3 sample selection requires the optional h5py package."
+        ) from exc
+
+    context = _validated_scan_context(
+        reference,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice=primitive_lattice,
+        scan_context=scan_context,
+    )
+    selected_q0 = _selected_target_grid_points(
+        reference,
+        target_grid_points,
+    )
+    maximum: _PromotedBlock | None = None
+    epsilon = np.finfo(np.float64).eps
+
+    with h5py.File(reference.path, "r") as h5:
+        for q0 in selected_q0:
+            group = h5[reference.target_groups[q0]]
+            triplets_bzg = np.asarray(group["triplets_bzg"], dtype=np.int64)
+            triplets_grg = reference.bzg2grg[triplets_bzg]
+            triplet_addresses = np.asarray(
+                group["triplet_addresses"],
+                dtype=np.int64,
+            )
+            strengths = np.asarray(
+                group["interaction_strength"],
+                dtype=np.float64,
+            )
+            if not np.all(np.isfinite(strengths)) or np.any(strengths < 0.0):
+                raise Phono3pyReferenceSchemaError(
+                    f"{group.name}/interaction_strength must be finite and "
+                    "nonnegative."
+                )
+            if triplet_addresses.shape != (reference.n_qpoints, 3, 3):
+                raise Phono3pyReferenceSchemaError(
+                    f"{group.name}/triplet_addresses has an invalid shape."
+                )
+            route_for_q1 = {
+                int(route[1]): position
+                for position, route in enumerate(triplets_grg)
+            }
+            if len(route_for_q1) != reference.n_qpoints:
+                raise Phono3pyReferenceSchemaError(
+                    f"{group.name} has duplicate or missing q1 routes."
+                )
+            production_routes = context.mesh.triplets_at_q(q0)
+            by_partition: dict[
+                tuple[
+                    tuple[tuple[int, ...], ...],
+                    tuple[tuple[int, ...], ...],
+                ],
+                list[tuple[int, int, int]],
+            ] = {}
+            for q1 in range(reference.n_qpoints):
+                route_position = route_for_q1[q1]
+                q2 = int(triplets_grg[route_position, 2])
+                address_sum = np.sum(
+                    triplet_addresses[route_position],
+                    axis=0,
+                    dtype=np.int64,
+                )
+                if np.any(np.mod(address_sum, context.periods) != 0):
+                    raise Phono3pyReferenceSchemaError(
+                        f"{group.name} contains a triplet that violates "
+                        "mesh momentum conservation."
+                    )
+                if production_routes[q1].q2_index != q2:
+                    raise Phono3pyReferenceSchemaError(
+                        f"{group.name} differs from the production q2 route."
+                    )
+                signature = (
+                    context.groups_by_q[q1],
+                    context.groups_by_q[q2],
+                )
+                by_partition.setdefault(signature, []).append(
+                    (q1, route_position, q2)
+                )
+
+            for signature in sorted(by_partition):
+                band1_groups, band2_groups = signature
+                routes = by_partition[signature]
+                route_positions = np.asarray(
+                    [value[1] for value in routes],
+                    dtype=np.int64,
+                )
+                for target_subspace in context.groups_by_q[q0]:
+                    if not set(target_subspace).issubset(
+                        context.selected_target_bands
+                    ):
+                        continue
+                    target_axis = tuple(
+                        context.target_band_positions[band]
+                        for band in target_subspace
+                    )
+                    target_character = _branch_character(
+                        target_subspace,
+                        n_bands=reference.n_bands,
+                    )
+                    for band1_subspace in band1_groups:
+                        for band2_subspace in band2_groups:
+                            slab = strengths[
+                                np.ix_(
+                                    route_positions,
+                                    target_axis,
+                                    band1_subspace,
+                                    band2_subspace,
+                                )
+                            ]
+                            approximate = np.sum(
+                                slab,
+                                axis=(1, 2, 3),
+                                dtype=np.float64,
+                            )
+                            approximate_maximum = float(np.max(approximate))
+                            term_count = (
+                                len(target_axis)
+                                * len(band1_subspace)
+                                * len(band2_subspace)
+                            )
+                            gamma = (
+                                term_count * epsilon
+                                / (1.0 - term_count * epsilon)
+                            )
+                            threshold = np.nextafter(
+                                approximate_maximum
+                                * (1.0 - gamma)
+                                / (1.0 + gamma),
+                                -math.inf,
+                            )
+                            shortlist = np.flatnonzero(
+                                approximate >= threshold
+                            )
+                            internal = _internal_character(
+                                band1_subspace,
+                                band2_subspace,
+                                n_bands=reference.n_bands,
+                            )
+                            for local_position in shortlist:
+                                strength = math.fsum(
+                                    float(value)
+                                    for value in slab[
+                                        int(local_position)
+                                    ].ravel(order="C")
+                                )
+                                q1, _, q2 = routes[int(local_position)]
+                                production_triplet = production_routes[q1]
+                                process = _production_process(
+                                    production_triplet,
+                                    address_images=context.address_images,
+                                    primitive_lattice=primitive_lattice,
+                                    reduced_reciprocal_lattice=(
+                                        context.reduced_reciprocal_lattice
+                                    ),
+                                )
+                                candidate = _PromotedBlock(
                                     q0=q0,
                                     q1=q1,
                                     q2=q2,
@@ -508,7 +856,11 @@ def _enumerate_promoted_blocks(
                                     seed_b2=band2_subspace[0],
                                     process=process,
                                     strength_ev2=strength,
-                                    stratum=stratum,
+                                    stratum=(
+                                        f"{context.regions[q0]}."
+                                        f"{target_character}.{internal}."
+                                        f"{process}"
+                                    ),
                                     coordinate_sha256=_coordinate_sha256(
                                         q0,
                                         q1,
@@ -518,12 +870,41 @@ def _enumerate_promoted_blocks(
                                         band2_subspace,
                                     ),
                                 )
-                            )
-    if _file_sha256(reference.path) != reference.sha256:
+                                maximum = _canonical_extreme(
+                                    maximum,
+                                    candidate,
+                                    maximum=True,
+                                )
+    if (
+        verify_reference_hash
+        and _file_sha256(reference.path) != reference.sha256
+    ):
         raise Phono3pyReferenceSchemaError(
-            "Reference HDF5 changed while V3 samples were selected."
+            "Reference HDF5 changed while its V3 maximum was selected."
         )
-    return tuple(result)
+    if maximum is None:
+        raise V3SampleCoverageError(
+            "The reference contains no promoted interaction blocks."
+        )
+    return maximum
+
+
+def _enumerate_promoted_blocks(
+    reference: Phono3pySiliconReference,
+    *,
+    degeneracy_tolerance_thz: float,
+    primitive_lattice: Any,
+) -> tuple[_PromotedBlock, ...]:
+    """Materialize the exact archived v1 candidate population."""
+
+    return tuple(
+        _iter_promoted_blocks(
+            reference,
+            degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+            primitive_lattice=primitive_lattice,
+            track_duplicates=True,
+        )
+    )
 
 
 def _quantile_member(
@@ -709,6 +1090,404 @@ def _select_blocks(
     return selected_blocks, required_strata, empty_strata
 
 
+class _SmallestHashReservoir:
+    """Retain a fixed number of canonical-hash-smallest blocks."""
+
+    __slots__ = ("capacity", "_heap", "_keys")
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = _positive_int(capacity, name="capacity")
+        self._heap: list[
+            tuple[
+                int,
+                tuple[
+                    int,
+                    int,
+                    tuple[int, ...],
+                    tuple[int, ...],
+                    tuple[int, ...],
+                ],
+                _PromotedBlock,
+            ]
+        ] = []
+        self._keys: set[
+            tuple[
+                int,
+                int,
+                tuple[int, ...],
+                tuple[int, ...],
+                tuple[int, ...],
+            ]
+        ] = set()
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def add(self, candidate: _PromotedBlock) -> None:
+        if candidate.key in self._keys:
+            return
+        priority = int(candidate.coordinate_sha256, 16)
+        entry = (-priority, candidate.key, candidate)
+        if len(self._heap) < self.capacity:
+            heapq.heappush(self._heap, entry)
+            self._keys.add(candidate.key)
+            return
+        worst_priority = -self._heap[0][0]
+        if priority > worst_priority:
+            return
+        if priority == worst_priority:
+            # A SHA256 collision is not a normal execution path, but resolving
+            # it explicitly keeps selection deterministic without retaining a
+            # population-sized collision table.
+            worst = max(
+                self._heap,
+                key=lambda item: (-item[0], item[1]),
+            )
+            if (priority, candidate.key) >= (-worst[0], worst[1]):
+                return
+            self._heap.remove(worst)
+            heapq.heapify(self._heap)
+            self._keys.remove(worst[2].key)
+            heapq.heappush(self._heap, entry)
+            self._keys.add(candidate.key)
+            return
+        removed = heapq.heapreplace(self._heap, entry)
+        self._keys.remove(removed[2].key)
+        self._keys.add(candidate.key)
+
+    def values(self) -> tuple[_PromotedBlock, ...]:
+        return tuple(
+            sorted(
+                (entry[2] for entry in self._heap),
+                key=lambda item: (item.coordinate_sha256, item.key),
+            )
+        )
+
+
+def _canonical_extreme(
+    current: _PromotedBlock | None,
+    candidate: _PromotedBlock,
+    *,
+    maximum: bool,
+) -> _PromotedBlock:
+    if current is None:
+        return candidate
+    if (
+        candidate.strength_ev2 > current.strength_ev2
+        if maximum
+        else candidate.strength_ev2 < current.strength_ev2
+    ):
+        return candidate
+    if (
+        candidate.strength_ev2 == current.strength_ev2
+        and (candidate.coordinate_sha256, candidate.key)
+        < (current.coordinate_sha256, current.key)
+    ):
+        return candidate
+    return current
+
+
+def _strength_bin(
+    strength: float,
+    *,
+    floor: float,
+    global_maximum: float,
+) -> int:
+    """Return one of eight fixed logarithmic positions in the robust range."""
+
+    if global_maximum <= floor:
+        return 0
+    fraction = math.log(strength / floor) / math.log(global_maximum / floor)
+    return min(
+        _STRENGTH_BINS_PER_PROCESS - 1,
+        max(0, int(math.floor(fraction * _STRENGTH_BINS_PER_PROCESS))),
+    )
+
+
+class _BoundedSelectionAccumulator:
+    """Fixed-memory v2 selector state for the second reference-data pass."""
+
+    __slots__ = (
+        "floor",
+        "global_maximum",
+        "maximum_promoted_blocks",
+        "target_bands",
+        "viable_count",
+        "stratum_counts",
+        "global_reservoir",
+        "stratum_reservoirs",
+        "strength_reservoirs",
+        "target_band_reservoirs",
+        "process_minima",
+        "process_maxima",
+        "global_maximum_block",
+    )
+
+    def __init__(
+        self,
+        *,
+        floor: float,
+        global_maximum: float,
+        maximum_promoted_blocks: int,
+        target_bands: Sequence[int],
+    ) -> None:
+        self.floor = floor
+        self.global_maximum = global_maximum
+        self.maximum_promoted_blocks = maximum_promoted_blocks
+        self.target_bands = tuple(int(value) for value in target_bands)
+        self.viable_count = 0
+        self.stratum_counts: dict[str, int] = {}
+        self.global_reservoir = _SmallestHashReservoir(
+            maximum_promoted_blocks
+        )
+        self.stratum_reservoirs: dict[str, _SmallestHashReservoir] = {}
+        self.strength_reservoirs: dict[
+            tuple[str, int], _SmallestHashReservoir
+        ] = {}
+        self.target_band_reservoirs = {
+            band: _SmallestHashReservoir(_TARGET_BAND_RESERVOIR_SIZE)
+            for band in self.target_bands
+        }
+        self.process_minima: dict[str, _PromotedBlock] = {}
+        self.process_maxima: dict[str, _PromotedBlock] = {}
+        self.global_maximum_block: _PromotedBlock | None = None
+
+    @property
+    def retention_bound(self) -> int:
+        return (
+            self.maximum_promoted_blocks
+            + len(_all_strata()) * _SAMPLES_PER_POPULATED_STRATUM
+            + len(_PROCESSES)
+            * _STRENGTH_BINS_PER_PROCESS
+            * _SAMPLES_PER_STRENGTH_BIN
+            + len(self.target_bands) * _TARGET_BAND_RESERVOIR_SIZE
+            + 2 * len(_PROCESSES)
+            + 1
+        )
+
+    @property
+    def retained_candidate_slots(self) -> int:
+        return (
+            len(self.global_reservoir)
+            + sum(len(value) for value in self.stratum_reservoirs.values())
+            + sum(len(value) for value in self.strength_reservoirs.values())
+            + sum(
+                len(value) for value in self.target_band_reservoirs.values()
+            )
+            + len(self.process_minima)
+            + len(self.process_maxima)
+            + int(self.global_maximum_block is not None)
+        )
+
+    def add(self, candidate: _PromotedBlock) -> None:
+        if candidate.strength_ev2 < self.floor:
+            return
+        self.viable_count += 1
+        self.stratum_counts[candidate.stratum] = (
+            self.stratum_counts.get(candidate.stratum, 0) + 1
+        )
+        self.global_reservoir.add(candidate)
+        stratum_reservoir = self.stratum_reservoirs.get(candidate.stratum)
+        if stratum_reservoir is None:
+            stratum_reservoir = _SmallestHashReservoir(
+                _SAMPLES_PER_POPULATED_STRATUM
+            )
+            self.stratum_reservoirs[candidate.stratum] = stratum_reservoir
+        stratum_reservoir.add(candidate)
+        bin_index = _strength_bin(
+            candidate.strength_ev2,
+            floor=self.floor,
+            global_maximum=self.global_maximum,
+        )
+        strength_key = (candidate.process, bin_index)
+        strength_reservoir = self.strength_reservoirs.get(strength_key)
+        if strength_reservoir is None:
+            strength_reservoir = _SmallestHashReservoir(
+                _SAMPLES_PER_STRENGTH_BIN
+            )
+            self.strength_reservoirs[strength_key] = strength_reservoir
+        strength_reservoir.add(candidate)
+        for band in candidate.target_subspace:
+            reservoir = self.target_band_reservoirs.get(band)
+            if reservoir is not None:
+                reservoir.add(candidate)
+        self.process_minima[candidate.process] = _canonical_extreme(
+            self.process_minima.get(candidate.process),
+            candidate,
+            maximum=False,
+        )
+        self.process_maxima[candidate.process] = _canonical_extreme(
+            self.process_maxima.get(candidate.process),
+            candidate,
+            maximum=True,
+        )
+        if candidate.strength_ev2 == self.global_maximum:
+            self.global_maximum_block = _canonical_extreme(
+                self.global_maximum_block,
+                candidate,
+                maximum=True,
+            )
+        if self.retained_candidate_slots > self.retention_bound:
+            raise AssertionError("Bounded V3 selection exceeded its memory bound.")
+
+
+def _select_bounded_blocks(
+    accumulator: _BoundedSelectionAccumulator,
+    *,
+    minimum_promoted_blocks: int,
+) -> tuple[tuple[_PromotedBlock, ...], tuple[str, ...], tuple[str, ...]]:
+    if accumulator.viable_count < minimum_promoted_blocks:
+        raise V3SampleCoverageError(
+            "Reference has only "
+            f"{accumulator.viable_count} promoted blocks at or above the "
+            f"robust nonzero floor {accumulator.floor:.17g} eV^2; at least "
+            f"{minimum_promoted_blocks} are required."
+        )
+    missing_processes = [
+        process
+        for process in _PROCESSES
+        if process not in accumulator.process_minima
+    ]
+    if missing_processes:
+        raise V3SampleCoverageError(
+            "Reference does not contain robustly nonzero blocks for required "
+            f"processes: {missing_processes}."
+        )
+    sparse_strata = {
+        name: count
+        for name, count in accumulator.stratum_counts.items()
+        if count < _SAMPLES_PER_POPULATED_STRATUM
+    }
+    if sparse_strata:
+        raise V3SampleCoverageError(
+            "Every populated stratum requires two distinct promoted blocks; "
+            f"insufficient strata: {sparse_strata}."
+        )
+    if accumulator.global_maximum_block is None:
+        raise AssertionError("The second pass did not recover the global maximum.")
+
+    selected: dict[
+        tuple[int, int, tuple[int, ...], tuple[int, ...], tuple[int, ...]],
+        _PromotedBlock,
+    ] = {}
+
+    def add(candidate: _PromotedBlock) -> bool:
+        if candidate.key in selected:
+            return False
+        selected[candidate.key] = candidate
+        return True
+
+    for name in sorted(accumulator.stratum_reservoirs):
+        for candidate in accumulator.stratum_reservoirs[name].values():
+            add(candidate)
+    add(accumulator.global_maximum_block)
+    for process in _PROCESSES:
+        add(accumulator.process_minima[process])
+        add(accumulator.process_maxima[process])
+    for key in sorted(accumulator.strength_reservoirs):
+        for candidate in accumulator.strength_reservoirs[key].values():
+            add(candidate)
+
+    observed_bands = {candidate.seed_b0 for candidate in selected.values()}
+    for band in accumulator.target_bands:
+        if band in observed_bands:
+            continue
+        candidate = next(
+            (
+                value
+                for value in accumulator.target_band_reservoirs[band].values()
+                if value.key not in selected
+            ),
+            None,
+        )
+        if candidate is None:
+            raise V3SampleCoverageError(
+                "No distinct robustly nonzero promoted block can cover "
+                f"archived target band {band} within the bounded reservoir."
+            )
+        add(candidate.with_target_seed(band))
+        observed_bands.add(band)
+
+    if len(selected) > accumulator.maximum_promoted_blocks:
+        raise V3SampleCoverageError(
+            "Required bounded V3 coverage exceeds maximum_promoted_blocks."
+        )
+    for candidate in accumulator.global_reservoir.values():
+        if len(selected) >= accumulator.maximum_promoted_blocks:
+            break
+        add(candidate)
+    if len(selected) < minimum_promoted_blocks:
+        raise V3SampleCoverageError(
+            "Bounded deterministic selection could not meet the minimum "
+            "unique promoted-block coverage."
+        )
+
+    selected_blocks = tuple(
+        sorted(
+            selected.values(),
+            key=lambda item: (item.coordinate_sha256, item.key),
+        )
+    )
+    if len(selected_blocks) > _MAXIMUM_PROMOTED_BLOCKS:
+        raise AssertionError("Bounded selector emitted more than 512 samples.")
+    required_strata = tuple(sorted(accumulator.stratum_counts))
+    empty_strata = tuple(
+        name for name in _all_strata() if name not in accumulator.stratum_counts
+    )
+    return selected_blocks, required_strata, empty_strata
+
+
+def _build_bounded_selection(
+    reference: Phono3pySiliconReference,
+    *,
+    degeneracy_tolerance_thz: float,
+    primitive_lattice: Any,
+    minimum_promoted_blocks: int,
+    maximum_promoted_blocks: int,
+) -> tuple[
+    tuple[_PromotedBlock, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    float,
+]:
+    """Execute the pinned two-pass bounded v2 reference scan."""
+
+    scan_context = _prepare_promoted_scan(
+        reference,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice=primitive_lattice,
+    )
+    maximum_block = _vectorized_maximum_promoted_block(
+        reference,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice=primitive_lattice,
+        scan_context=scan_context,
+    )
+    floor = max(
+        _ABSOLUTE_NONZERO_FLOOR_EV2,
+        _RELATIVE_NONZERO_FLOOR * maximum_block.strength_ev2,
+    )
+    accumulator = _BoundedSelectionAccumulator(
+        floor=floor,
+        global_maximum=maximum_block.strength_ev2,
+        maximum_promoted_blocks=maximum_promoted_blocks,
+        target_bands=reference.band_indices,
+    )
+    for candidate in _iter_promoted_blocks(
+        reference,
+        degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        primitive_lattice=primitive_lattice,
+        track_duplicates=False,
+        scan_context=scan_context,
+    ):
+        accumulator.add(candidate)
+    selected, required_strata, empty_strata = _select_bounded_blocks(
+        accumulator,
+        minimum_promoted_blocks=minimum_promoted_blocks,
+    )
+    return selected, required_strata, empty_strata, floor
+
+
 def _input_hashes(
     *,
     reference: Phono3pySiliconReference,
@@ -764,6 +1543,8 @@ def build_v3_sample_manifest(
     fc3_mapping: Any,
     minimum_promoted_blocks: int = _DEFAULT_MINIMUM_PROMOTED_BLOCKS,
     degeneracy_tolerance_thz: float = _DEGENERACY_TOLERANCE_THZ,
+    selection_mode: str = LEGACY_FULL_COVERAGE_SELECTION,
+    maximum_promoted_blocks: int = _MAXIMUM_PROMOTED_BLOCKS,
 ) -> dict[str, Any]:
     """Build the canonical strict-JSON payload without writing it.
 
@@ -771,6 +1552,12 @@ def build_v3_sample_manifest(
     :func:`read_phono3py_silicon_reference`.  Its bytes are checked before and
     after selection.  All sample coordinates and invariant strengths are read
     from that artifact; no NEGFPy candidate interaction is accepted here.
+
+    The default ``legacy_full_coverage_v1`` path intentionally retains its
+    archived materializing algorithm and exact payload.  Select
+    ``large_mesh_streaming_bounded_v2`` explicitly for large target-q sets;
+    it scans the reference twice while retaining a mesh-independent bounded
+    candidate set and emits at most ``maximum_promoted_blocks`` records.
     """
 
     reference = _verified_reference(reference)
@@ -790,24 +1577,62 @@ def build_v3_sample_manifest(
         raise ValueError(
             "The silicon oracle pins degeneracy_tolerance_thz to 1e-4."
         )
-    candidates = _enumerate_promoted_blocks(
-        reference,
-        degeneracy_tolerance_thz=degeneracy,
-        primitive_lattice=fc3_mapping.primitive.lattice,
+    if selection_mode not in {
+        LEGACY_FULL_COVERAGE_SELECTION,
+        LARGE_MESH_BOUNDED_SELECTION,
+    }:
+        raise ValueError(
+            "selection_mode must be exactly "
+            f"{LEGACY_FULL_COVERAGE_SELECTION!r} or "
+            f"{LARGE_MESH_BOUNDED_SELECTION!r}."
+        )
+    maximum = _positive_int(
+        maximum_promoted_blocks,
+        name="maximum_promoted_blocks",
     )
-    global_max = max(
-        (item.strength_ev2 for item in candidates),
-        default=0.0,
-    )
-    floor = max(
-        _ABSOLUTE_NONZERO_FLOOR_EV2,
-        _RELATIVE_NONZERO_FLOOR * global_max,
-    )
-    selected, required_strata, empty_strata = _select_blocks(
-        candidates,
-        reference=reference,
-        minimum_promoted_blocks=minimum,
-    )
+    if maximum > _MAXIMUM_PROMOTED_BLOCKS:
+        raise ValueError("maximum_promoted_blocks may not exceed 512.")
+    if selection_mode == LARGE_MESH_BOUNDED_SELECTION and maximum < minimum:
+        raise ValueError(
+            "maximum_promoted_blocks must be at least "
+            "minimum_promoted_blocks in bounded mode."
+        )
+
+    if selection_mode == LEGACY_FULL_COVERAGE_SELECTION:
+        candidates = _enumerate_promoted_blocks(
+            reference,
+            degeneracy_tolerance_thz=degeneracy,
+            primitive_lattice=fc3_mapping.primitive.lattice,
+        )
+        global_max = max(
+            (item.strength_ev2 for item in candidates),
+            default=0.0,
+        )
+        floor = max(
+            _ABSOLUTE_NONZERO_FLOOR_EV2,
+            _RELATIVE_NONZERO_FLOOR * global_max,
+        )
+        selected, required_strata, empty_strata = _select_blocks(
+            candidates,
+            reference=reference,
+            minimum_promoted_blocks=minimum,
+        )
+        algorithm = V3_SAMPLE_SELECTION_ALGORITHM
+        algorithm_version = V3_SAMPLE_SELECTION_ALGORITHM_VERSION
+        cover_all_target_grid_points = True
+    else:
+        selected, required_strata, empty_strata, floor = (
+            _build_bounded_selection(
+                reference,
+                degeneracy_tolerance_thz=degeneracy,
+                primitive_lattice=fc3_mapping.primitive.lattice,
+                minimum_promoted_blocks=minimum,
+                maximum_promoted_blocks=maximum,
+            )
+        )
+        algorithm = V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM
+        algorithm_version = V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM_VERSION
+        cover_all_target_grid_points = False
     payload = {
         "schema": V3_SAMPLE_MANIFEST_SCHEMA,
         "schema_version": 1,
@@ -828,13 +1653,11 @@ def build_v3_sample_manifest(
         "grg2bzg_sha256": array_sha256(reference.grg2bzg),
         "bzg2grg_sha256": array_sha256(reference.bzg2grg),
         "degeneracy_tolerance_thz": degeneracy,
-        "selection_algorithm": V3_SAMPLE_SELECTION_ALGORITHM,
-        "selection_algorithm_version": (
-            V3_SAMPLE_SELECTION_ALGORITHM_VERSION
-        ),
+        "selection_algorithm": algorithm,
+        "selection_algorithm_version": algorithm_version,
         "robust_nonzero_floor_ev2": floor,
         "coverage": {
-            "cover_all_target_grid_points": True,
+            "cover_all_target_grid_points": cover_all_target_grid_points,
             "cover_all_target_bands": True,
             "required_processes": list(_PROCESSES),
             "required_strata": list(required_strata),
@@ -949,6 +1772,8 @@ def create_v3_sample_manifest(
     fc3_mapping: Any,
     minimum_promoted_blocks: int = _DEFAULT_MINIMUM_PROMOTED_BLOCKS,
     degeneracy_tolerance_thz: float = _DEGENERACY_TOLERANCE_THZ,
+    selection_mode: str = LEGACY_FULL_COVERAGE_SELECTION,
+    maximum_promoted_blocks: int = _MAXIMUM_PROMOTED_BLOCKS,
 ) -> V3InteractionSampleManifest:
     """Select from the reference and atomically write the immutable manifest."""
 
@@ -964,11 +1789,15 @@ def create_v3_sample_manifest(
         fc3_mapping=fc3_mapping,
         minimum_promoted_blocks=minimum_promoted_blocks,
         degeneracy_tolerance_thz=degeneracy_tolerance_thz,
+        selection_mode=selection_mode,
+        maximum_promoted_blocks=maximum_promoted_blocks,
     )
     return write_v3_sample_manifest(output_path, payload)
 
 
 __all__ = [
+    "LARGE_MESH_BOUNDED_SELECTION",
+    "LEGACY_FULL_COVERAGE_SELECTION",
     "V3SampleCoverageError",
     "build_v3_sample_manifest",
     "create_v3_sample_manifest",

@@ -889,8 +889,32 @@ def _write_canonical_worker_chain(
             rank = worker_ranks[task_index % len(worker_ranks)]
             runtime_record = runtime_by_rank[rank]
             cpu_affinity = tuple(int(value) for value in runtime_record["logical_cpu_ids"])
+            cpu_topology = tuple(
+                (
+                    int(item["logical_cpu_id"]),
+                    int(item["physical_package_id"]),
+                    int(item["core_id"]),
+                )
+                for item in runtime_record["logical_cpu_topology"]
+            )
             cap = {
+                "requested_limit": 1,
+                "environment": {
+                    "OMP_NUM_THREADS": "1",
+                    "OPENBLAS_NUM_THREADS": "1",
+                    "MKL_NUM_THREADS": "1",
+                    "NUMEXPR_NUM_THREADS": "1",
+                },
+                "libraries": [],
                 "cpu_affinity": list(cpu_affinity),
+                "cpu_affinity_topology": [
+                    {
+                        "logical_cpu": logical_cpu,
+                        "package_id": package_id,
+                        "core_id": core_id,
+                    }
+                    for logical_cpu, package_id, core_id in cpu_topology
+                ],
                 "all_loaded_libraries_capped": True,
             }
             context = task_mpi.TaskContext(
@@ -967,6 +991,8 @@ def _write_canonical_worker_chain(
                     checkpoint_file_sha256=core._sha256(checkpoint_path),
                     artifact_relative_path=checkpoint.artifact_relative_path,
                     artifact_sha256=checkpoint.artifact_sha256,
+                    cpu_affinity_topology=cpu_topology,
+                    origin_communicator_size=rank_count,
                 )
             )
         phase_id = f"{execution_id}.phase-{wave_index:03d}"
@@ -1441,7 +1467,8 @@ def _mock_successful_mpi_commands(
 ):
     def fake_run(argv, **kwargs):
         command = tuple(str(value) for value in argv)
-        if "env" not in kwargs: return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+        if "env" not in kwargs:
+            return _REAL_SUBPROCESS_RUN(argv, **kwargs)
         environment = dict(kwargs["env"])
         if captured is not None:
             captured.append((command, environment))

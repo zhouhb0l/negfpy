@@ -56,6 +56,10 @@ V3_SAMPLE_SELECTION_ALGORITHM = (
     "deterministic_stratified_reference_invariant_blocks"
 )
 V3_SAMPLE_SELECTION_ALGORITHM_VERSION = 1
+V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM = (
+    "deterministic_bounded_streaming_reference_invariant_blocks"
+)
+V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM_VERSION = 2
 PINNED_PHONO3PY_VERSION = "4.4.0"
 PINNED_PHONOPY_VERSION = "4.4.0"
 PINNED_SPGLIB_VERSION = "2.7.0"
@@ -869,13 +873,33 @@ def read_interaction_sample_manifest(
             "Degeneracy tolerance and robust nonzero floor must be finite "
             "and positive."
         )
-    if payload["selection_algorithm"] != V3_SAMPLE_SELECTION_ALGORITHM:
-        raise ValueError("The V3 sample selection algorithm is not pinned.")
+    selection_algorithm = payload["selection_algorithm"]
+    selection_version = payload["selection_algorithm_version"]
     if (
-        payload["selection_algorithm_version"]
-        != V3_SAMPLE_SELECTION_ALGORITHM_VERSION
+        not isinstance(selection_algorithm, str)
+        or not selection_algorithm
+        or isinstance(selection_version, bool)
+        or not isinstance(selection_version, int)
     ):
-        raise ValueError("The V3 sample selection version is not pinned.")
+        raise ValueError(
+            "The V3 sample selection algorithm/version types are invalid."
+        )
+    selection_identity = (selection_algorithm, selection_version)
+    legacy_selection_identity = (
+        V3_SAMPLE_SELECTION_ALGORITHM,
+        V3_SAMPLE_SELECTION_ALGORITHM_VERSION,
+    )
+    bounded_selection_identity = (
+        V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM,
+        V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM_VERSION,
+    )
+    if selection_identity not in (
+        legacy_selection_identity,
+        bounded_selection_identity,
+    ):
+        raise ValueError(
+            "The V3 sample selection algorithm/version pair is not pinned."
+        )
 
     coverage = payload["coverage"]
     coverage_keys = {
@@ -888,22 +912,35 @@ def read_interaction_sample_manifest(
     }
     if not isinstance(coverage, dict) or set(coverage) != coverage_keys:
         raise ValueError("The V3 sample coverage schema is invalid.")
-    for name in (
-        "cover_all_target_grid_points",
-        "cover_all_target_bands",
+    expected_coverage = (
+        (True, True)
+        if selection_identity == legacy_selection_identity
+        else (False, True)
+    )
+    if any(
+        coverage[name] is not expected
+        for name, expected in zip(
+            (
+                "cover_all_target_grid_points",
+                "cover_all_target_bands",
+            ),
+            expected_coverage,
+            strict=True,
+        )
     ):
-        if coverage[name] is not True:
-            raise ValueError(f"coverage.{name} must be exactly true.")
+        raise ValueError(
+            "The V3 sample coverage booleans do not match the pinned "
+            "selection algorithm/version contract."
+        )
+    observed_coverage = expected_coverage
     raw_processes = coverage["required_processes"]
     if (
         not isinstance(raw_processes, list)
-        or not raw_processes
-        or any(value not in {"normal", "umklapp"} for value in raw_processes)
-        or len(set(raw_processes)) != len(raw_processes)
+        or raw_processes != ["normal", "umklapp"]
     ):
         raise ValueError(
-            "required_processes must be a nonempty unique subset of normal "
-            "and umklapp."
+            "required_processes must be the pinned canonical normal/umklapp "
+            "pair."
         )
     raw_strata = coverage["required_strata"]
     if (
@@ -933,6 +970,22 @@ def read_interaction_sample_manifest(
         raise ValueError(
             "empty_strata must be a unique canonical string list disjoint "
             "from required_strata."
+        )
+    expected_strata = {
+        f"{region}.{target}.{internal}.{process}"
+        for region in ("gamma", "near", "generic")
+        for target in ("acoustic", "optical")
+        for internal in ("aa", "ao", "oo")
+        for process in ("normal", "umklapp")
+    }
+    if (
+        raw_strata != sorted(raw_strata)
+        or raw_empty_strata != sorted(raw_empty_strata)
+        or set(raw_strata).union(raw_empty_strata) != expected_strata
+    ):
+        raise ValueError(
+            "required_strata and empty_strata must be the sorted, disjoint "
+            "partition of the pinned 36-stratum V3 space."
         )
     minimum_blocks = _manifest_index(
         coverage["minimum_promoted_blocks"],
@@ -987,6 +1040,15 @@ def read_interaction_sample_manifest(
             or _STRATUM_RE.fullmatch(stratum) is None
         ):
             raise ValueError(f"Sample {position} has an invalid stratum.")
+        if (
+            process not in raw_processes
+            or stratum not in raw_strata
+            or stratum.rsplit(".", 1)[-1] != process
+        ):
+            raise ValueError(
+                f"Sample {position} conflicts with declared process/stratum "
+                "coverage."
+            )
         block_sum = float(item["reference_invariant_block_sum_ev2"])
         if not np.isfinite(block_sum) or block_sum < floor:
             raise ValueError(
@@ -1045,6 +1107,21 @@ def read_interaction_sample_manifest(
         raise ValueError("The sample manifest omits a required stratum.")
     if set(raw_empty_strata) & strata:
         raise ValueError("A declared empty stratum contains a sample.")
+    if selection_identity == bounded_selection_identity:
+        stratum_counts = {
+            name: sum(sample.stratum == name for sample in samples)
+            for name in raw_strata
+        }
+        sparse = {
+            name: count
+            for name, count in stratum_counts.items()
+            if count < 2
+        }
+        if sparse:
+            raise ValueError(
+                "Bounded V3 manifests require two distinct promoted blocks "
+                f"per populated stratum: {sparse}."
+            )
     return V3InteractionSampleManifest(
         path=source,
         sha256=_sha256(source),
@@ -1060,11 +1137,11 @@ def read_interaction_sample_manifest(
             name="bzg2grg_sha256",
         ),
         degeneracy_tolerance_thz=degeneracy,
-        selection_algorithm=payload["selection_algorithm"],
-        selection_algorithm_version=payload["selection_algorithm_version"],
+        selection_algorithm=selection_identity[0],
+        selection_algorithm_version=selection_identity[1],
         robust_nonzero_floor_ev2=floor,
-        cover_all_target_grid_points=True,
-        cover_all_target_bands=True,
+        cover_all_target_grid_points=observed_coverage[0],
+        cover_all_target_bands=observed_coverage[1],
         required_processes=tuple(raw_processes),
         required_strata=tuple(raw_strata),
         empty_strata=tuple(raw_empty_strata),
@@ -1871,6 +1948,8 @@ __all__ = [
     "SiliconOracleValidationConfig",
     "V3InteractionSampleManifest",
     "V3InteractionSampleRecord",
+    "V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM",
+    "V3_BOUNDED_SAMPLE_SELECTION_ALGORITHM_VERSION",
     "V3_SAMPLE_MANIFEST_SCHEMA",
     "V3_SAMPLE_SELECTION_ALGORITHM",
     "V3_SAMPLE_SELECTION_ALGORITHM_VERSION",

@@ -168,9 +168,11 @@ The protocol-v2 numerical ladder is
 `dw=(0.0015625, 0.00078125, 0.000390625)` and
 `eta=(0.003125, 0.0015625, 0.00078125)`. The production graph is FFT-only;
 serial/threaded/FFT equality is established on the bounded oracle, not by an
-additional full-grid threaded outcome. The previous d05b result is provisional
-failed evidence, and `0.1.0` remains unvalidated until a clean workstation
-rerun passes.
+additional full-grid threaded outcome. The previous d05b result remains
+provisional failed evidence. The later clean workstation campaign at
+`ad255896...` passed this complete protocol and is tagged `v0.1.0-rc1`; its
+archived strict report, rather than the earlier failure, is the release
+authority.
 
 For interpretation of the archived conservation diagnostics, the locked
 block-local threshold is `SIGMA_PP_BLOCK_LOCAL_RTOL=1e-12`. Raw harmonic bond

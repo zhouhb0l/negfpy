@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib
 import json
 from pathlib import Path
@@ -11,9 +12,11 @@ from negfpy.anharmonic import _mpi_tasks as mpi_tasks
 from negfpy.anharmonic._mpi_tasks import (
     DuplicateTaskCheckpointError,
     MPIDependencyError,
+    MPIExecutionReport,
     MissingTaskCheckpointError,
     TaskCheckpointCorruptionError,
     TaskCheckpointMismatchError,
+    TaskAssignment,
     TaskExecutionError,
     TaskManifest,
     TaskManifestError,
@@ -25,6 +28,8 @@ from negfpy.anharmonic._mpi_tasks import (
     load_task_manifest,
     serial_task_communicator,
     task_checkpoint_path,
+    task_assignment_physical_core_evidence,
+    task_execution_mpi_origin_lineage_evidence,
     write_task_manifest,
 )
 
@@ -66,6 +71,34 @@ def _validator(path: Path, task: TaskSpec) -> dict[str, object]:
     if payload != (task.task_id + "\n").encode("ascii"):
         raise ValueError("artifact payload does not match task")
     return {"validated": True, "byte_count": len(payload)}
+
+
+def _assignment(
+    task_id: str,
+    *,
+    rank: int,
+    logical_cpus: tuple[int, ...],
+    physical_core: tuple[int, int],
+) -> TaskAssignment:
+    return TaskAssignment(
+        task_id=task_id,
+        status="completed",
+        rank=rank,
+        hostname="worker",
+        elapsed_seconds=1.0,
+        resumed=False,
+        cpu_affinity=logical_cpus,
+        thread_cap_passed=True,
+        checkpoint_relative_path=f"{task_id}.task.json",
+        checkpoint_file_sha256=_sha("a"),
+        artifact_relative_path=f"{task_id}.h5",
+        artifact_sha256=_sha("b"),
+        cpu_affinity_topology=tuple(
+            (logical, physical_core[0], physical_core[1])
+            for logical in logical_cpus
+        ),
+        origin_communicator_size=3,
+    )
 
 
 def _worker(task: TaskSpec, context: mpi_tasks.TaskContext) -> TaskResult:
@@ -377,6 +410,100 @@ def test_corrupt_sidecar_and_changed_artifact_hash_are_rejected(
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("rank", "0"),
+        ("communicator_size", True),
+        ("hostname", 7),
+        ("elapsed_seconds", "1.0"),
+        ("thread_limit", 1.0),
+    ],
+)
+def test_checkpoint_execution_rejects_type_coercion(
+    tmp_path: Path,
+    field: str,
+    invalid: object,
+) -> None:
+    manifest = _manifest(("one",))
+    execute_task_manifest(
+        manifest,
+        _worker,
+        tmp_path,
+        comm=serial_task_communicator(),
+        artifact_validator=_validator,
+        execution_id="complete",
+    )
+    outcome = task_checkpoint_path(
+        manifest, "one", tmp_path / "task-outcomes"
+    )
+    document = json.loads(outcome.read_text(encoding="ascii"))
+    payload = document["payload"]
+    payload["execution"][field] = invalid
+    document["payload_sha256"] = mpi_tasks._sha256_bytes(  # noqa: SLF001
+        mpi_tasks._canonical_json(payload).encode("ascii")  # noqa: SLF001
+    )
+    outcome.write_bytes(mpi_tasks._canonical_bytes(document))  # noqa: SLF001
+
+    with pytest.raises(
+        TaskCheckpointCorruptionError,
+        match="invalid task checkpoint payload",
+    ):
+        load_task_checkpoint(
+            outcome,
+            manifest=manifest,
+            artifact_root=tmp_path / "task-artifacts",
+            artifact_validator=_validator,
+        )
+
+
+def test_checkpoint_rejects_contradictory_thread_cap_decision(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(("one",))
+    execute_task_manifest(
+        manifest,
+        _worker,
+        tmp_path,
+        comm=serial_task_communicator(),
+        artifact_validator=_validator,
+        execution_id="complete",
+    )
+    outcome = task_checkpoint_path(
+        manifest, "one", tmp_path / "task-outcomes"
+    )
+    document = json.loads(outcome.read_text(encoding="ascii"))
+    payload = document["payload"]
+    thread_cap = payload["execution"]["thread_cap"]
+    thread_cap["libraries"] = [
+        {
+            "user_api": "blas",
+            "internal_api": "openblas",
+            "prefix": "libopenblas",
+            "filepath": "/fixture/libopenblas.so",
+            "version": "fixture",
+            "architecture": "fixture",
+            "num_threads": 64,
+        }
+    ]
+    thread_cap["all_loaded_libraries_capped"] = True
+    document["payload_sha256"] = mpi_tasks._sha256_bytes(  # noqa: SLF001
+        mpi_tasks._canonical_json(payload).encode("ascii")  # noqa: SLF001
+    )
+    outcome.write_bytes(mpi_tasks._canonical_bytes(document))  # noqa: SLF001
+
+    with pytest.raises(
+        TaskCheckpointCorruptionError,
+        match="invalid task checkpoint payload",
+    ):
+        load_task_checkpoint(
+            outcome,
+            manifest=manifest,
+            artifact_root=tmp_path / "task-artifacts",
+            artifact_validator=_validator,
+        )
+
+
 def test_manifest_and_semantic_validation_mismatches_are_rejected(
     tmp_path: Path,
 ) -> None:
@@ -537,3 +664,257 @@ def test_invalid_orphan_artifact_is_rejected_without_overwrite(
     assert not worker_called
     assert artifact.read_bytes() == damaged_bytes
     assert captured.value.report is not None
+
+
+def test_physical_core_evidence_accepts_smt_siblings_on_one_core() -> None:
+    assignments = (
+        _assignment(
+            "q0",
+            rank=1,
+            logical_cpus=(1, 45),
+            physical_core=(0, 1),
+        ),
+        _assignment(
+            "q1",
+            rank=1,
+            logical_cpus=(1, 45),
+            physical_core=(0, 1),
+        ),
+        _assignment(
+            "q2",
+            rank=2,
+            logical_cpus=(2, 46),
+            physical_core=(0, 2),
+        ),
+    )
+    evidence = task_assignment_physical_core_evidence(
+        assignments,
+        require_available=True,
+    )
+    assert evidence["available"] is True
+    assert len(evidence["rank_bindings"]) == 2
+    assert evidence["rank_bindings"][0]["physical_core"] == {
+        "package_id": 0,
+        "core_id": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    [
+        (
+            _assignment(
+                "q0",
+                rank=1,
+                logical_cpus=(1, 45),
+                physical_core=(0, 1),
+            ),
+            _assignment(
+                "q1",
+                rank=2,
+                logical_cpus=(1, 45),
+                physical_core=(0, 1),
+            ),
+        ),
+        (
+            _assignment(
+                "q0",
+                rank=1,
+                logical_cpus=(1, 45),
+                physical_core=(0, 1),
+            ),
+            _assignment(
+                "q1",
+                rank=1,
+                logical_cpus=(2, 46),
+                physical_core=(0, 2),
+            ),
+        ),
+    ],
+)
+def test_physical_core_evidence_rejects_overlap_or_inconsistency(
+    assignments: tuple[TaskAssignment, ...],
+) -> None:
+    with pytest.raises(
+        TaskManifestError,
+        match="physical-core binding evidence",
+    ):
+        task_assignment_physical_core_evidence(
+            assignments,
+            require_available=True,
+        )
+
+
+def test_mpi_origin_lineage_accepts_exact_resume_and_rejects_orphan() -> None:
+    fresh_assignment = _assignment(
+        "q0",
+        rank=1,
+        logical_cpus=(1, 45),
+        physical_core=(0, 1),
+    )
+
+    def report(
+        execution_id: str,
+        assignment: TaskAssignment,
+    ) -> MPIExecutionReport:
+        return MPIExecutionReport(
+            execution_id=execution_id,
+            manifest_sha256=_sha("c"),
+            mode="mpi",
+            communicator_size=3,
+            coordinator_hostname="worker",
+            started_utc="2026-01-01T00:00:00Z",
+            finished_utc="2026-01-01T00:00:01Z",
+            elapsed_seconds=1.0,
+            thread_limit=1,
+            assignments=(assignment,),
+            missing_task_ids=(),
+            infrastructure_errors=(),
+        )
+
+    initial = report("initial", fresh_assignment)
+    resumed = report(
+        "resumed",
+        replace(fresh_assignment, resumed=True),
+    )
+    evidence = task_execution_mpi_origin_lineage_evidence(
+        resumed,
+        (initial, resumed),
+        require_mpi_origin=True,
+    )
+    assert evidence["passed"] is True
+    assert evidence["lineage"][0]["origin_execution_id"] == "initial"
+
+    adopted = report(
+        "adopted",
+        replace(
+            fresh_assignment,
+            resumed=True,
+            orphan_artifact_adopted=True,
+        ),
+    )
+    with pytest.raises(TaskManifestError, match="origin lineage"):
+        task_execution_mpi_origin_lineage_evidence(
+            adopted,
+            (initial, adopted),
+            require_mpi_origin=True,
+        )
+
+    serial_origin = report(
+        "serial-origin-resume",
+        replace(
+            fresh_assignment,
+            rank=0,
+            resumed=True,
+            origin_communicator_size=1,
+        ),
+    )
+    with pytest.raises(TaskManifestError, match="origin lineage"):
+        task_execution_mpi_origin_lineage_evidence(
+            serial_origin,
+            (serial_origin,),
+            require_mpi_origin=True,
+        )
+
+
+def test_mpi_origin_lineage_accepts_completed_task_from_partial_attempt() -> None:
+    first = _assignment(
+        "q0",
+        rank=1,
+        logical_cpus=(1, 45),
+        physical_core=(0, 1),
+    )
+    initial = MPIExecutionReport(
+        execution_id="partial-two-rank",
+        manifest_sha256=_sha("c"),
+        mode="mpi",
+        communicator_size=3,
+        coordinator_hostname="worker",
+        started_utc="2026-01-01T00:00:00Z",
+        finished_utc="2026-01-01T00:00:01Z",
+        elapsed_seconds=1.0,
+        thread_limit=1,
+        assignments=(first,),
+        missing_task_ids=("q1",),
+        infrastructure_errors=(
+            {"error_type": "RuntimeError", "message": "interrupted"},
+        ),
+    )
+    second = replace(
+        _assignment(
+            "q1",
+            rank=2,
+            logical_cpus=(2, 46),
+            physical_core=(0, 2),
+        ),
+        origin_communicator_size=4,
+    )
+    selected = MPIExecutionReport(
+        execution_id="resume-four-rank",
+        manifest_sha256=_sha("c"),
+        mode="mpi",
+        communicator_size=4,
+        coordinator_hostname="worker",
+        started_utc="2026-01-01T00:00:02Z",
+        finished_utc="2026-01-01T00:00:03Z",
+        elapsed_seconds=1.0,
+        thread_limit=1,
+        assignments=(replace(first, resumed=True), second),
+        missing_task_ids=(),
+        infrastructure_errors=(),
+    )
+
+    evidence = task_execution_mpi_origin_lineage_evidence(
+        selected,
+        (initial, selected),
+        require_mpi_origin=True,
+    )
+
+    assert evidence["passed"] is True
+    assert {
+        item["task_id"]: item["origin_execution_id"]
+        for item in evidence["lineage"]
+    } == {
+        "q0": "partial-two-rank",
+        "q1": "resume-four-rank",
+    }
+
+
+def test_physical_core_evidence_scopes_reused_rank_by_origin_execution() -> None:
+    from_partial = _assignment(
+        "q0",
+        rank=1,
+        logical_cpus=(1, 45),
+        physical_core=(0, 1),
+    )
+    from_restart = replace(
+        _assignment(
+            "q1",
+            rank=1,
+            logical_cpus=(7, 51),
+            physical_core=(0, 7),
+        ),
+        origin_communicator_size=4,
+    )
+
+    with pytest.raises(TaskManifestError, match="physical-core binding"):
+        task_assignment_physical_core_evidence(
+            (from_partial, from_restart),
+            require_available=True,
+        )
+
+    evidence = task_assignment_physical_core_evidence(
+        (from_partial, from_restart),
+        require_available=True,
+        origin_execution_ids={
+            "q0": "partial-two-rank",
+            "q1": "resume-four-rank",
+        },
+    )
+
+    assert evidence["available"] is True
+    assert evidence["origin_execution_scoped"] is True
+    assert {
+        item["origin_execution_id"]
+        for item in evidence["rank_bindings"]
+    } == {"partial-two-rank", "resume-four-rank"}

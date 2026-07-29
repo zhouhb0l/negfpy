@@ -735,6 +735,7 @@ def _script_repository_identity() -> dict[str, Any]:
                 "git_root": None,
                 "git_commit": None,
                 "tracked_worktree_status": None,
+                "untracked_files_omitted": False,
             }
         )
         return identity
@@ -743,14 +744,14 @@ def _script_repository_identity() -> dict[str, Any]:
         {
             "git_root": str(root),
             "git_commit": _run_git(["rev-parse", "HEAD"], cwd=root),
-            # Untracked artifacts are intentionally omitted so an explicit
-            # output directory inside the repository cannot alter resume
-            # identity. The generator script itself is independently hashed.
+            # Release generation is allowed only from an exactly clean tree.
+            # Untracked files are included because they may shadow an imported
+            # generator or helper and therefore affect the scientific result.
             "tracked_worktree_status": _run_git(
-                ["status", "--porcelain=v1", "--untracked-files=no"],
+                ["status", "--porcelain=v1", "--untracked-files=all"],
                 cwd=root,
             ),
-            "untracked_files_omitted": True,
+            "untracked_files_omitted": False,
         }
     )
     return identity

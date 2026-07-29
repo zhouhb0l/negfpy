@@ -743,6 +743,182 @@ def write_task_checkpoint(
     )
 
 
+def _validate_checkpoint_execution(value: Any) -> Mapping[str, Any]:
+    """Validate the exact worker-execution schema without coercion."""
+
+    if not isinstance(value, dict):
+        raise TypeError("checkpoint execution must be an object")
+    required = {
+        "rank",
+        "communicator_size",
+        "hostname",
+        "elapsed_seconds",
+        "thread_limit",
+        "thread_cap",
+    }
+    allowed = required | {"orphan_artifact_adopted"}
+    if set(value) not in (required, allowed):
+        raise ValueError("checkpoint execution has an invalid key schema")
+
+    def exact_integer(item: Any, *, name: str, positive: bool) -> int:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise TypeError(f"checkpoint execution {name} must be an integer")
+        if item < (1 if positive else 0):
+            raise ValueError(f"checkpoint execution {name} is out of range")
+        return item
+
+    rank = exact_integer(value["rank"], name="rank", positive=False)
+    communicator_size = exact_integer(
+        value["communicator_size"],
+        name="communicator_size",
+        positive=True,
+    )
+    if rank >= communicator_size:
+        raise ValueError("checkpoint execution rank exceeds communicator")
+    hostname = value["hostname"]
+    if not isinstance(hostname, str) or not hostname:
+        raise TypeError("checkpoint execution hostname must be non-empty text")
+    elapsed = value["elapsed_seconds"]
+    if (
+        isinstance(elapsed, bool)
+        or not isinstance(elapsed, (int, float))
+        or not math.isfinite(float(elapsed))
+        or float(elapsed) < 0.0
+    ):
+        raise TypeError(
+            "checkpoint execution elapsed_seconds must be finite and "
+            "nonnegative"
+        )
+    thread_limit = exact_integer(
+        value["thread_limit"], name="thread_limit", positive=True
+    )
+    if "orphan_artifact_adopted" in value and (
+        value["orphan_artifact_adopted"] is not True
+    ):
+        raise TypeError(
+            "checkpoint orphan_artifact_adopted, when present, must be true"
+        )
+
+    thread_cap = value["thread_cap"]
+    expected_cap_keys = {
+        "requested_limit",
+        "environment",
+        "libraries",
+        "all_loaded_libraries_capped",
+        "cpu_affinity",
+        "cpu_affinity_topology",
+    }
+    if not isinstance(thread_cap, dict) or set(thread_cap) != expected_cap_keys:
+        raise TypeError("checkpoint thread_cap has an invalid key schema")
+    requested = exact_integer(
+        thread_cap["requested_limit"],
+        name="thread_cap.requested_limit",
+        positive=True,
+    )
+    if requested != thread_limit:
+        raise ValueError("checkpoint thread limits are inconsistent")
+    environment = thread_cap["environment"]
+    if (
+        not isinstance(environment, dict)
+        or set(environment) != set(_THREAD_ENVIRONMENT)
+        or any(
+            item is not None and not isinstance(item, str)
+            for item in environment.values()
+        )
+    ):
+        raise TypeError("checkpoint thread environment is invalid")
+    if not isinstance(thread_cap["all_loaded_libraries_capped"], bool):
+        raise TypeError("checkpoint thread-cap decision must be boolean")
+    libraries = thread_cap["libraries"]
+    library_keys = {
+        "user_api",
+        "internal_api",
+        "prefix",
+        "filepath",
+        "version",
+        "architecture",
+        "num_threads",
+    }
+    if not isinstance(libraries, list):
+        raise TypeError("checkpoint thread libraries must be an array")
+    thread_counts: list[int | None] = []
+    for library in libraries:
+        if not isinstance(library, dict) or set(library) != library_keys:
+            raise TypeError("checkpoint thread library schema is invalid")
+        if any(
+            library[name] is not None
+            and not isinstance(library[name], str)
+            for name in library_keys - {"num_threads"}
+        ):
+            raise TypeError("checkpoint thread library metadata is invalid")
+        if library["num_threads"] is None:
+            thread_counts.append(None)
+        else:
+            thread_counts.append(
+                exact_integer(
+                    library["num_threads"],
+                    name="thread_cap.libraries[].num_threads",
+                    positive=False,
+                )
+            )
+    stored_cap = thread_cap["all_loaded_libraries_capped"]
+    if stored_cap is not all(
+        count is not None and count <= requested for count in thread_counts
+    ):
+        raise ValueError(
+            "checkpoint thread-cap decision contradicts library thread counts"
+        )
+
+    affinity = thread_cap["cpu_affinity"]
+    topology = thread_cap["cpu_affinity_topology"]
+    if affinity is None:
+        if topology is not None:
+            raise ValueError(
+                "checkpoint topology requires an available CPU affinity"
+            )
+    else:
+        if (
+            not isinstance(affinity, list)
+            or not affinity
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in affinity
+            )
+            or affinity != sorted(set(affinity))
+        ):
+            raise TypeError("checkpoint CPU affinity is invalid")
+        if not isinstance(topology, list) or len(topology) != len(affinity):
+            raise TypeError("checkpoint CPU topology is invalid")
+        logical_cpus = []
+        for item in topology:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"logical_cpu", "package_id", "core_id"}
+            ):
+                raise TypeError("checkpoint CPU topology entry is invalid")
+            logical = exact_integer(
+                item["logical_cpu"],
+                name="thread_cap.topology.logical_cpu",
+                positive=False,
+            )
+            exact_integer(
+                item["package_id"],
+                name="thread_cap.topology.package_id",
+                positive=False,
+            )
+            exact_integer(
+                item["core_id"],
+                name="thread_cap.topology.core_id",
+                positive=False,
+            )
+            logical_cpus.append(logical)
+        if logical_cpus != affinity:
+            raise ValueError(
+                "checkpoint CPU topology differs from CPU affinity"
+            )
+    return _freeze_json(value)
+
+
 def load_task_checkpoint(
     path: str | Path,
     *,
@@ -757,9 +933,24 @@ def load_task_checkpoint(
         source, error_type=TaskCheckpointCorruptionError
     )
     try:
+        expected_payload_keys = {
+            "schema_name",
+            "schema_version",
+            "manifest_sha256",
+            "task_id",
+            "task_identity_sha256",
+            "status",
+            "artifact",
+            "artifact_validation",
+            "metadata",
+            "execution",
+        }
         if (
-            payload["schema_name"] != _CHECKPOINT_SCHEMA
-            or int(payload["schema_version"]) != _SCHEMA_VERSION
+            set(payload) != expected_payload_keys
+            or payload["schema_name"] != _CHECKPOINT_SCHEMA
+            or isinstance(payload["schema_version"], bool)
+            or not isinstance(payload["schema_version"], int)
+            or payload["schema_version"] != _SCHEMA_VERSION
         ):
             raise TaskCheckpointCorruptionError(
                 f"unsupported task checkpoint schema: {source}"
@@ -800,7 +991,10 @@ def load_task_checkpoint(
             artifact_sha256 = None
             actual_validation = MappingProxyType({})
         else:
-            if not isinstance(artifact_record, dict):
+            if (
+                not isinstance(artifact_record, dict)
+                or set(artifact_record) != {"relative_path", "sha256"}
+            ):
                 raise TaskCheckpointCorruptionError(
                     "checkpoint artifact record must be an object or null."
                 )
@@ -822,9 +1016,9 @@ def load_task_checkpoint(
                 "task artifact semantic validation evidence changed."
             )
         metadata = _freeze_json(payload["metadata"])
-        execution = _freeze_json(payload["execution"])
-        if not isinstance(metadata, Mapping) or not isinstance(execution, Mapping):
-            raise TypeError("metadata and execution must be mappings")
+        execution = _validate_checkpoint_execution(payload["execution"])
+        if not isinstance(metadata, Mapping):
+            raise TypeError("metadata must be a mapping")
     except TaskCheckpointError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
@@ -897,6 +1091,48 @@ def collect_task_checkpoints(
     return tuple(found[task.task_id] for task in manifest.tasks if task.task_id in found)
 
 
+def _cpu_affinity_topology(
+    cpu_affinity: Sequence[int] | None,
+) -> list[dict[str, int]] | None:
+    """Resolve Linux logical CPUs to stable physical package/core IDs."""
+
+    if cpu_affinity is None or not cpu_affinity:
+        return None
+    records: list[dict[str, int]] = []
+    try:
+        for logical_cpu in cpu_affinity:
+            topology = (
+                Path("/sys/devices/system/cpu")
+                / f"cpu{int(logical_cpu)}"
+                / "topology"
+            )
+            package_text = (
+                topology / "physical_package_id"
+            ).read_text(encoding="ascii").strip()
+            core_text = (
+                topology / "core_id"
+            ).read_text(encoding="ascii").strip()
+            package_id = int(package_text)
+            core_id = int(core_text)
+            if (
+                package_id < 0
+                or core_id < 0
+                or str(package_id) != package_text
+                or str(core_id) != core_text
+            ):
+                return None
+            records.append(
+                {
+                    "logical_cpu": int(logical_cpu),
+                    "package_id": package_id,
+                    "core_id": core_id,
+                }
+            )
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return records
+
+
 def _thread_cap_snapshot(limit: int) -> Mapping[str, Any]:
     libraries: list[dict[str, Any]] = []
     for item in threadpool_info():
@@ -922,6 +1158,7 @@ def _thread_cap_snapshot(limit: int) -> Mapping[str, Any]:
         cpu_affinity: list[int] | None = sorted(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         cpu_affinity = None
+    cpu_affinity_topology = _cpu_affinity_topology(cpu_affinity)
     capped = all(
         isinstance(item["num_threads"], int)
         and int(item["num_threads"]) <= limit
@@ -936,6 +1173,7 @@ def _thread_cap_snapshot(limit: int) -> Mapping[str, Any]:
             "libraries": libraries,
             "all_loaded_libraries_capped": capped,
             "cpu_affinity": cpu_affinity,
+            "cpu_affinity_topology": cpu_affinity_topology,
         }
     )
 
@@ -1000,6 +1238,11 @@ class TaskAssignment:
     checkpoint_file_sha256: str
     artifact_relative_path: str | None
     artifact_sha256: str | None
+    orphan_artifact_adopted: bool = False
+    cpu_affinity_topology: (
+        tuple[tuple[int, int, int], ...] | None
+    ) = None
+    origin_communicator_size: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1017,7 +1260,243 @@ class TaskAssignment:
             "checkpoint_file_sha256": self.checkpoint_file_sha256,
             "artifact_relative_path": self.artifact_relative_path,
             "artifact_sha256": self.artifact_sha256,
+            "orphan_artifact_adopted": self.orphan_artifact_adopted,
+            "cpu_affinity_topology": (
+                None
+                if self.cpu_affinity_topology is None
+                else [
+                    {
+                        "logical_cpu": logical_cpu,
+                        "package_id": package_id,
+                        "core_id": core_id,
+                    }
+                    for (
+                        logical_cpu,
+                        package_id,
+                        core_id,
+                    ) in self.cpu_affinity_topology
+                ]
+            ),
+            "origin_communicator_size": self.origin_communicator_size,
         }
+
+
+def task_assignment_physical_core_evidence(
+    assignments: Sequence[TaskAssignment | Mapping[str, Any]],
+    *,
+    require_available: bool = False,
+    origin_execution_ids: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
+    """Validate physical-core binding for archived numerical assignments.
+
+    Restart reports can contain checkpoints produced by several executions.
+    Rank numbers and physical-core occupancy are meaningful only within one
+    execution, so restart validators must provide the task-to-origin mapping
+    reconstructed by :func:`task_execution_mpi_origin_lineage_evidence`.
+    """
+
+    bindings: dict[
+        tuple[str | None, str, int],
+        dict[str, Any],
+    ] = {}
+    if origin_execution_ids is not None and not isinstance(
+        origin_execution_ids, Mapping
+    ):
+        raise TaskManifestError(
+            "origin_execution_ids must be a task-to-execution mapping."
+        )
+    normalized_origins: dict[str, str] | None = None
+    if origin_execution_ids is not None:
+        normalized_origins = {}
+        for task_id, execution_id in origin_execution_ids.items():
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or not isinstance(execution_id, str)
+                or not execution_id
+            ):
+                raise TaskManifestError(
+                    "origin_execution_ids contains an invalid identity."
+                )
+            normalized_origins[task_id] = execution_id
+    unavailable: list[str] = []
+    seen_task_ids: set[str] = set()
+    one_core = True
+    consistent = True
+    for raw in assignments:
+        value = raw.as_dict() if isinstance(raw, TaskAssignment) else raw
+        if not isinstance(value, Mapping):
+            raise TaskManifestError(
+                "task assignment physical-core evidence is not a mapping."
+            )
+        task_id = value.get("task_id")
+        hostname = value.get("hostname")
+        rank = value.get("rank")
+        affinity = value.get("cpu_affinity")
+        topology = value.get("cpu_affinity_topology")
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or task_id in seen_task_ids
+            or not isinstance(hostname, str)
+            or not hostname
+            or isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or rank < 0
+        ):
+            raise TaskManifestError(
+                "task assignment identity is invalid for CPU binding."
+            )
+        seen_task_ids.add(task_id)
+        origin_execution_id = (
+            None
+            if normalized_origins is None
+            else normalized_origins.get(task_id)
+        )
+        if normalized_origins is not None and origin_execution_id is None:
+            raise TaskManifestError(
+                "origin_execution_ids does not cover every assignment."
+            )
+        if affinity is None or topology is None:
+            unavailable.append(task_id)
+            continue
+        if (
+            not isinstance(affinity, (list, tuple))
+            or not affinity
+            or any(
+                isinstance(cpu, bool)
+                or not isinstance(cpu, int)
+                or cpu < 0
+                for cpu in affinity
+            )
+            or len(set(affinity)) != len(affinity)
+            or list(affinity) != sorted(affinity)
+            or not isinstance(topology, (list, tuple))
+            or len(topology) != len(affinity)
+        ):
+            raise TaskManifestError(
+                "task assignment logical CPU affinity is invalid."
+            )
+        normalized: list[tuple[int, int, int]] = []
+        for item in topology:
+            if (
+                not isinstance(item, Mapping)
+                or set(item)
+                != {"logical_cpu", "package_id", "core_id"}
+                or any(
+                    isinstance(component, bool)
+                    or not isinstance(component, int)
+                    or component < 0
+                    for component in item.values()
+                )
+            ):
+                raise TaskManifestError(
+                    "task assignment CPU topology record is invalid."
+                )
+            normalized.append(
+                (
+                    int(item["logical_cpu"]),
+                    int(item["package_id"]),
+                    int(item["core_id"]),
+                )
+            )
+        if [item[0] for item in normalized] != list(affinity):
+            raise TaskManifestError(
+                "task assignment CPU topology does not cover its affinity."
+            )
+        physical = {(item[1], item[2]) for item in normalized}
+        if len(physical) != 1:
+            one_core = False
+            continue
+        physical_core = next(iter(physical))
+        key = (origin_execution_id, hostname, rank)
+        record = bindings.get(key)
+        binding_identity = (
+            tuple(int(cpu) for cpu in affinity),
+            tuple(normalized),
+            physical_core,
+        )
+        if record is None:
+            bindings[key] = {
+                "identity": binding_identity,
+                "task_ids": [task_id],
+            }
+        elif record["identity"] != binding_identity:
+            consistent = False
+        else:
+            record["task_ids"].append(task_id)
+
+    if normalized_origins is not None and set(normalized_origins) != (
+        seen_task_ids
+    ):
+        raise TaskManifestError(
+            "origin_execution_ids must cover exactly the selected tasks."
+        )
+    by_execution_host: dict[
+        tuple[str | None, str],
+        dict[tuple[int, int], int],
+    ] = {}
+    disjoint = True
+    for (origin_execution_id, hostname, rank), record in bindings.items():
+        physical = record["identity"][2]
+        observed = by_execution_host.setdefault(
+            (origin_execution_id, hostname),
+            {},
+        )
+        if physical in observed and observed[physical] != rank:
+            disjoint = False
+        observed[physical] = rank
+    rank_bindings = []
+    for (
+        origin_execution_id,
+        hostname,
+        rank,
+    ), record in sorted(
+        bindings.items(),
+        key=lambda item: (
+            "" if item[0][0] is None else item[0][0],
+            item[0][1],
+            item[0][2],
+        ),
+    ):
+        logical, _, physical = record["identity"]
+        rank_bindings.append(
+            {
+                "origin_execution_id": origin_execution_id,
+                "hostname": hostname,
+                "rank": rank,
+                "logical_cpus": list(logical),
+                "physical_core": {
+                    "package_id": physical[0],
+                    "core_id": physical[1],
+                },
+                "task_ids": list(record["task_ids"]),
+            }
+        )
+    available = (
+        bool(assignments)
+        and not unavailable
+        and one_core
+        and consistent
+        and disjoint
+    )
+    evidence = {
+        "schema": "negfpy_task_physical_core_bindings",
+        "schema_version": 2,
+        "origin_execution_scoped": normalized_origins is not None,
+        "available": available,
+        "one_physical_core_per_assignment": one_core,
+        "consistent_affinity_per_rank": consistent,
+        "disjoint_physical_cores_across_ranks": disjoint,
+        "unavailable_task_ids": unavailable,
+        "rank_bindings": rank_bindings,
+    }
+    if require_available and not available:
+        raise TaskManifestError(
+            "release task execution lacks valid, consistent, disjoint "
+            "physical-core binding evidence."
+        )
+    return _freeze_json(evidence)
 
 
 @dataclass(frozen=True)
@@ -1068,6 +1547,202 @@ class MPIExecutionReport:
 
     def as_dict(self) -> dict[str, Any]:
         return _envelope(self._payload())
+
+
+def task_execution_mpi_origin_lineage_evidence(
+    selected_execution: MPIExecutionReport | Mapping[str, Any],
+    execution_history: Sequence[
+        MPIExecutionReport | Mapping[str, Any]
+    ],
+    *,
+    require_mpi_origin: bool = False,
+) -> Mapping[str, Any]:
+    """Prove every selected task artifact originated in fresh worker MPI."""
+
+    def payload(
+        value: MPIExecutionReport | Mapping[str, Any],
+    ) -> dict[str, Any]:
+        raw = (
+            value._payload()  # noqa: SLF001
+            if isinstance(value, MPIExecutionReport)
+            else value
+        )
+        normalized = _normalize_json(raw)
+        if not isinstance(normalized, dict):
+            raise TaskManifestError(
+                "MPI origin-lineage execution must be a mapping."
+            )
+        return normalized
+
+    selected = payload(selected_execution)
+    history = [payload(value) for value in execution_history]
+    selected_id = selected.get("execution_id")
+    selected_assignments = selected.get("assignments")
+    if (
+        not isinstance(selected_id, str)
+        or not selected_id
+        or not isinstance(selected_assignments, list)
+        or selected.get("complete") is not True
+    ):
+        raise TaskManifestError(
+            "selected MPI origin-lineage execution is incomplete."
+        )
+    by_execution: dict[str, dict[str, Any]] = {}
+    execution_order: dict[str, int] = {}
+    for ordinal, execution in enumerate(history):
+        execution_id = execution.get("execution_id")
+        assignments = execution.get("assignments")
+        communicator_size = execution.get("communicator_size")
+        complete = execution.get("complete")
+        if (
+            not isinstance(execution_id, str)
+            or not execution_id
+            or execution_id in by_execution
+            or not isinstance(assignments, list)
+            or execution.get("mode") not in {"serial", "mpi"}
+            or isinstance(communicator_size, bool)
+            or not isinstance(communicator_size, int)
+            or communicator_size <= 0
+            or (
+                execution.get("mode") == "serial"
+                and communicator_size != 1
+            )
+            or (
+                execution.get("mode") == "mpi"
+                and communicator_size < 2
+            )
+            or type(complete) is not bool
+        ):
+            raise TaskManifestError(
+                "MPI origin-lineage history is invalid or duplicated."
+            )
+        by_execution[execution_id] = execution
+        execution_order[execution_id] = ordinal
+    if selected_id not in by_execution:
+        by_execution[selected_id] = selected
+        execution_order[selected_id] = len(execution_order)
+    elif by_execution[selected_id] != selected:
+        raise TaskManifestError(
+            "selected MPI execution differs from its history record."
+        )
+
+    lineage: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    seen_tasks: set[str] = set()
+    for assignment in selected_assignments:
+        if not isinstance(assignment, dict):
+            raise TaskManifestError(
+                "MPI origin-lineage assignment must be a mapping."
+            )
+        task_id = assignment.get("task_id")
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or task_id in seen_tasks
+            or assignment.get("status") != "completed"
+            or type(assignment.get("resumed")) is not bool
+            or type(assignment.get("orphan_artifact_adopted")) is not bool
+        ):
+            raise TaskManifestError(
+                "MPI origin-lineage assignment identity is invalid."
+            )
+        seen_tasks.add(task_id)
+        origin_rank = assignment.get("rank")
+        origin_size = assignment.get("origin_communicator_size")
+        mpi_origin = (
+            isinstance(origin_rank, int)
+            and not isinstance(origin_rank, bool)
+            and isinstance(origin_size, int)
+            and not isinstance(origin_size, bool)
+            and origin_rank > 0
+            and origin_size >= 2
+            and origin_rank < origin_size
+            and assignment["orphan_artifact_adopted"] is False
+        )
+        origin_execution_id: str | None = None
+        if not assignment["resumed"]:
+            if (
+                selected.get("mode") == "mpi"
+                and selected.get("communicator_size") == origin_size
+                and mpi_origin
+            ):
+                origin_execution_id = selected_id
+        elif mpi_origin:
+            matches: list[str] = []
+            for execution_id, execution in by_execution.items():
+                if (
+                    execution_id == selected_id
+                    or execution.get("mode") != "mpi"
+                    or execution_order[execution_id]
+                    >= execution_order[selected_id]
+                    or execution.get("communicator_size") != origin_size
+                ):
+                    continue
+                for candidate in execution.get("assignments", ()):
+                    if (
+                        isinstance(candidate, dict)
+                        and candidate.get("task_id") == task_id
+                        and candidate.get("status") == "completed"
+                        and candidate.get("resumed") is False
+                        and candidate.get("orphan_artifact_adopted")
+                        is False
+                        and candidate.get("rank") == origin_rank
+                        and candidate.get("origin_communicator_size")
+                        == origin_size
+                        and candidate.get("checkpoint_file_sha256")
+                        == assignment.get("checkpoint_file_sha256")
+                        and candidate.get("artifact_sha256")
+                        == assignment.get("artifact_sha256")
+                    ):
+                        matches.append(execution_id)
+            if matches:
+                origin_execution_id = sorted(set(matches))[0]
+        if origin_execution_id is None:
+            failures.append(
+                {
+                    "task_id": task_id,
+                    "reason": (
+                        "missing_fresh_nonorphan_worker_mpi_origin"
+                    ),
+                }
+            )
+            continue
+        lineage.append(
+            {
+                "task_id": task_id,
+                "selected_resumed": assignment["resumed"],
+                "origin_execution_id": origin_execution_id,
+                "origin_rank": int(origin_rank),
+                "origin_communicator_size": int(origin_size),
+                "checkpoint_file_sha256": assignment.get(
+                    "checkpoint_file_sha256"
+                ),
+                "artifact_sha256": assignment.get("artifact_sha256"),
+            }
+        )
+    passed = (
+        not failures
+        and len(lineage) == len(selected_assignments)
+        and selected.get("mode") == "mpi"
+        and isinstance(selected.get("communicator_size"), int)
+        and not isinstance(selected.get("communicator_size"), bool)
+        and selected["communicator_size"] >= 2
+    )
+    evidence = {
+        "schema": "negfpy_task_mpi_origin_lineage",
+        "schema_version": 1,
+        "selected_execution_id": selected_id,
+        "passed": passed,
+        "task_count": len(selected_assignments),
+        "lineage": lineage,
+        "failures": failures,
+    }
+    if require_mpi_origin and not passed:
+        raise TaskManifestError(
+            "release task execution lacks fresh, nonorphan worker-MPI "
+            "artifact origin lineage."
+        )
+    return _freeze_json(evidence)
 
 
 def write_execution_manifest(
@@ -1183,6 +1858,71 @@ def _assignments_from_checkpoints(
         execution = checkpoint.execution
         thread_cap = execution["thread_cap"]
         raw_affinity = thread_cap["cpu_affinity"]
+        raw_topology = thread_cap.get("cpu_affinity_topology")
+        topology: tuple[tuple[int, int, int], ...] | None
+        if raw_topology is None:
+            topology = None
+        else:
+            if (
+                not isinstance(raw_topology, (tuple, list))
+                or not raw_topology
+                or any(
+                    not isinstance(item, Mapping)
+                    or set(item)
+                    != {"logical_cpu", "package_id", "core_id"}
+                    for item in raw_topology
+                )
+                or any(
+                    type(value) is not int or value < 0
+                    for item in raw_topology
+                    for value in item.values()
+                )
+            ):
+                raise TaskCheckpointCorruptionError(
+                    "checkpoint CPU-affinity topology is invalid."
+                )
+            topology = tuple(
+                (
+                    int(item["logical_cpu"]),
+                    int(item["package_id"]),
+                    int(item["core_id"]),
+                )
+                for item in raw_topology
+            )
+            if (
+                tuple(value[0] for value in topology)
+                != (
+                    ()
+                    if raw_affinity is None
+                    else tuple(int(value) for value in raw_affinity)
+                )
+                or len(set(topology)) != len(topology)
+            ):
+                raise TaskCheckpointCorruptionError(
+                    "checkpoint CPU-affinity topology conflicts with "
+                    "logical affinity."
+                )
+        orphan_adopted = execution.get(
+            "orphan_artifact_adopted",
+            False,
+        )
+        if type(orphan_adopted) is not bool:
+            raise TaskCheckpointCorruptionError(
+                "checkpoint orphan_artifact_adopted must be boolean."
+            )
+        origin_size = execution.get("communicator_size")
+        origin_rank = execution.get("rank")
+        if (
+            isinstance(origin_size, bool)
+            or not isinstance(origin_size, int)
+            or origin_size <= 0
+            or isinstance(origin_rank, bool)
+            or not isinstance(origin_rank, int)
+            or not 0 <= origin_rank < origin_size
+        ):
+            raise TaskCheckpointCorruptionError(
+                "checkpoint origin rank/communicator size is invalid."
+            )
         assignments.append(
             TaskAssignment(
                 task_id=task.task_id,
@@ -1190,7 +1930,9 @@ def _assignments_from_checkpoints(
                 rank=int(execution["rank"]),
                 hostname=str(execution["hostname"]),
                 elapsed_seconds=float(execution["elapsed_seconds"]),
-                resumed=task.task_id in initially_complete,
+                resumed=(
+                    task.task_id in initially_complete or orphan_adopted
+                ),
                 cpu_affinity=(
                     None
                     if raw_affinity is None
@@ -1203,6 +1945,9 @@ def _assignments_from_checkpoints(
                 checkpoint_file_sha256=_file_sha256(target),
                 artifact_relative_path=checkpoint.artifact_relative_path,
                 artifact_sha256=checkpoint.artifact_sha256,
+                orphan_artifact_adopted=orphan_adopted,
+                cpu_affinity_topology=topology,
+                origin_communicator_size=origin_size,
             )
         )
     return tuple(assignments)
@@ -1666,6 +2411,8 @@ __all__ = [
     "mpi_available",
     "serial_task_communicator",
     "task_checkpoint_path",
+    "task_assignment_physical_core_evidence",
+    "task_execution_mpi_origin_lineage_evidence",
     "write_execution_manifest",
     "write_task_checkpoint",
     "write_task_manifest",

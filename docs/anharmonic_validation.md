@@ -1,8 +1,9 @@
 # Anharmonic NEGF validation and release checklist
 
-Status: executable `0.1.0rc1` validation contract and implementation snapshot,
-2026-07-25. Protocol v2 has produced one provisional failed endpoint, but the
-corrected contract has not yet completed a clean full-graph remote rerun.
+Status: the protocol-v2 dense toy gate passed at exact commit
+`ad2558961f42e58c15b54a7b2ebdf7219dd6d363` and is tagged
+`v0.1.0-rc1`. The pinned silicon bulk three-phonon oracle is the active
+`0.2.0` validation gate, 2026-07-29.
 
 This document distinguishes four things that should not be conflated:
 
@@ -70,8 +71,7 @@ Ordinary pytest discovery continues to skip the expensive release runner.
 ### Production-first ordering
 
 Release certification follows the production Guo-convention solver, not the
-ease with which a historical curve can be matched. The next scientific gates
-are, in order:
+ease with which a historical curve can be matched. The scientific ladder is:
 
 1. a continuum or explicitly open-system mode-space linewidth and frequency
    shift oracle, with physical bath broadening refined independently of
@@ -80,11 +80,13 @@ are, in order:
    that reaches the same fixed point from zero and Born-seeded initial states
    and passes the separate contact-balance and collision-power tests;
 3. the pinned phono3py silicon matrix-element, phase-space, and bulk-linewidth
-   oracle described in section 4.
+   oracle described in section 4;
+4. sparse \(N_q=1\) material SCBA; and
+5. transverse-momentum-coupled SCBA and paper benchmarks.
 
-The phono3py work may proceed in parallel with the second toy gate, but no
-material-device SCBA result is certifiable until both the production toy
-gates and the bulk oracle pass.
+The first two gates have passed in the exact archived `v0.1.0-rc1`
+campaign. No material-device SCBA result is certifiable until the bulk silicon
+oracle also passes.
 
 One-shot Born is a screening calculation. It is appropriate for testing
 channel locations, Bose factors, \(\Psi^2\) scaling, and for constructing an
@@ -508,38 +510,34 @@ Because the execution contract is part of provenance, the endpoint cannot be
 reclassified after the fact. A new immutable candidate must rerun the full
 graph under the corrected passivity scope.
 
-Still required before declaring the complete `0.1.0` research release
-validated:
+Those requirements subsequently passed in the exact protocol-v2 campaign at
+commit `ad2558961f42e58c15b54a7b2ebdf7219dd6d363`. Its strict report
+SHA256 is
+`793ad0fa014f9322c73e1ebb84cb3327400e925a14228f3dbe0a0af075e38972`
+and declares `release_certified=true`. The archive contains all 28 completed
+outcomes, the 13-case multidimensional graph, the 13-case open-system matrix,
+13 scientific checkpoints, the seven-point harmonic preflight, bounded
+backend equality, refinement and restart evidence, Python 3.10/3.12 wheel
+qualifications, an independent post-fetch audit, and the regenerated PDF.
+The previous attempts above remain useful failed diagnostics but no longer
+describe the current toy-release status.
 
-- archive the already passing fine open-system ladder in the combined strict
-  report. The initial \(\Delta\omega=0.015,\eta_{\rm lead}=0.001\) diagnostic
-  failed by 42.6% in shift and 10.5% in linewidth because the regulator was
-  much narrower than the grid. With the prefactor unchanged, the production
-  API at \(\Delta\omega=7.0\times10^{-5}\),
-  \(\eta_{\rm lead}=4.5\times10^{-5}\), and cutoff \(5.00997\) agrees with
-  the eta-free oracle at \(T=0.7\) to 0.0776% in shift and 0.0278% in
-  linewidth. Half spacing, half eta, and cutoff 6 were varied independently;
-  the largest observable change was 0.162%, below the 0.5% gate. At \(T=0\),
-  the base errors are 0.318% and 0.0269%, and spontaneous decay remains
-  nonzero. These local results remain useful evidence, but they do not certify
-  the combined campaign;
-- execute the remaining signed-coupling matrix in the strict combined
-  archive. Sign invariance and exact \(g^2\) scaling already pass both direct
-  and FFT primitive tests, but the release report deliberately requires the
-  full run-object coverage;
-- on one clean candidate revision and pinned environment, run and archive the
-  seven-point harmonic preflight, bounded converged serial/direct--threaded/
-  direct--FFT/FFT oracle, and all 13 FFT production outcomes without dropping
-  or retuning failures;
-- demonstrate interrupted/resumed equivalence with the atomic HDF5
-  checkpoint path and mirror all checkpoints, logs, manifests, and final
-  artifacts with verified checksums;
-- produce one strict combined report with clean identical provenance and
+The active `0.2.0` blocker is now the exact-new-commit silicon ladder:
+
+- fresh full-\(q\), full-band \(3^3\) and \(5^3\) MPI campaigns whose complete
+  fields match monolithic serial results at `rtol=1e-10`, `atol=1e-12`;
+- a complete \(11^3\) target-\(q\) MPI result compared against an independently
+  generated phono3py 4.4.0 reference;
+- sampled gauge-invariant \(\lvert V^{(3)}\rvert^2\), phase-space and
+  degenerate-subspace linewidth gates;
+- one clean installed `0.2.0` source/tree/environment identity across every
+  input and run, with no scientific or memory override; and
+- a final immutable aggregate report that alone may declare
   `release_certified=true`.
 
-Until those items pass, `0.1.0` remains **unvalidated**. Neither the prior
-fine open-system evidence nor the postmortem closure of the failed remote
-field changes that release status.
+The earlier exact `c264d8d` \(3^3\) serial result passed the scientific
+comparisons but predates the MPI implementation, so it is retained as
+historical evidence and cannot authorize `0.2.0`.
 
 Historical extensions are deliberately absent from this blocker list.
 Mingo is frozen as an unresolved historical reproduction after at most four
@@ -554,14 +552,15 @@ mean-field checkpoints remain source-limited regressions.
 
 Not yet claimed by this snapshot:
 
-- complete phono3py device mapping or validated bulk matrix elements and
-  linewidths (`0.2.0`);
+- release certification of the complete silicon bulk matrix-element and
+  linewidth oracle (`0.2.0`);
+- material-device FC3 mapping (begins only after `0.2.0`);
 - sparse quasi-1D real-material SCBA (`0.3.0`);
 - transverse-momentum-coupled SCBA (`0.4.0`);
-- silicon-film or Si/Ge paper reproduction, release-certified restart
+- silicon-film or Si/Ge paper reproduction, material-run restart
   equivalence, or production performance certification (`1.0.0`). The
-  private atomic HDF5 mechanism exists, but the required remote interruption
-  campaign has not passed.
+  private atomic HDF5 mechanism and toy restart gate have passed, but no
+  material-device interruption campaign exists yet.
 
 Passing the current unit suite is therefore evidence for the dense numerical
 foundation, not evidence that the later real-material milestones are

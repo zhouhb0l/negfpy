@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import hashlib
@@ -20,8 +22,13 @@ from negfpy.anharmonic.phono3py_reference import (
     read_phono3py_silicon_reference,
 )
 from negfpy.anharmonic.v3_sample_manifest import (
+    LARGE_MESH_BOUNDED_SELECTION,
     V3SampleCoverageError,
+    _BoundedSelectionAccumulator,
+    _PromotedBlock,
+    _coordinate_sha256,
     _production_process,
+    _select_bounded_blocks,
     build_v3_sample_manifest,
     create_v3_sample_manifest,
     read_v3_sample_manifest,
@@ -275,6 +282,18 @@ def test_selection_is_deterministic_stratified_and_nonzero(
     second = build_v3_sample_manifest(reference, **inputs)
 
     assert first == second
+    canonical = json.dumps(
+        first,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    # Locks the legacy default payload, not merely repeatability after a
+    # selector refactor.
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "c16867a2710f73ec03d6bccf17be52dab"
+        "470f4bf888861e3d0cd060f3439b87b"
+    )
     assert len(first["samples"]) >= 64
     keys = {
         (
@@ -352,6 +371,254 @@ def test_selection_is_deterministic_stratified_and_nonzero(
                 np.floor(quantile * (len(ordered) - 1) + 0.5)
             )
             assert ordered[position] in selected_strengths
+
+
+def test_large_mesh_bounded_selection_is_strict_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    reference = read_phono3py_silicon_reference(
+        _write_reference(tmp_path),
+    )
+    inputs = _inputs(tmp_path)
+    first = build_v3_sample_manifest(
+        reference,
+        selection_mode=LARGE_MESH_BOUNDED_SELECTION,
+        maximum_promoted_blocks=96,
+        **inputs,
+    )
+    second = build_v3_sample_manifest(
+        reference,
+        selection_mode=LARGE_MESH_BOUNDED_SELECTION,
+        maximum_promoted_blocks=96,
+        **inputs,
+    )
+
+    assert first == second
+    assert first["selection_algorithm"] == (
+        "deterministic_bounded_streaming_reference_invariant_blocks"
+    )
+    assert first["selection_algorithm_version"] == 2
+    assert first["coverage"]["cover_all_target_grid_points"] is False
+    assert first["coverage"]["cover_all_target_bands"] is True
+    assert len(first["samples"]) == 96
+    assert len(first["samples"]) <= 512
+    assert {sample["process"] for sample in first["samples"]} == {
+        "normal",
+        "umklapp",
+    }
+    assert {sample["b0"] for sample in first["samples"]} == set(range(6))
+    for stratum in first["coverage"]["required_strata"]:
+        assert sum(
+            sample["stratum"] == stratum for sample in first["samples"]
+        ) >= 2
+    assert max(
+        sample["reference_invariant_block_sum_ev2"]
+        for sample in first["samples"]
+    ) == pytest.approx(2261.555)
+    assert all(
+        sample["reference_invariant_block_sum_ev2"]
+        >= first["robust_nonzero_floor_ev2"]
+        for sample in first["samples"]
+    )
+
+    output = tmp_path / "bounded-v3-samples.json"
+    manifest = create_v3_sample_manifest(
+        reference,
+        output_path=output,
+        selection_mode=LARGE_MESH_BOUNDED_SELECTION,
+        maximum_promoted_blocks=96,
+        **inputs,
+    )
+    assert manifest.cover_all_target_grid_points is False
+    assert manifest.cover_all_target_bands is True
+    assert manifest.selection_algorithm_version == 2
+    verify_v3_sample_manifest_identity(manifest, reference, **inputs)
+
+    wrong_contract = json.loads(output.read_text(encoding="utf-8"))
+    wrong_contract["coverage"]["cover_all_target_grid_points"] = True
+    wrong_path = tmp_path / "wrong-v2-contract.json"
+    wrong_path.write_text(
+        json.dumps(wrong_contract, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="coverage booleans"):
+        read_v3_sample_manifest(wrong_path)
+
+    wrong_pair = json.loads(output.read_text(encoding="utf-8"))
+    wrong_pair["selection_algorithm_version"] = 1
+    wrong_pair_path = tmp_path / "wrong-v2-pair.json"
+    wrong_pair_path.write_text(
+        json.dumps(wrong_pair, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="algorithm/version pair"):
+        read_v3_sample_manifest(wrong_pair_path)
+
+    for invalid_version in (True, 2.0):
+        wrong_type = json.loads(output.read_text(encoding="utf-8"))
+        wrong_type["selection_algorithm_version"] = invalid_version
+        wrong_type_path = tmp_path / (
+            "wrong-v2-version-type-"
+            f"{type(invalid_version).__name__}.json"
+        )
+        wrong_type_path.write_text(
+            json.dumps(wrong_type, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="version types"):
+            read_v3_sample_manifest(wrong_type_path)
+
+    weakened_processes = json.loads(output.read_text(encoding="utf-8"))
+    weakened_processes["coverage"]["required_processes"] = ["normal"]
+    weakened_processes_path = tmp_path / "weakened-v2-processes.json"
+    weakened_processes_path.write_text(
+        json.dumps(weakened_processes, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="canonical normal/umklapp"):
+        read_v3_sample_manifest(weakened_processes_path)
+
+    incomplete_partition = json.loads(output.read_text(encoding="utf-8"))
+    incomplete_partition["coverage"]["required_strata"].pop()
+    incomplete_partition_path = tmp_path / "incomplete-v2-partition.json"
+    incomplete_partition_path.write_text(
+        json.dumps(incomplete_partition, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="36-stratum"):
+        read_v3_sample_manifest(incomplete_partition_path)
+
+    sparse_stratum = json.loads(output.read_text(encoding="utf-8"))
+    counts = {
+        stratum: sum(
+            sample["stratum"] == stratum
+            for sample in sparse_stratum["samples"]
+        )
+        for stratum in sparse_stratum["coverage"]["required_strata"]
+    }
+    target_stratum = next(
+        stratum for stratum, count in counts.items() if count == 2
+    )
+    samples = list(sparse_stratum["samples"])
+    remove_index = next(
+        index
+        for index, sample in enumerate(samples)
+        if sample["stratum"] == target_stratum
+    )
+    del samples[remove_index]
+    sparse_stratum["samples"] = samples
+    sparse_stratum_path = tmp_path / "sparse-v2-stratum.json"
+    sparse_stratum_path.write_text(
+        json.dumps(sparse_stratum, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="two distinct promoted blocks"):
+        read_v3_sample_manifest(sparse_stratum_path)
+
+    legacy = build_v3_sample_manifest(reference, **inputs)
+    legacy["coverage"]["cover_all_target_grid_points"] = False
+    weakened_legacy_path = tmp_path / "weakened-v1-contract.json"
+    weakened_legacy_path.write_text(
+        json.dumps(legacy, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="coverage booleans"):
+        read_v3_sample_manifest(weakened_legacy_path)
+
+
+def test_bounded_accumulator_retention_does_not_scale_with_1331_qpoints() -> None:
+    target_bands = tuple(range(6))
+    accumulator = _BoundedSelectionAccumulator(
+        floor=1.0e-6,
+        global_maximum=1.0e6,
+        maximum_promoted_blocks=512,
+        target_bands=target_bands,
+    )
+    strata = tuple(
+        f"{region}.{target}.{internal}.{process}"
+        for region in ("gamma", "near", "generic")
+        for target in ("acoustic", "optical")
+        for internal in ("aa", "ao", "oo")
+        for process in ("normal", "umklapp")
+    )
+    maximum_retained = 0
+    population = 1331 * 64
+    for index in range(population):
+        stratum = strata[index % len(strata)]
+        _, target, internal, process = stratum.split(".")
+        target_band = (
+            index % 3 if target == "acoustic" else 3 + index % 3
+        )
+        band1, band2 = {
+            "aa": (0, 1),
+            "ao": (0, 3),
+            "oo": (3, 4),
+        }[internal]
+        q0 = index % 1331
+        q1 = index
+        q2 = (q0 + q1) % 1331
+        strength = 10.0 ** (-6.0 + 12.0 * ((index % 1001) / 1000.0))
+        if index == population - 1:
+            strength = 1.0e6
+        target_subspace = (target_band,)
+        band1_subspace = (band1,)
+        band2_subspace = (band2,)
+        accumulator.add(
+            _PromotedBlock(
+                q0=q0,
+                q1=q1,
+                q2=q2,
+                target_subspace=target_subspace,
+                band1_subspace=band1_subspace,
+                band2_subspace=band2_subspace,
+                seed_b0=target_band,
+                seed_b1=band1,
+                seed_b2=band2,
+                process=process,
+                strength_ev2=strength,
+                stratum=stratum,
+                coordinate_sha256=_coordinate_sha256(
+                    q0,
+                    q1,
+                    q2,
+                    target_subspace,
+                    band1_subspace,
+                    band2_subspace,
+                ),
+            )
+        )
+        maximum_retained = max(
+            maximum_retained,
+            accumulator.retained_candidate_slots,
+        )
+
+    selected, required_strata, empty_strata = _select_bounded_blocks(
+        accumulator,
+        minimum_promoted_blocks=64,
+    )
+    assert accumulator.viable_count == population
+    assert maximum_retained <= accumulator.retention_bound
+    assert accumulator.retention_bound < population // 100
+    assert len(selected) == 512
+    assert len({sample.key for sample in selected}) == 512
+    assert len({sample.q0 for sample in selected}) < 1331
+    assert {sample.process for sample in selected} == {
+        "normal",
+        "umklapp",
+    }
+    assert {sample.seed_b0 for sample in selected} == set(target_bands)
+    assert {sample.stratum for sample in selected} == set(strata)
+    assert set(required_strata) == set(strata)
+    assert empty_strata == ()
+    assert max(sample.strength_ev2 for sample in selected) == 1.0e6
+    for process in ("normal", "umklapp"):
+        process_strengths = [
+            sample.strength_ev2
+            for sample in selected
+            if sample.process == process
+        ]
+        assert min(process_strengths) <= 1.1e-6
+        assert max(process_strengths) >= 0.9e6
 
 
 def test_atomic_roundtrip_hash_tamper_and_input_mismatch(

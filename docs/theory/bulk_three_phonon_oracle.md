@@ -5,6 +5,9 @@ Status: implementation contract for NEGFPy `0.2.0`.
 Reference implementation: phono3py 4.4.0, Si-PBEsol example at phono3py
 commit `302ad205452ee36e57887b10bbf4a0289dd037bb`.
 
+Validation evidence and release interpretation are recorded in the
+[silicon bulk oracle validation record](../validation/silicon_bulk_oracle.md).
+
 ## Scope
 
 The bulk oracle validates FC2 reconstruction, FC3 real-to-reciprocal

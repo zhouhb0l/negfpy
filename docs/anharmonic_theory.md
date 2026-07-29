@@ -522,8 +522,9 @@ grammar is the canonical PEP 440 subset used by its locked build: an optional
 numeric epoch, a dot-separated numeric release, optional lowercase `a`, `b`,
 or `rc`, optional `.post` and `.dev` components, and an optional lowercase
 alphanumeric dot-separated local component. No normalization occurs at this
-gate: all three strings must already be identical canonical text. The current
-`0.1.0rc1` version satisfies this grammar. Dirty, unknown, or malformed
+gate: all three strings must already be identical canonical text. Both the
+certified `0.1.0rc1` toy build and the current `0.2.0` silicon candidate
+satisfy this grammar. Dirty, unknown, or malformed
 provenance therefore leaves the physical diagnostic flag intact but forces the
 result-level flag to false. Provenance hashes
 the exact lesser/greater continuation state actually consumed (the retarded

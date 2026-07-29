@@ -1,8 +1,8 @@
 # Anharmonic phonon NEGF: research, architecture, and validation plan
 
-Status: locked release roadmap with an executable dense `0.1.x` candidate,
-2026-07-25. Protocol v2 is implemented, but its clean remote release rerun is
-still pending. Exact conventions and current validation gaps are normative in
+Status: locked release roadmap with a remotely certified dense
+`v0.1.0-rc1`, 2026-07-29. The silicon bulk three-phonon oracle is the active
+`0.2.0` gate. Exact conventions and current validation gaps are normative in
 `anharmonic_theory.md` and `anharmonic_validation.md`.
 
 ## 1. Decision
@@ -687,11 +687,12 @@ Then use [Guo et al., Phys. Rev. B 103, 174306
 
 ### Protocol-v2 checkpoint and first-attempt evidence
 
-Protocol v2 now encodes the resolved seven-point harmonic preflight, bounded
+Protocol v2 encodes the resolved seven-point harmonic preflight, bounded
 converged backend oracle, 13-outcome FFT graph, state-conditional spectral
 passivity, full-nonlocal spatial-current bookkeeping, weak-coupling gates,
-clean common provenance, and private atomic HDF5 outcome resume. It has not
-yet completed the full clean remote graph.
+clean common provenance, and private atomic HDF5 outcome resume. The complete
+graph subsequently passed on the remote workstation at exact commit
+`ad2558961f42e58c15b54a7b2ebdf7219dd6d363`.
 
 The first remote attempt instead used commit
 `d05b4404af98e650e712b4ed7afd68705c1014f2`, the superseded protocol/schema,
@@ -756,15 +757,21 @@ was clipped or projected. A new immutable candidate must rerun the complete
 graph under the corrected contract; the old endpoint cannot be
 retroactively certified.
 
-Accordingly, `0.1.0` remains **unvalidated** until one clean candidate commit
-passes the seven-point harmonic preflight, bounded full-field
-serial/direct--threaded/direct--FFT/FFT oracle, all 13 FFT outcomes, complete
-open-system matrix, restart comparison, and strict combined report.
+The later exact campaign supersedes those provisional failures. Its strict
+report SHA256 is
+`793ad0fa014f9322c73e1ebb84cb3327400e925a14228f3dbe0a0af075e38972`
+and declares `release_certified=true`. It contains 28 completed outcomes,
+the complete 13-case multidimensional graph, all 13 open-system cases, 13
+scientific checkpoints, and no scientific failure. Python 3.10 and 3.12
+wheel qualifications, an independent post-fetch audit, and the regenerated
+PDF are archived under
+`reports/phonon-phonon-interaction/validated/ad255896.../attempt-001/`.
+The annotated tag `v0.1.0-rc1` identifies this passed toy release.
 
 | Release | Required outcome | Current state |
 |---|---|---|
-| `0.1.0` | Python-only dense cubic SCBA for validated toy models | Protocol-v2 machinery and fine open-system evidence exist. The old full attempt and the later `ab467` endpoint are provisional failed diagnostics; neither is certifiable under its frozen revision. A new clean immutable candidate must pass the complete graph. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions. |
-| `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | Full/compact reading, schema/permutation checks, unit conversion, mass normalization, hashes, and provenance are implemented. Translational device mapping and the pinned phono3py matrix-element/linewidth oracle remain. |
+| `0.1.0` | Python-only dense cubic SCBA for validated toy models | **Passed.** Exact commit `ad255896...` is tagged `v0.1.0-rc1`; the strict remote report declares `release_certified=true`. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions and do not calibrate the production prefactor. |
+| `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | In progress. Full/compact FC2/FC3 ingestion, immutable crystal mapping, translational FC3, deterministic mode-space interactions and linewidths, exact 3x3x3 scientific agreement, task-level target-\(q\) MPI, independent phono3py MPI reference generation, bounded \(V^{(3)}\) sampling, and strict evidence aggregation are implemented. Release remains blocked on exact-new-commit 3x3x3 and 5x5x5 serial/MPI equality plus the complete 11x11x11 external campaign. |
 | `0.3.0` | Sparse real-space SCBA for quasi-1D material devices | Not implemented. It must first reproduce the dense contractions exactly and retain complete FC3-implied support. |
 | `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Not implemented. It requires explicit coupled \(q'\) sums, momentum folding, and validated \(1/N_q\) normalization. |
 | `1.0.0` | Silicon/interface paper benchmarks, restart, convergence archive, production CPU performance | The private atomic HDF5 mechanism is implemented, but release restart equivalence and the material/performance benchmarks are not. The attached Guo papers define later targets; they are not evidence for the dense toy candidate. |

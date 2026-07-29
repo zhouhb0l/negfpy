@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "negfpy"
-version = "0.1.0rc1"
+version = "0.2.0"
 description = "Phonon NEGF development"
 requires-python = ">=3.10"
 dependencies = ["numpy", "scipy", "threadpoolctl>=3"]
@@ -19,7 +19,7 @@ material-oracle = [
 ]
 mpi = ["mpi4py>=4"]
 report = ["h5py>=3", "matplotlib>=3.7", "pillow>=10"]
-test = ["h5py>=3", "pytest>=8"]
+test = ["h5py>=3", "spglib==2.7.0", "pytest>=8"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

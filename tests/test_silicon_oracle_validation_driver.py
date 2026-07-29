@@ -20,6 +20,17 @@ def _sample_payload(
     inputs: dict[str, str] | None = None,
     mapping_hashes: dict[str, str] | None = None,
 ) -> dict:
+    all_strata = {
+        f"{region}.{target}.{internal}.{process}"
+        for region in ("gamma", "near", "generic")
+        for target in ("acoustic", "optical")
+        for internal in ("aa", "ao", "oo")
+        for process in ("normal", "umklapp")
+    }
+    required_strata = [
+        "gamma.optical.oo.normal",
+        "gamma.optical.oo.umklapp",
+    ]
     return {
         "schema": driver.V3_SAMPLE_MANIFEST_SCHEMA,
         "schema_version": 1,
@@ -35,12 +46,12 @@ def _sample_payload(
         },
         "mapping_sha256": mapping_hashes
         or {"fc2": "a" * 64, "fc3": "b" * 64},
-        "mesh": [1, 1, 1],
+        "mesh": [2, 1, 1],
         "grg2bzg_sha256": driver.array_sha256(
-            np.array([0], dtype=np.int64)
+            np.array([0, 1], dtype=np.int64)
         ),
         "bzg2grg_sha256": driver.array_sha256(
-            np.array([0], dtype=np.int64)
+            np.array([0, 1], dtype=np.int64)
         ),
         "degeneracy_tolerance_thz": 1.0e-4,
         "selection_algorithm": driver.V3_SAMPLE_SELECTION_ALGORITHM,
@@ -49,10 +60,12 @@ def _sample_payload(
         "coverage": {
             "cover_all_target_grid_points": True,
             "cover_all_target_bands": True,
-            "required_processes": ["normal"],
-            "required_strata": ["optical_normal"],
-            "empty_strata": ["optical_umklapp"],
-            "minimum_promoted_blocks": 1,
+            "required_processes": ["normal", "umklapp"],
+            "required_strata": required_strata,
+            "empty_strata": sorted(
+                all_strata.difference(required_strata)
+            ),
+            "minimum_promoted_blocks": 2,
         },
         "samples": [
             {
@@ -67,8 +80,22 @@ def _sample_payload(
                 "band2_subspace": [0],
                 "process": "normal",
                 "reference_invariant_block_sum_ev2": 1.0,
-                "stratum": "optical_normal",
-            }
+                "stratum": "gamma.optical.oo.normal",
+            },
+            {
+                "q0_grg": 0,
+                "q1_grg": 1,
+                "expected_q2_grg": 1,
+                "b0": 0,
+                "b1": 0,
+                "b2": 0,
+                "target_subspace": [0],
+                "band1_subspace": [0],
+                "band2_subspace": [0],
+                "process": "umklapp",
+                "reference_invariant_block_sum_ev2": 1.0,
+                "stratum": "gamma.optical.oo.umklapp",
+            },
         ],
     }
 
@@ -122,12 +149,15 @@ def test_strict_v3_sample_manifest_records_empty_strata_and_rejects_use(
     monkeypatch.setattr(driver, "_MIN_PROMOTED_BLOCKS", 1)
     path = tmp_path / "samples.json"
     payload = _sample_payload()
-    payload["samples"][0]["stratum"] = "optical_umklapp"
+    empty_stratum = payload["coverage"]["empty_strata"][0]
+    payload["samples"][0]["stratum"] = empty_stratum
     _write_json(path, payload)
-    with pytest.raises(ValueError, match="required stratum"):
+    with pytest.raises(ValueError, match="coverage"):
         driver.read_interaction_sample_manifest(path)
 
-    payload["coverage"]["required_strata"] = ["optical_umklapp"]
+    payload["coverage"]["required_strata"] = sorted(
+        [*payload["coverage"]["required_strata"], empty_stratum]
+    )
     _write_json(path, payload)
     with pytest.raises(ValueError, match="disjoint"):
         driver.read_interaction_sample_manifest(path)
@@ -366,7 +396,7 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
     _write_json(samples_path, _sample_payload(inputs=sample_inputs))
 
     reference = SimpleNamespace(
-        mesh=(1, 1, 1),
+        mesh=(2, 1, 1),
         grid_points_grg=np.array([0], dtype=np.int64),
         grid_points_bzg=np.array([0], dtype=np.int64),
         band_indices=np.array([0], dtype=np.int64),
@@ -376,12 +406,12 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
         make_r0_average=True,
         fc2_random_qpoints=np.array([[0.125, 0.25, -0.375]]),
         fc2_hermitianized=True,
-        n_qpoints=1,
+        n_qpoints=2,
         n_bands=1,
         sha256=_sha256(reference_path),
-        grg2bzg=np.array([0], dtype=np.int64),
-        bzg2grg=np.array([0], dtype=np.int64),
-        frequencies_in_grg_order=lambda: np.array([[2.0]]),
+        grg2bzg=np.array([0, 1], dtype=np.int64),
+        bzg2grg=np.array([0, 1], dtype=np.int64),
+        frequencies_in_grg_order=lambda: np.array([[2.0], [2.0]]),
     )
     fc2_mapping = SimpleNamespace(
         purpose="fc2",
@@ -447,10 +477,10 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
     interactions = SimpleNamespace(
         grid_points=np.array([0]),
         band_indices=np.array([0]),
-        q1_indices=np.array([[0]]),
-        q2_indices=np.array([[0]]),
-        normal_mask=np.array([[True]]),
-        interaction_strengths=np.array([[[[[1.0]]]]]),
+        q1_indices=np.array([[0, 1]]),
+        q2_indices=np.array([[0, 1]]),
+        normal_mask=np.array([[True, False]]),
+        interaction_strengths=np.ones((1, 2, 1, 1, 1)),
     )
     linewidths = SimpleNamespace(
         interactions=interactions,
@@ -471,12 +501,25 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
         relative_error=0.0,
         passed=True,
     )
+    umklapp_block = SimpleNamespace(
+        target_grid_point=0,
+        q1_grid_point=1,
+        q2_grid_point=1,
+        target_bands=(0,),
+        bands1=(0,),
+        bands2=(0,),
+        reference_sum_ev2=1.0,
+        candidate_sum_ev2=1.0,
+        absolute_error_ev2=0.0,
+        relative_error=0.0,
+        passed=True,
+    )
     comparison = SimpleNamespace(
         passed=True,
         fc2=SimpleNamespace(passed=True),
         interactions=SimpleNamespace(
             passed=True,
-            blocks=(block,),
+            blocks=(block, umklapp_block),
             absolute_tolerance_ev2=1.0e-14,
         ),
         phase_space=SimpleNamespace(passed=True),
