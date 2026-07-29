@@ -1063,7 +1063,7 @@ def compare_fc2_random_q(
     tolerance: float = 1.0e-10,
     verify_reference_hash: bool = True,
 ) -> FC2RandomQComparison:
-    """Compare independently archived and reconstructed random-q matrices."""
+    """Compare random-q matrices with the certified absolute-error gate."""
 
     if not isinstance(reference, Phono3pySiliconReference):
         raise TypeError("reference must be a Phono3pySiliconReference.")
@@ -1127,12 +1127,11 @@ def compare_fc2_random_q(
         np.abs(reference.fc2_dynamical_matrices),
         axis=(1, 2),
     )
-    allowed = tolerance * np.maximum(1.0, reference_scale)
     scaled = per_q / np.maximum(1.0, reference_scale)
     return FC2RandomQComparison(
         reference_sha256=reference.sha256,
         available=True,
-        passed=bool(np.all(per_q <= allowed)),
+        passed=bool(np.all(per_q <= tolerance)),
         tolerance=tolerance,
         max_absolute_error=float(np.max(per_q)),
         max_scaled_error=float(np.max(scaled)),

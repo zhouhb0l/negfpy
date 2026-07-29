@@ -321,6 +321,12 @@ second conversion exactly once.
 ## Certification
 
 - Raw FC2 dynamical matrices: maximum absolute error \(10^{-10}\).
+- Full/compact FC3 ingestion: every physical real-space block, every
+  redundant full-tensor first-axis translation row, and every expanded
+  translational term are compared. The canonical schedules use
+  `rtol=1e-10`, `atol=1e-12`; the additional reciprocal-space comparison is
+  explicitly a deterministic sampled corroboration, not an exhaustive mesh
+  claim.
 - Sampled gauge-invariant \(|\mathcal V|^2\): relative error \(10^{-8}\).
 - Modes with phono3py \(\gamma>10^{-6}\) THz: median relative error below
   1% and maximum below 5%.

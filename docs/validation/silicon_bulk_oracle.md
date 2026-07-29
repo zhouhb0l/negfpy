@@ -122,6 +122,9 @@ following on one exact clean installed `0.2.0` commit:
   metadata field at `rtol=1e-10`, `atol=1e-12`;
 - complete immutable serial operands plus an independent final-aggregator
   rerun of the authoritative serial kernel at both \(3^3\) and \(5^3\);
+- exhaustive compact/full FC3 physical-block and canonical-term equality,
+  together with all redundant full first-axis translation rows; the
+  reciprocal FC3 cross-check remains explicitly sampled;
 - identical FC2, FC3, crystal mapping, normalized input manifest,
   environment lock, source tree and imported package payload;
 - all task manifests, executions, per-task checkpoints and artifacts,

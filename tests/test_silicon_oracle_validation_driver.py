@@ -272,6 +272,135 @@ def test_full_compact_representation_mismatch_fails_gate() -> None:
     assert mismatch["maximum_scaled_error"] > 1.0e-3
 
 
+def test_fc3_representation_gate_uses_p2s_and_rejects_incomplete_schedules(
+) -> None:
+    mapping = SimpleNamespace(
+        p2s=np.array([1], dtype=np.int64),
+        n_supercell_atoms=2,
+    )
+    compact_values = np.ones((1, 2, 2, 3, 3, 3))
+    full_values = np.zeros((2, 2, 2, 3, 3, 3))
+    full_values[1] = compact_values[0]
+    compact_raw = SimpleNamespace(values=compact_values)
+    full_raw = SimpleNamespace(values=full_values)
+
+    def term(source_first: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            primitive_indices=(0, 0, 0),
+            source_indices=(source_first, 0, 0),
+            translated_supercell_indices=(1, 0, 0),
+            anchor_position=np.zeros(3),
+            second_offset=np.zeros(3),
+            third_offset=np.zeros(3),
+            second_vector_index=0,
+            third_vector_index=0,
+            second_multiplicity=1,
+            third_multiplicity=1,
+            anchor_weight=1.0,
+            multiplicity_weight=1.0,
+            values=np.ones((3, 3, 3)),
+        )
+
+    def vertex(
+        *,
+        layout: str,
+        terms: tuple[SimpleNamespace, ...],
+        checked_rows: int,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            source_layout=layout,
+            terms=terms,
+            n_primitive_atoms=1,
+            n_supercell_atoms=2,
+            units="eV/angstrom^3",
+            mass_units="amu",
+            phase_convention="positive",
+            anchor_convention="r0",
+            symprec=1.0e-5,
+            make_r0_average=True,
+            all_shortest=np.ones((1, 2, 2), dtype=np.byte),
+            provenance={
+                "redundant_translation_audit": {
+                    "passed": True,
+                    "checked_first_axis_rows": checked_rows,
+                    "maximum_absolute_residual": 0.0,
+                    "maximum_relative_residual": 0.0,
+                    "atol": 1.0e-12,
+                    "rtol": 1.0e-10,
+                }
+            },
+            fourier=lambda qpoints: np.ones(
+                (1, 1, 1, 3, 3, 3),
+                dtype=np.complex128,
+            ),
+        )
+
+    compact_term = term(0)
+    full_term = term(1)
+    compact = vertex(
+        layout="compact",
+        terms=(compact_term,),
+        checked_rows=0,
+    )
+    full = vertex(layout="full", terms=(full_term,), checked_rows=1)
+    reference = SimpleNamespace(
+        mesh=(1, 1, 1),
+        grid_points_grg=np.array([0], dtype=np.int64),
+    )
+    samples = SimpleNamespace(samples=())
+
+    passing = driver._compare_fc3_representations(
+        compact_raw,
+        full_raw,
+        mapping,
+        compact,
+        full,
+        reference,
+        samples,
+    )
+    assert passing["passed"]
+    assert passing["exhaustive_physical_blocks"]["compact_block_count"] == 4
+    assert passing["full_redundant_translation_audit"][
+        "expected_first_axis_rows"
+    ] == 1
+
+    duplicate = vertex(
+        layout="compact",
+        terms=(compact_term, compact_term),
+        checked_rows=0,
+    )
+    duplicate_report = driver._compare_fc3_representations(
+        compact_raw,
+        full_raw,
+        mapping,
+        duplicate,
+        full,
+        reference,
+        samples,
+    )
+    assert not duplicate_report["passed"]
+    assert duplicate_report["exhaustive_translational_schedule"][
+        "compact_duplicate_key_count"
+    ] == 1
+
+    incomplete_audit = vertex(
+        layout="full",
+        terms=(full_term,),
+        checked_rows=0,
+    )
+    incomplete_report = driver._compare_fc3_representations(
+        compact_raw,
+        full_raw,
+        mapping,
+        compact,
+        incomplete_audit,
+        reference,
+        samples,
+    )
+    assert not incomplete_report["passed"]
+    assert not incomplete_report["full_redundant_translation_audit"]["passed"]
+
+
 def test_imported_code_provenance_must_match_validation_repository(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -482,25 +611,74 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
         supercell=SimpleNamespace(masses=np.array([28.0])),
         p2s=np.array([0]),
         s2p=np.array([0]),
+        n_supercell_atoms=1,
     )
     fc2_compact = SimpleNamespace(compact=True)
     fc2_full = SimpleNamespace(compact=False)
-    fc3_compact_raw = object()
-    fc3_full_raw = object()
+    fc3_compact_raw = SimpleNamespace(
+        values=np.ones((1, 1, 1, 3, 3, 3)),
+    )
+    fc3_full_raw = SimpleNamespace(
+        values=np.ones((1, 1, 1, 3, 3, 3)),
+    )
 
     def fourier(qpoints):
         return np.ones((1, 1, 1, 3, 3, 3), dtype=np.complex128)
 
+    compact_term = SimpleNamespace(
+        primitive_indices=(0, 0, 0),
+        source_indices=(0, 0, 0),
+        translated_supercell_indices=(0, 0, 0),
+        anchor_position=np.zeros(3),
+        second_offset=np.zeros(3),
+        third_offset=np.zeros(3),
+        second_vector_index=0,
+        third_vector_index=0,
+        second_multiplicity=1,
+        third_multiplicity=1,
+        anchor_weight=1.0,
+        multiplicity_weight=1.0,
+        values=np.ones((3, 3, 3)),
+    )
+    full_term = SimpleNamespace(**vars(compact_term))
+    full_term.values = np.array(compact_term.values, copy=True)
     compact_translational = SimpleNamespace(
         source_layout="compact",
-        terms=(1, 2),
+        terms=(compact_term,),
+        n_primitive_atoms=1,
+        n_supercell_atoms=1,
+        units="eV/angstrom^3",
+        mass_units="amu",
+        phase_convention="positive",
+        anchor_convention="r0",
+        symprec=1.0e-5,
+        make_r0_average=True,
         all_shortest=np.ones((1, 1, 1), dtype=np.byte),
+        provenance={},
         fourier=fourier,
     )
     full_translational = SimpleNamespace(
         source_layout="full",
-        terms=(1, 2),
+        terms=(full_term,),
+        n_primitive_atoms=1,
+        n_supercell_atoms=1,
+        units="eV/angstrom^3",
+        mass_units="amu",
+        phase_convention="positive",
+        anchor_convention="r0",
+        symprec=1.0e-5,
+        make_r0_average=True,
         all_shortest=np.ones((1, 1, 1), dtype=np.byte),
+        provenance={
+            "redundant_translation_audit": {
+                "passed": True,
+                "checked_first_axis_rows": 0,
+                "maximum_absolute_residual": 0.0,
+                "maximum_relative_residual": 0.0,
+                "atol": 1.0e-12,
+                "rtol": 1.0e-10,
+            }
+        },
         fourier=fourier,
     )
     validation = SimpleNamespace(
@@ -733,6 +911,12 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
     assert written["interaction_sample_coverage"][
         "representative_nonzero_block_present"
     ]
+    fc3_equality = written["full_compact_equality"]["fc3"]
+    assert fc3_equality["passed"]
+    assert fc3_equality["exhaustive_physical_blocks"]["passed"]
+    assert fc3_equality["exhaustive_translational_schedule"]["passed"]
+    assert fc3_equality["full_redundant_translation_audit"]["passed"]
+    assert fc3_equality["sampled_reciprocal_corroboration"]["passed"]
 
     loose_output = tmp_path / "loose-result.json"
     loose_config = driver.SiliconOracleValidationConfig(
@@ -787,3 +971,65 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
     assert not mismatch_report["validation_passed"]
     assert not mismatch_report["certification_eligible"]
     assert not mismatch_report["full_compact_equality"]["fc2"]["passed"]
+
+    monkeypatch.setattr(
+        driver,
+        "compute_bulk_phonons",
+        lambda *a, **k: SimpleNamespace(
+            dynamical_matrices=np.ones((1, 1, 1), dtype=np.complex128)
+        ),
+    )
+    fc3_full_raw.values[0, 0, 0, 0, 0, 0] = 2.0
+    fc3_mismatch_config = driver.SiliconOracleValidationConfig(
+        reference_path=reference_path,
+        fc2_compact_path=fc2_compact_path,
+        fc2_full_path=fc2_full_path,
+        fc3_compact_path=fc3_compact_path,
+        fc3_full_path=fc3_full_path,
+        phono3py_yaml_path=yaml_path,
+        input_manifest_path=input_manifest_path,
+        checksums_path=checksums_path,
+        environment_lock_path=lock_path,
+        interaction_samples_path=samples_path,
+        repository_path=tmp_path,
+        output_path=tmp_path / "fc3-mismatch-result.json",
+        require_clean_source=False,
+    )
+    fc3_mismatch_report = driver.run_silicon_oracle_validation(
+        fc3_mismatch_config
+    )
+    assert fc3_mismatch_report["full_compact_equality"]["fc2"]["passed"]
+    assert not fc3_mismatch_report["validation_passed"]
+    assert not fc3_mismatch_report["certification_eligible"]
+    assert not fc3_mismatch_report["full_compact_equality"]["fc3"]["passed"]
+    assert not fc3_mismatch_report["full_compact_equality"]["fc3"][
+        "exhaustive_physical_blocks"
+    ]["passed"]
+
+    fc3_full_raw.values[0, 0, 0, 0, 0, 0] = 1.0
+    full_term.values[0, 0, 0] = 2.0
+    schedule_mismatch_config = driver.SiliconOracleValidationConfig(
+        reference_path=reference_path,
+        fc2_compact_path=fc2_compact_path,
+        fc2_full_path=fc2_full_path,
+        fc3_compact_path=fc3_compact_path,
+        fc3_full_path=fc3_full_path,
+        phono3py_yaml_path=yaml_path,
+        input_manifest_path=input_manifest_path,
+        checksums_path=checksums_path,
+        environment_lock_path=lock_path,
+        interaction_samples_path=samples_path,
+        repository_path=tmp_path,
+        output_path=tmp_path / "fc3-schedule-mismatch-result.json",
+        require_clean_source=False,
+    )
+    schedule_mismatch_report = driver.run_silicon_oracle_validation(
+        schedule_mismatch_config
+    )
+    schedule_equality = schedule_mismatch_report[
+        "full_compact_equality"
+    ]["fc3"]
+    assert schedule_equality["exhaustive_physical_blocks"]["passed"]
+    assert not schedule_equality["exhaustive_translational_schedule"]["passed"]
+    assert not schedule_mismatch_report["validation_passed"]
+    assert not schedule_mismatch_report["certification_eligible"]

@@ -1426,15 +1426,192 @@ def _deterministic_fc3_triplets(
 
 
 def _compare_fc3_representations(
+    compact_raw: Any,
+    full_raw: Any,
+    mapping: Any,
     compact: Any,
     full: Any,
     reference: Any,
     sample_manifest: V3InteractionSampleManifest,
 ) -> dict[str, Any]:
+    rtol = 1.0e-10
+    atol = 1.0e-12
+
+    compact_values = np.asarray(compact_raw.values)
+    full_values = np.asarray(full_raw.values)
+    p2s = np.asarray(mapping.p2s, dtype=np.int64)
+    if (
+        compact_values.ndim != 6
+        or full_values.ndim != 6
+        or compact_values.shape[0] != p2s.size
+        or full_values.shape[0] != int(mapping.n_supercell_atoms)
+        or compact_values.shape[1:] != full_values.shape[1:]
+    ):
+        raise ValueError(
+            "Compact/full FC3 arrays do not match the audited crystal "
+            "mapping dimensions."
+        )
+    exhaustive_blocks = _representation_error(
+        compact_values,
+        full_values[p2s],
+        rtol=rtol,
+        atol=atol,
+    )
+    exhaustive_blocks.update(
+        {
+            "quantity": (
+                "all compact primitive-anchor blocks versus the matching "
+                "full-FC3 p2s representative blocks"
+            ),
+            "coverage": "exhaustive_real_space_physical_blocks",
+            "compact_block_count": int(
+                np.prod(compact_values.shape[:3], dtype=np.int64)
+            ),
+        }
+    )
+
+    def term_schedule(
+        vertex: Any,
+        *,
+        layout: str,
+    ) -> tuple[dict[tuple[Any, ...], np.ndarray], bool, int]:
+        schedule: dict[tuple[Any, ...], np.ndarray] = {}
+        source_first_valid = True
+        duplicate_count = 0
+        for term in vertex.terms:
+            anchor = int(term.primitive_indices[0])
+            expected_first = (
+                anchor if layout == "compact" else int(p2s[anchor])
+            )
+            source_first_valid = bool(
+                source_first_valid
+                and int(term.source_indices[0]) == expected_first
+            )
+            key = (
+                tuple(int(value) for value in term.primitive_indices),
+                tuple(int(value) for value in term.source_indices[1:]),
+                tuple(
+                    int(value)
+                    for value in term.translated_supercell_indices
+                ),
+                tuple(float(value) for value in term.anchor_position),
+                tuple(float(value) for value in term.second_offset),
+                tuple(float(value) for value in term.third_offset),
+                int(term.second_vector_index),
+                int(term.third_vector_index),
+                int(term.second_multiplicity),
+                int(term.third_multiplicity),
+                float(term.anchor_weight),
+                float(term.multiplicity_weight),
+            )
+            if key in schedule:
+                duplicate_count += 1
+            else:
+                schedule[key] = np.asarray(term.values)
+        return schedule, source_first_valid, duplicate_count
+
+    compact_schedule, compact_first_valid, compact_duplicates = term_schedule(
+        compact,
+        layout="compact",
+    )
+    full_schedule, full_first_valid, full_duplicates = term_schedule(
+        full,
+        layout="full",
+    )
+    conversion_metadata_equal = bool(
+        compact.source_layout == "compact"
+        and full.source_layout == "full"
+        and compact.n_primitive_atoms == full.n_primitive_atoms == p2s.size
+        and compact.n_supercell_atoms
+        == full.n_supercell_atoms
+        == int(mapping.n_supercell_atoms)
+        and compact.units == full.units
+        and compact.mass_units == full.mass_units
+        and compact.phase_convention == full.phase_convention
+        and compact.anchor_convention == full.anchor_convention
+        and compact.symprec == full.symprec
+        and compact.make_r0_average is True
+        and full.make_r0_average is True
+        and np.array_equal(compact.all_shortest, full.all_shortest)
+    )
+    schedule_keys_equal = compact_schedule.keys() == full_schedule.keys()
+    if schedule_keys_equal and compact_schedule:
+        ordered_keys = sorted(compact_schedule)
+        schedule_values = _representation_error(
+            np.stack([compact_schedule[key] for key in ordered_keys]),
+            np.stack([full_schedule[key] for key in ordered_keys]),
+            rtol=rtol,
+            atol=atol,
+        )
+    elif schedule_keys_equal:
+        schedule_values = {
+            "passed": True,
+            "shape_equal": True,
+            "compact_shape": [0, 3, 3, 3],
+            "full_shape": [0, 3, 3, 3],
+            "rtol": rtol,
+            "atol": atol,
+            "maximum_absolute_error": 0.0,
+            "maximum_scaled_error": 0.0,
+        }
+    else:
+        schedule_values = {
+            "passed": False,
+            "shape_equal": False,
+            "compact_shape": [len(compact_schedule), 3, 3, 3],
+            "full_shape": [len(full_schedule), 3, 3, 3],
+            "rtol": rtol,
+            "atol": atol,
+            "maximum_absolute_error": None,
+            "maximum_scaled_error": None,
+        }
+    schedule_passed = bool(
+        schedule_keys_equal
+        and schedule_values["passed"]
+        and compact_first_valid
+        and full_first_valid
+        and conversion_metadata_equal
+        and compact_duplicates == 0
+        and full_duplicates == 0
+    )
+    exhaustive_schedule = {
+        **schedule_values,
+        "passed": schedule_passed,
+        "quantity": "canonical expanded translational FC3 term schedule",
+        "coverage": "exhaustive_expanded_terms",
+        "compact_term_count": len(compact.terms),
+        "full_term_count": len(full.terms),
+        "canonical_keys_equal": schedule_keys_equal,
+        "conversion_metadata_equal": conversion_metadata_equal,
+        "compact_source_first_indices_valid": compact_first_valid,
+        "full_source_first_indices_valid": full_first_valid,
+        "compact_duplicate_key_count": compact_duplicates,
+        "full_duplicate_key_count": full_duplicates,
+    }
+
+    redundant_audit = dict(
+        full.provenance.get("redundant_translation_audit", {})
+    )
+    expected_redundant_rows = int(mapping.n_supercell_atoms - p2s.size)
+    redundant_complete = bool(
+        redundant_audit.get("passed") is True
+        and redundant_audit.get("checked_first_axis_rows")
+        == expected_redundant_rows
+        and redundant_audit.get("atol") == atol
+        and redundant_audit.get("rtol") == rtol
+    )
+    redundant_audit.update(
+        {
+            "passed": redundant_complete,
+            "coverage": "all_nonrepresentative_full_first_axis_rows",
+            "expected_first_axis_rows": expected_redundant_rows,
+        }
+    )
+
     mesh = UniformBZMesh(reference.mesh)
     triplets = _deterministic_fc3_triplets(reference, sample_manifest)
-    compact_values: list[np.ndarray] = []
-    full_values: list[np.ndarray] = []
+    compact_reciprocal_values: list[np.ndarray] = []
+    full_reciprocal_values: list[np.ndarray] = []
     for indices in triplets:
         qpoints = np.array(
             [
@@ -1450,15 +1627,15 @@ def _compare_fc3_representations(
             ],
             dtype=np.float64,
         )
-        compact_values.append(compact.fourier(qpoints))
-        full_values.append(full.fourier(qpoints))
-    comparison = _representation_error(
-        np.stack(compact_values),
-        np.stack(full_values),
-        rtol=1.0e-10,
-        atol=1.0e-12,
+        compact_reciprocal_values.append(compact.fourier(qpoints))
+        full_reciprocal_values.append(full.fourier(qpoints))
+    reciprocal_sample = _representation_error(
+        np.stack(compact_reciprocal_values),
+        np.stack(full_reciprocal_values),
+        rtol=rtol,
+        atol=atol,
     )
-    comparison.update(
+    reciprocal_sample.update(
         {
             "quantity": "raw reciprocal FC3 tensor",
             "triplet_indices_grg": [list(item) for item in triplets],
@@ -1470,7 +1647,55 @@ def _compare_fc3_representations(
             "make_r0_average": True,
         }
     )
-    return comparison
+    maximum_absolute_candidates = [
+        value
+        for value in (
+            exhaustive_blocks["maximum_absolute_error"],
+            exhaustive_schedule["maximum_absolute_error"],
+            redundant_audit.get("maximum_absolute_residual"),
+            reciprocal_sample["maximum_absolute_error"],
+        )
+        if value is not None
+    ]
+    passed = bool(
+        exhaustive_blocks["passed"]
+        and exhaustive_schedule["passed"]
+        and redundant_audit["passed"]
+        and reciprocal_sample["passed"]
+    )
+    return {
+        "passed": passed,
+        # Retain the original v1 top-level reciprocal fields for report
+        # consumers while strengthening ``passed`` with the exhaustive
+        # real-space and translational-schedule gates below.
+        "quantity": reciprocal_sample["quantity"],
+        "shape_equal": reciprocal_sample["shape_equal"],
+        "compact_shape": reciprocal_sample["compact_shape"],
+        "full_shape": reciprocal_sample["full_shape"],
+        "coverage": (
+            "exhaustive physical real-space blocks, every redundant full "
+            "first-axis translation row, and every expanded translational "
+            "term; reciprocal-space evaluation is an explicitly sampled "
+            "corroboration"
+        ),
+        "rtol": rtol,
+        "atol": atol,
+        "maximum_absolute_error": reciprocal_sample["maximum_absolute_error"],
+        "maximum_scaled_error": reciprocal_sample["maximum_scaled_error"],
+        "triplet_indices_grg": reciprocal_sample["triplet_indices_grg"],
+        "triplet_selection": reciprocal_sample["triplet_selection"],
+        "make_r0_average": reciprocal_sample["make_r0_average"],
+        "representation_gate_quantity": (
+            "full/compact FC3 representation equivalence"
+        ),
+        "maximum_component_absolute_error": max(
+            maximum_absolute_candidates
+        ),
+        "exhaustive_physical_blocks": exhaustive_blocks,
+        "exhaustive_translational_schedule": exhaustive_schedule,
+        "full_redundant_translation_audit": redundant_audit,
+        "sampled_reciprocal_corroboration": reciprocal_sample,
+    }
 
 
 def _jsonable(value: Any) -> Any:
@@ -1725,6 +1950,9 @@ def run_silicon_oracle_validation(
     )
     fc2_representation["quantity"] = "random-q dynamical matrices"
     fc3_representation = _compare_fc3_representations(
+        fc3_compact_raw,
+        fc3_full_raw,
+        fc3_mapping,
         compact_translational_fc3,
         full_translational_fc3,
         reference,

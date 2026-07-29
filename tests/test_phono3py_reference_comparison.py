@@ -461,6 +461,29 @@ def test_fc2_random_q_gate_passes_and_detects_matrix_error(tmp_path) -> None:
     assert failing.max_absolute_error == pytest.approx(2.0e-9)
 
 
+def test_fc2_random_q_gate_is_absolute_not_scale_relative(tmp_path) -> None:
+    path = _write_reference(tmp_path, include_fc2_random_q=True)
+    reference = read_phono3py_silicon_reference(path)
+    candidate = _fc2_candidate(reference)
+    changed = np.array(candidate.dynamical_matrices, copy=True)
+    changed[0, 2, 2] += 5.0e-10
+    changed_candidate = BulkPhononSpectrum(
+        qpoints=candidate.qpoints,
+        dynamical_matrices=changed,
+        frequencies=candidate.frequencies,
+        eigenvectors=candidate.eigenvectors,
+        frequency_factor_to_thz=1.0,
+        hermitianized=True,
+    )
+
+    result = compare_fc2_random_q(reference, changed_candidate)
+
+    assert result.max_absolute_error == pytest.approx(5.0e-10)
+    assert result.max_scaled_error is not None
+    assert result.max_scaled_error < result.tolerance
+    assert not result.passed
+
+
 def test_fc2_reader_rejects_uncommitted_random_q_selection(tmp_path) -> None:
     path = _write_reference(tmp_path, include_fc2_random_q=True)
     with h5py.File(path, "r+") as h5:
