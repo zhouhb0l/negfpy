@@ -133,6 +133,8 @@ def _thread_cap(environment_value: str = "1") -> dict[str, object]:
             "OPENBLAS_NUM_THREADS": environment_value,
             "MKL_NUM_THREADS": environment_value,
             "NUMEXPR_NUM_THREADS": environment_value,
+            "BLIS_NUM_THREADS": environment_value,
+            "VECLIB_MAXIMUM_THREADS": environment_value,
         },
         "libraries": [],
         "all_loaded_libraries_capped": True,

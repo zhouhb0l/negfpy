@@ -5,32 +5,33 @@ import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import h5py
 import numpy as np
 import pytest
 
-from scripts import generate_phono3py_si_reference as serial
-from scripts import generate_phono3py_si_reference_mpi as mpi_reference
-from scripts import run_phono3py_si_target_q_mpi as target_cli
 from negfpy.anharmonic import silicon_mpi_oracle_validation as external_validator
 from negfpy.anharmonic._reference_mpi_provenance import (
     ReferenceMPIProvenanceError,
     validate_reference_mpi_evidence,
 )
-
+from scripts import generate_phono3py_si_reference as serial
+from scripts import generate_phono3py_si_reference_mpi as mpi_reference
+from scripts import run_phono3py_si_target_q_mpi as target_cli
 
 _THREAD_ENVIRONMENT = {
     "OMP_NUM_THREADS": "1",
     "OPENBLAS_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
     "NUMEXPR_NUM_THREADS": "1",
+    "BLIS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
 }
 _SOURCE_MANIFEST = {
     "schema_version": 1,
@@ -51,6 +52,14 @@ _ENVIRONMENT_IDENTITY = {
     "runtime_versions": {"phono3py": "4.4.0", "phonopy": "4.4.0"},
     "thread_environment": _THREAD_ENVIRONMENT,
 }
+
+
+@pytest.fixture(autouse=True)
+def _pin_all_thread_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name, value in _THREAD_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
 
 
 def _json_payload(value: object) -> bytes:
@@ -104,7 +113,9 @@ def _identity() -> mpi_reference.CampaignIdentity:
     repository = Path(__file__).resolve().parents[1]
     return mpi_reference.CampaignIdentity.from_payload(
         {
-            "schema_version": 2,
+            "schema_version": (
+                mpi_reference.MPI_REFERENCE_SCHEMA_VERSION
+            ),
             "serial_generator": {
                 "script_sha256": mpi_reference._sha256_file(
                     repository
@@ -140,6 +151,7 @@ def _identity() -> mpi_reference.CampaignIdentity:
             "runtime_environment": _ENVIRONMENT_IDENTITY,
             "thread_environment": _THREAD_ENVIRONMENT,
             "task_grid_points_grg": [0, 1],
+            "final_output_name": "output",
         }
     )
 
@@ -387,6 +399,8 @@ def _campaign(tmp_path: Path) -> mpi_reference.PreparedCampaign:
 def _publish_task(
     campaign: mpi_reference.PreparedCampaign,
     point: int,
+    *,
+    execution_id: str | None = None,
 ) -> dict:
     hdf5_path, record_path, _ = mpi_reference._task_paths(
         campaign.run_dir,
@@ -398,6 +412,34 @@ def _publish_task(
         config=campaign.config,
         point=point,
     )
+    origin_identity = None
+    origin = None
+    if execution_id is not None:
+        origin_path, origin = mpi_reference._publish_origin_assignment(
+            campaign,
+            point,
+            execution_id=execution_id,
+            rank=point + 1,
+            communicator_size=3,
+            worker_binding=_worker_binding(
+                rank=point + 1,
+                logical_cpu=7 + point,
+                hostname=mpi_reference.socket.gethostname(),
+            ),
+        )
+        origin_identity = mpi_reference._origin_assignment_identity(
+            campaign.run_dir,
+            origin_path,
+        )
+        with h5py.File(hdf5_path, "r+") as h5:
+            h5.attrs["mpi_reference_origin_assignment_json"] = (
+                json.dumps(
+                    origin_identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            h5.flush()
     validation = mpi_reference._validate_task_hdf5(
         hdf5_path,
         campaign_sha256=campaign.identity.sha256,
@@ -410,11 +452,18 @@ def _publish_task(
         hdf5_path=hdf5_path,
         validation=validation,
         rank=point + 1,
-        hostname="worker",
-        started_utc="2026-01-01T00:00:00+00:00",
+        hostname=(
+            "worker" if origin is None else str(origin["hostname"])
+        ),
+        started_utc=(
+            "2026-01-01T00:00:00+00:00"
+            if origin is None
+            else str(origin["assigned_at_utc"])
+        ),
         completed_utc="2026-01-01T00:00:01+00:00",
         wall_seconds=1.0,
         disposition="computed",
+        origin_assignment=origin_identity,
     )
     mpi_reference._write_json_exclusive(record_path, record)
     return record
@@ -433,7 +482,11 @@ def _finalized_mpi_bundle(
         monkeypatch.setenv(name, "1")
     campaign = _campaign(tmp_path)
     task_records = {
-        point: _publish_task(campaign, point)
+        point: _publish_task(
+            campaign,
+            point,
+            execution_id="run-001",
+        )
         for point in campaign.config.grid_points
     }
     assignments = [
@@ -445,11 +498,21 @@ def _finalized_mpi_bundle(
             "worker_binding": _worker_binding(
                 rank=point + 1,
                 logical_cpu=7 + point,
+                hostname=mpi_reference.socket.gethostname(),
             ),
             "artifact": dict(task_records[point]["artifact"]),
+            "origin_assignment": dict(
+                task_records[point]["origin_assignment"]
+            ),
         }
         for point in campaign.config.grid_points
     ]
+    scratch_cleanup_path, _ = (
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id="run-001",
+        )
+    )
     execution = mpi_reference._execution_record(
         campaign=campaign,
         execution_id="run-001",
@@ -458,6 +521,9 @@ def _finalized_mpi_bundle(
         started=0.0,
         assignments=assignments,
         complete=True,
+        scratch_cleanup=mpi_reference._file_identity(
+            scratch_cleanup_path
+        ),
     )
     execution_path = mpi_reference._execution_path(
         campaign.run_dir, "run-001"
@@ -575,9 +641,163 @@ def test_campaign_identity_and_resume_manifest_are_exact(tmp_path) -> None:
         (run_dir / mpi_reference.MPI_MANIFEST_FILENAME).read_text()
     )
     assert manifest["campaign_sha256"] == identity.sha256
-    changed = mpi_reference.CampaignIdentity.from_payload({"changed": True})
+    changed_payload = dict(identity.payload)
+    changed_payload["changed"] = True
+    changed = mpi_reference.CampaignIdentity.from_payload(changed_payload)
     with pytest.raises(mpi_reference.ReferenceMPIError, match="different campaign"):
         mpi_reference._initialize_run_directory(run_dir, identity=changed)
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    (
+        "",
+        ".",
+        "..",
+        "nested/output",
+        r"nested\output",
+        "control\nname",
+        "control\x7fname",
+        "control\x85name",
+    ),
+)
+def test_campaign_identity_rejects_unsafe_final_output_name(
+    unsafe_name,
+) -> None:
+    payload = dict(_identity().payload)
+    payload["final_output_name"] = unsafe_name
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="single safe basename",
+    ):
+        mpi_reference.CampaignIdentity.from_payload(payload)
+
+
+def test_cleanup_rejects_output_name_mismatched_to_campaign_identity(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    mismatched = mpi_reference.PreparedCampaign(
+        identity=campaign.identity,
+        config=campaign.config,
+        source_files=campaign.source_files,
+        source_verification=campaign.source_verification,
+        environment_identity=campaign.environment_identity,
+        force_stage_dir=campaign.force_stage_dir,
+        run_dir=campaign.run_dir,
+        output_dir=tmp_path / "different-output",
+    )
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="does not match authenticated",
+    ):
+        mpi_reference._cleanup_interrupted_scratch(
+            mismatched,
+            execution_id="mismatched-output",
+        )
+
+
+@pytest.mark.parametrize("unsafe_name", ("control\noutput", r"nested\output"))
+def test_prepare_campaign_rejects_unsafe_output_basename(
+    tmp_path,
+    unsafe_name,
+) -> None:
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="output_dir.name must be a single safe basename",
+    ):
+        mpi_reference.prepare_campaign(
+            manifest_path=tmp_path / "missing-manifest.json",
+            source_dir=tmp_path / "missing-source",
+            force_stage_dir=tmp_path / "missing-force",
+            run_dir=tmp_path / "run",
+            output_dir=tmp_path / unsafe_name,
+            config=_config(),
+            require_clean_source=False,
+        )
+
+
+@pytest.mark.parametrize("path_kind", ("run_dir", "output_dir"))
+def test_campaign_paths_reject_symlinked_parent_components(
+    tmp_path,
+    path_kind,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    run_dir = (
+        linked_parent / "run"
+        if path_kind == "run_dir"
+        else tmp_path / "run"
+    )
+    output_dir = (
+        linked_parent / "output"
+        if path_kind == "output_dir"
+        else tmp_path / "output"
+    )
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="path components must not be symbolic links",
+    ):
+        mpi_reference.prepare_campaign(
+            manifest_path=tmp_path / "missing-manifest.json",
+            source_dir=tmp_path / "missing-source",
+            force_stage_dir=tmp_path / "missing-force",
+            run_dir=run_dir,
+            output_dir=output_dir,
+            config=_config(),
+            require_clean_source=False,
+        )
+
+
+def test_campaign_execution_lock_rejects_overlap_and_restarts(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+
+    first = mpi_reference._CampaignExecutionLock.acquire(campaign.run_dir)
+    try:
+        with pytest.raises(
+            mpi_reference.ReferenceMPIError,
+            match="already active",
+        ):
+            mpi_reference._CampaignExecutionLock.acquire(campaign.run_dir)
+    finally:
+        first.close()
+
+    with mpi_reference._CampaignExecutionLock.acquire(
+        campaign.run_dir
+    ) as restarted:
+        restarted.verify()
+
+
+@pytest.mark.parametrize("link_kind", ("symbolic", "hard"))
+def test_campaign_execution_lock_rejects_linked_lock_file(
+    tmp_path,
+    link_kind,
+) -> None:
+    campaign = _campaign(tmp_path)
+    lock_path = (
+        campaign.run_dir
+        / mpi_reference._CAMPAIGN_EXECUTION_LOCK_FILENAME
+    )
+    lock_path.unlink()
+    detached = tmp_path / "detached-lock"
+    detached.write_bytes(b"")
+    if link_kind == "symbolic":
+        lock_path.symlink_to(detached)
+    else:
+        os.link(detached, lock_path)
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="regular, single-link",
+    ):
+        mpi_reference._CampaignExecutionLock.acquire(campaign.run_dir)
 
 
 def test_prepare_campaign_authenticates_exact_serial_force_stage(
@@ -619,15 +839,11 @@ def test_prepare_campaign_authenticates_exact_serial_force_stage(
         (campaign.run_dir / mpi_reference.MPI_MANIFEST_FILENAME).read_text()
     )["campaign_sha256"]
     assert campaign.identity.payload["floating_point_mpi_reductions"] is False
-    assert campaign.identity.payload["thread_environment"] == {
-        name: "1"
-        for name in (
-            "OMP_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS",
-            "MKL_NUM_THREADS",
-            "NUMEXPR_NUM_THREADS",
-        )
-    }
+    assert campaign.identity.payload["final_output_name"] == "output"
+    assert (
+        campaign.identity.payload["thread_environment"]
+        == _THREAD_ENVIRONMENT
+    )
     (force / "fc3.compact.hdf5").write_bytes(b"mutated\n")
     with pytest.raises(ValueError, match="SHA256"):
         mpi_reference.prepare_campaign(
@@ -676,6 +892,274 @@ def test_task_record_detects_mutation_and_orphan_is_adopted(
         match="changed after publication",
     ):
         mpi_reference._adopt_or_validate_task(campaign, 0)
+
+
+def test_origin_bound_hdf_recovers_after_hard_record_interruption(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for name in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        monkeypatch.setenv(name, "1")
+    campaign = _campaign(tmp_path)
+    record = _publish_task(
+        campaign,
+        0,
+        execution_id="killed-two-rank",
+    )
+    _, record_path, _ = mpi_reference._task_paths(campaign.run_dir, 0)
+    record_path.unlink()
+    mpi_reference._publish_origin_assignment(
+        campaign,
+        0,
+        execution_id="incomplete-retry",
+        rank=1,
+        communicator_size=4,
+        worker_binding=_worker_binding(
+            rank=1,
+            logical_cpu=11,
+            hostname=mpi_reference.socket.gethostname(),
+        ),
+    )
+
+    recovered = mpi_reference._adopt_or_validate_task(campaign, 0)
+
+    assert recovered is not None
+    assert recovered["disposition"] == (
+        "computed_after_interrupted_record_publication"
+    )
+    assert recovered["origin_assignment"] == record["origin_assignment"]
+
+
+def test_resume_cleans_only_validated_stale_worker_scratch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for name in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        monkeypatch.setenv(name, "1")
+    campaign = _campaign(tmp_path)
+    stale = (
+        campaign.run_dir
+        / "scratch"
+        / ".target-grg-00000000-rank1-killed"
+    )
+    stale.mkdir()
+    source = campaign.force_stage_dir / "fc2.compact.hdf5"
+    os.link(source, stale / source.name)
+    (stale / "partial.hdf5").write_bytes(b"partial")
+
+    cleanup_path, cleanup = (
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id="restart-four-rank",
+        )
+    )
+
+    assert not any((campaign.run_dir / "scratch").iterdir())
+    assert source.is_file()
+    assert cleanup_path.is_file()
+    assert cleanup["removed"][0]["directory"] == stale.name
+    assert {item["relative_path"] for item in cleanup["removed"][0]["files"]} == {
+        "fc2.compact.hdf5",
+        "partial.hdf5",
+    }
+
+
+def test_resume_cleans_and_records_exact_atomic_publication_residue(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    name = (
+        ".target-grg-00000000.json."
+        f"{'a' * 32}.tmp"
+    )
+    residue = campaign.run_dir / "tasks" / name
+    residue.write_bytes(b"interrupted publication")
+
+    _, cleanup = mpi_reference._cleanup_interrupted_scratch(
+        campaign,
+        execution_id="resume-private-temp",
+    )
+
+    assert not residue.exists()
+    private = next(
+        item for item in cleanup["removed"] if item["directory"] == "tasks"
+    )
+    assert private["files"] == [
+        {
+            "relative_path": name,
+            "size_bytes": len(b"interrupted publication"),
+            "sha256": hashlib.sha256(
+                b"interrupted publication"
+            ).hexdigest(),
+        }
+    ]
+
+
+def test_resume_rejects_suspicious_atomic_publication_near_match(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    residue = (
+        campaign.run_dir
+        / "tasks"
+        / ".target-grg-00000000.json.short.tmp"
+    )
+    residue.write_bytes(b"ambiguous")
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="Suspicious atomic-publication residue",
+    ):
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id="reject-private-near-match",
+        )
+    assert residue.is_file()
+
+
+@pytest.mark.parametrize("link_kind", ("symbolic", "hard"))
+def test_resume_rejects_linked_atomic_publication_residue(
+    tmp_path,
+    link_kind,
+) -> None:
+    campaign = _campaign(tmp_path)
+    detached = tmp_path / "detached-private-temp"
+    detached.write_bytes(b"detached")
+    residue = (
+        campaign.run_dir
+        / "executions"
+        / f".run-001.json.{'b' * 32}.tmp"
+    )
+    if link_kind == "symbolic":
+        residue.symlink_to(detached)
+    else:
+        os.link(detached, residue)
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="regular, single-link",
+    ):
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id=f"reject-{link_kind}-private-temp",
+        )
+    assert os.path.lexists(residue)
+
+
+def test_resume_cleans_canonical_abandoned_final_staging(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    staging = tmp_path / f".output.{'c' * 32}.tmp"
+    nested = staging / "nested"
+    nested.mkdir(parents=True)
+    partial = nested / "partial.json"
+    partial.write_bytes(b"partial final bundle")
+
+    cleanup_path, cleanup = mpi_reference._cleanup_interrupted_scratch(
+        campaign,
+        execution_id="recover-final-staging",
+    )
+
+    assert not staging.exists()
+    removed = next(
+        item
+        for item in cleanup["removed"]
+        if item["directory"]
+        == f"output-parent/{staging.name}"
+    )
+    assert removed["files"] == [
+        {
+            "relative_path": "nested/partial.json",
+            "size_bytes": len(b"partial final bundle"),
+            "sha256": hashlib.sha256(
+                b"partial final bundle"
+            ).hexdigest(),
+        }
+    ]
+    mpi_reference._validate_scratch_cleanup_record(
+        campaign,
+        mpi_reference._file_identity(cleanup_path),
+        execution_id="recover-final-staging",
+    )
+
+
+def test_resume_rejects_suspicious_final_staging_near_match(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    suspicious = tmp_path / ".output.short.tmp"
+    suspicious.mkdir()
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="Suspicious abandoned final-staging near-match",
+    ):
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id="reject-final-staging-near-match",
+        )
+    assert suspicious.is_dir()
+
+
+@pytest.mark.parametrize("alias_kind", ("symbolic", "hard"))
+def test_resume_rejects_unsafe_final_staging_alias(
+    tmp_path,
+    alias_kind,
+) -> None:
+    campaign = _campaign(tmp_path)
+    staging = tmp_path / f".output.{'d' * 32}.tmp"
+    detached = tmp_path / "detached-final-staging"
+    if alias_kind == "symbolic":
+        detached.mkdir()
+        staging.symlink_to(detached, target_is_directory=True)
+        match = "non-symlink directory"
+    else:
+        staging.mkdir()
+        detached.write_bytes(b"hard-linked staging content")
+        os.link(detached, staging / "partial")
+        match = "Unsafe hard-linked owned cleanup entry"
+
+    with pytest.raises(mpi_reference.ReferenceMPIError, match=match):
+        mpi_reference._cleanup_interrupted_scratch(
+            campaign,
+            execution_id=f"reject-{alias_kind}-final-staging",
+        )
+    assert os.path.lexists(staging)
+    assert detached.exists()
+
+
+@pytest.mark.parametrize("link_kind", ("symbolic", "hard"))
+def test_evidence_identity_rejects_linked_source(
+    tmp_path,
+    link_kind,
+) -> None:
+    detached = tmp_path / "detached-evidence"
+    detached.write_bytes(b"evidence")
+    source = tmp_path / "evidence.json"
+    if link_kind == "symbolic":
+        source.symlink_to(detached)
+    else:
+        os.link(detached, source)
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="symbolic links|single-link non-symlink",
+    ):
+        mpi_reference._archive_member_identity(
+            source,
+            "executions/evidence.json",
+        )
 
 
 def test_canonical_merge_matches_one_q_fields(tmp_path, monkeypatch) -> None:
@@ -788,6 +1272,211 @@ def test_execution_id_rejects_paths(tmp_path) -> None:
     assert mpi_reference._execution_path(tmp_path, "run-001") == (
         tmp_path / "executions" / "run-001.json"
     )
+
+
+def test_execution_validation_rejects_unknown_top_level_and_thread_keys(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    campaign, _, _ = _finalized_mpi_bundle(tmp_path, monkeypatch)
+    execution = json.loads(
+        mpi_reference._execution_path(
+            campaign.run_dir,
+            "run-001",
+        ).read_text(encoding="utf-8")
+    )
+    assert (
+        mpi_reference._validate_execution_record(campaign, execution)
+        == execution
+    )
+
+    extra_top_level = json.loads(json.dumps(execution))
+    extra_top_level["unreviewed_extension"] = True
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="ambiguous top-level schema",
+    ):
+        mpi_reference._validate_execution_record(
+            campaign,
+            extra_top_level,
+        )
+
+    extra_thread = json.loads(json.dumps(execution))
+    extra_thread["thread_environment"]["UNREVIEWED_THREADS"] = "1"
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="exactly the six pinned thread controls",
+    ):
+        mpi_reference._validate_execution_record(campaign, extra_thread)
+
+
+def test_execution_computed_status_rejects_recovered_task_lineage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    campaign, _, _ = _finalized_mpi_bundle(tmp_path, monkeypatch)
+    execution = mpi_reference._read_json_object(
+        mpi_reference._execution_path(campaign.run_dir, "run-001"),
+        name="execution",
+    )
+    _, record_path, _ = mpi_reference._task_paths(campaign.run_dir, 0)
+    task_record = mpi_reference._read_json_object(
+        record_path,
+        name="task record",
+    )
+    task_record["disposition"] = (
+        "computed_after_interrupted_record_publication"
+    )
+    record_path.write_bytes(mpi_reference._pretty_json_bytes(task_record))
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="computed lineage differs",
+    ):
+        mpi_reference._validate_execution_record(campaign, execution)
+
+
+def test_recovered_computed_tasks_resume_into_release_valid_execution(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    recovered_records = {}
+    for point in campaign.config.grid_points:
+        _publish_task(
+            campaign,
+            point,
+            execution_id="interrupted-run",
+        )
+        _, record_path, _ = mpi_reference._task_paths(
+            campaign.run_dir,
+            point,
+        )
+        record_path.unlink()
+        recovered = mpi_reference._adopt_or_validate_task(campaign, point)
+        assert recovered is not None
+        assert recovered["disposition"] == (
+            "computed_after_interrupted_record_publication"
+        )
+        recovered_records[point] = recovered
+
+    staging = tmp_path / f".output.{'e' * 32}.tmp"
+    staging.mkdir()
+    (staging / "partial.json").write_bytes(b"interrupted finalization")
+    cleanup_path, cleanup = mpi_reference._cleanup_interrupted_scratch(
+        campaign,
+        execution_id="recovery-run",
+    )
+    assert not staging.exists()
+    assert any(
+        item["directory"] == f"output-parent/{staging.name}"
+        for item in cleanup["removed"]
+    )
+    assignments = [
+        {
+            "grid_point_grg": point,
+            "rank": None,
+            "status": "resumed",
+            "wall_seconds": 0.0,
+            "origin_assignment": dict(
+                recovered_records[point]["origin_assignment"]
+            ),
+        }
+        for point in campaign.config.grid_points
+    ]
+    execution = mpi_reference._execution_record(
+        campaign=campaign,
+        execution_id="recovery-run",
+        size=3,
+        started_utc="2026-01-01T00:00:00+00:00",
+        started=0.0,
+        assignments=assignments,
+        complete=True,
+        scratch_cleanup=mpi_reference._file_identity(cleanup_path),
+    )
+    execution_path = mpi_reference._execution_path(
+        campaign.run_dir,
+        "recovery-run",
+    )
+    mpi_reference._write_json_exclusive(execution_path, execution)
+
+    assert (
+        mpi_reference._validate_execution_record(campaign, execution)
+        == execution
+    )
+    output = mpi_reference._finalize_reference_bundle(
+        campaign,
+        execution_records=[execution],
+    )
+    orchestration = mpi_reference._read_json_object(
+        output / mpi_reference.MPI_ORCHESTRATION_FILENAME,
+        name="orchestration",
+    )
+    validated = validate_reference_mpi_evidence(
+        output,
+        orchestration,
+        **_validation_controls(),
+    )
+    assert validated["task_count"] == 2
+    assert validated["execution_count"] == 1
+
+
+def test_execution_assignment_wall_seconds_must_be_finite_nonnegative(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    campaign, _, _ = _finalized_mpi_bundle(tmp_path, monkeypatch)
+    execution = mpi_reference._read_json_object(
+        mpi_reference._execution_path(campaign.run_dir, "run-001"),
+        name="execution",
+    )
+
+    for invalid in (None, True, -1.0, float("nan"), float("inf")):
+        changed = json.loads(json.dumps(execution))
+        changed["assignments"][0]["wall_seconds"] = invalid
+        with pytest.raises(
+            mpi_reference.ReferenceMPIError,
+            match="wall_seconds must be finite and nonnegative",
+        ):
+            mpi_reference._validate_execution_record(campaign, changed)
+
+
+def test_generator_json_helpers_reject_nonfinite_values(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Out of range float values"):
+        mpi_reference._canonical_json_bytes({"value": float("nan")})
+    with pytest.raises(ValueError, match="Out of range float values"):
+        mpi_reference._pretty_json_bytes({"value": float("inf")})
+
+    invalid = tmp_path / "nonfinite.json"
+    invalid.write_text('{"value": NaN}\n', encoding="utf-8")
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="contains nonfinite JSON value",
+    ):
+        mpi_reference._read_json_object(invalid, name="nonfinite fixture")
+
+
+def test_generator_release_evidence_rejects_legacy_adopted_task(
+    tmp_path,
+) -> None:
+    campaign = _campaign(tmp_path)
+    _publish_task(campaign, 0)
+    _, record_path, _ = mpi_reference._task_paths(campaign.run_dir, 0)
+    record_path.unlink()
+    adopted = mpi_reference._adopt_or_validate_task(campaign, 0)
+    assert adopted is not None
+    assert adopted["disposition"] == (
+        "adopted_after_interrupted_record_publication"
+    )
+
+    with pytest.raises(
+        mpi_reference.ReferenceMPIError,
+        match="requires computed tasks",
+    ):
+        mpi_reference._write_evidence_archive(
+            campaign,
+            tmp_path / "ineligible-evidence.tar",
+            execution_records=[],
+        )
 
 
 def test_cli_target_selection_requires_explicit_points_or_full_mesh() -> None:
@@ -1233,7 +1922,7 @@ def test_reference_mpi_adopted_tasks_do_not_establish_numerical_origin(
 
     with pytest.raises(
         ReferenceMPIProvenanceError,
-        match="fresh, bound MPI computation",
+        match="inconsistent|fresh, bound MPI computation",
     ):
         validate_reference_mpi_evidence(
             output,
@@ -1289,6 +1978,8 @@ def test_real_mpi_reference_scheduler_and_changed_count_restart(
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
         }
     )
     source_root = Path(__file__).resolve().parents[1] / "src"
@@ -1316,6 +2007,16 @@ def test_real_mpi_reference_scheduler_and_changed_count_restart(
     )
     assert initial.returncode == 0, initial.stdout + initial.stderr
     assert '"communicator_size": 2' in initial.stdout
+    os.rename(
+        tmp_path / "output",
+        tmp_path / "initial-output-evidence",
+    )
+    (
+        tmp_path
+        / "run"
+        / "executions"
+        / "smoke-initial.json"
+    ).unlink()
     assert '"complete": true' in initial.stdout
     assert '"physical_core_binding_available": true' in initial.stdout
     restarted = subprocess.run(

@@ -51,6 +51,8 @@ def _thread_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "OPENBLAS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
     ):
         monkeypatch.setenv(name, "1")
 
@@ -211,6 +213,36 @@ def test_serial_task_campaign_is_byte_identical_and_exactly_resumable(
     assert second.orchestration_path != first.orchestration_path
 
 
+def test_rank_zero_maximum_merge_failure_has_canonical_v3_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _thread_environment(monkeypatch)
+    campaign, _ = _campaign(tmp_path)
+
+    def fail_maximum_merge(_values: object) -> object:
+        raise RuntimeError("injected rank-zero maximum merge failure")
+
+    monkeypatch.setattr(
+        mpi_sampler,
+        "_merge_maxima",
+        fail_maximum_merge,
+    )
+    with pytest.raises(
+        mpi_sampler.V3SampleMPIMergeError,
+        match=(
+            "rank-zero maximum-phase artifact/merge failed: RuntimeError: "
+            "injected rank-zero maximum merge failure"
+        ),
+    ):
+        run_v3_sample_manifest_mpi(
+            campaign,
+            run_directory=tmp_path / "run",
+            output_path=tmp_path / "samples.json",
+            comm=serial_task_communicator(),
+        )
+
+
 def test_orchestration_accepts_completed_tasks_from_interrupted_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,6 +296,54 @@ def test_orchestration_accepts_completed_tasks_from_interrupted_history(
             execution_directory / f"{interrupted.execution_id}.json",
             interrupted,
         )
+        phase_root = run / phase_name
+        residue_targets = (
+            (
+                phase_root,
+                "task-manifest.json",
+            ),
+            (
+                phase_root / "task-artifacts",
+                next(
+                    (phase_root / "task-artifacts").iterdir()
+                ).name,
+            ),
+            (
+                phase_root / "task-outcomes",
+                next(
+                    (phase_root / "task-outcomes").iterdir()
+                ).name,
+            ),
+            (
+                phase_root / "task-assignments",
+                next(
+                    (phase_root / "task-assignments").iterdir()
+                ).name,
+            ),
+            (
+                phase_root / "executions",
+                "interrupted-publication.json",
+            ),
+        )
+        for directory, target_name in residue_targets:
+            (
+                directory
+                / f".{target_name}.{('0' * 32)}.tmp"
+            ).write_bytes(b"interrupted")
+    (
+        run
+        / f".source-identity.json.{('1' * 32)}.tmp"
+    ).write_bytes(b"interrupted")
+    scientific_residue = (
+        output.parent
+        / f".{output.name}.{('2' * 32)}.tmp"
+    )
+    scientific_residue.write_bytes(b"interrupted")
+    orchestration_residue = (
+        first.orchestration_path.parent
+        / f".{first.orchestration_path.name}.{('3' * 32)}.tmp"
+    )
+    orchestration_residue.write_bytes(b"interrupted")
 
     resumed = run_v3_sample_manifest_mpi(
         campaign,
@@ -280,6 +360,9 @@ def test_orchestration_accepts_completed_tasks_from_interrupted_history(
         require_mpi=False,
     )
     assert evidence.restart_resume_recorded
+    assert not list(run.rglob(".*.tmp"))
+    assert not scientific_residue.exists()
+    assert not orchestration_residue.exists()
 
 
 def test_corrupt_task_artifact_is_rejected_on_restart(
@@ -362,6 +445,43 @@ def test_orchestration_rejects_tampered_task_file(
     with pytest.raises(
         mpi_sampler.V3SampleMPIArtifactError,
         match="changed",
+    ):
+        validate_v3_mpi_orchestration_evidence(
+            output,
+            result.orchestration_path,
+            run,
+            require_authenticated_source=False,
+            require_mpi=False,
+        )
+
+
+def test_orchestration_rejects_tampered_prework_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _thread_environment(monkeypatch)
+    campaign, _ = _campaign(tmp_path)
+    run = tmp_path / "run"
+    output = tmp_path / "samples.json"
+    result = run_v3_sample_manifest_mpi(
+        campaign,
+        run_directory=run,
+        output_path=output,
+        comm=serial_task_communicator(),
+    )
+    assert result is not None
+    origin = sorted(
+        (
+            run
+            / "phase-maximum"
+            / "task-assignments"
+        ).glob("*.assignment.json")
+    )[0]
+    origin.write_bytes(origin.read_bytes() + b" ")
+
+    with pytest.raises(
+        mpi_sampler.V3SampleMPIArtifactError,
+        match="changed|canonical|origin",
     ):
         validate_v3_mpi_orchestration_evidence(
             output,
@@ -653,6 +773,50 @@ def test_symlinked_campaign_and_orchestration_paths_are_rejected(
         )
 
 
+def test_v3_rejects_unowned_root_entries_and_hardlinked_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _thread_environment(monkeypatch)
+    campaign, _ = _campaign(tmp_path)
+    run = tmp_path / "run"
+    run.mkdir()
+    sentinel = run / "foreign-entry"
+    sentinel.write_bytes(b"preserve")
+    with pytest.raises(TaskManifestError, match="unowned top-level"):
+        run_v3_sample_manifest_mpi(
+            campaign,
+            run_directory=run,
+            output_path=tmp_path / "blocked.json",
+            comm=serial_task_communicator(),
+        )
+    assert sentinel.read_bytes() == b"preserve"
+    assert {path.name for path in run.iterdir()} == {"foreign-entry"}
+
+    sentinel.unlink()
+    output = tmp_path / "samples.json"
+    result = run_v3_sample_manifest_mpi(
+        campaign,
+        run_directory=run,
+        output_path=output,
+        comm=serial_task_communicator(),
+    )
+    assert result is not None
+    alias = tmp_path / "orchestration-hardlink.json"
+    os.link(result.orchestration_path, alias)
+    with pytest.raises(
+        mpi_sampler.V3SampleMPIArtifactError,
+        match="single-link",
+    ):
+        validate_v3_mpi_orchestration_evidence(
+            output,
+            result.orchestration_path,
+            run,
+            require_authenticated_source=False,
+            require_mpi=False,
+        )
+
+
 def test_thread_environment_is_mandatory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -862,6 +1026,8 @@ def test_real_two_rank_equality_and_four_rank_restart(
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
             "PYTHONNOUSERSITE": "1",
         }
     )
@@ -885,11 +1051,14 @@ def test_real_two_rank_equality_and_four_rank_restart(
     )
     assert initial.returncode == 0, initial.stdout + initial.stderr
     assert "v3-sample-mpi-initial-passed ranks=2" in initial.stdout
+    for phase in ("phase-maximum", "phase-reservoirs"):
+        execution_directory = tmp_path / "run" / phase / "executions"
+        for execution_path in execution_directory.glob("*.json"):
+            execution_path.unlink()
 
     restarted = subprocess.run(
         [
             str(mpiexec),
-            "--oversubscribe",
             "-n",
             "4",
             sys.executable,
@@ -907,3 +1076,29 @@ def test_real_two_rank_equality_and_four_rank_restart(
     )
     assert restarted.returncode == 0, restarted.stdout + restarted.stderr
     assert "v3-sample-mpi-restart-passed ranks=4" in restarted.stdout
+
+    merge_failure = subprocess.run(
+        [
+            str(mpiexec),
+            "-n",
+            "2",
+            sys.executable,
+            str(script),
+            "--root",
+            str(tmp_path / "merge-failure"),
+            "--phase",
+            "merge-failure",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=90,
+    )
+    assert (
+        merge_failure.returncode == 0
+    ), merge_failure.stdout + merge_failure.stderr
+    assert (
+        "v3-sample-mpi-merge-failure-passed ranks=2"
+        in merge_failure.stdout
+    )

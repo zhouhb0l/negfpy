@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from negfpy.anharmonic import silicon_release_validation as release
@@ -41,7 +42,9 @@ def _external_view_fixture() -> dict[str, object]:
     }
 
 
-def test_external_scientific_view_ignores_only_live_resource_observations() -> None:
+def test_external_scientific_view_ignores_only_live_resource_observations() -> (
+    None
+):
     first = _external_view_fixture()
     second = _external_view_fixture()
     second["started_at_utc"] = "second"
@@ -80,14 +83,36 @@ def _config(
     external = tmp_path / "external.json"
     equality_3 = tmp_path / "equality-3.json"
     equality_5 = tmp_path / "equality-5.json"
-    for path in (external, equality_3, equality_5):
+    v3_3_manifest = tmp_path / "v3-3.json"
+    v3_3_orchestration = tmp_path / "v3-3.mpi.json"
+    v3_5_manifest = tmp_path / "v3-5.json"
+    v3_5_orchestration = tmp_path / "v3-5.mpi.json"
+    for path in (
+        external,
+        equality_3,
+        equality_5,
+        v3_3_manifest,
+        v3_3_orchestration,
+        v3_5_manifest,
+        v3_5_orchestration,
+    ):
         path.write_text("{}\n", encoding="utf-8")
+    v3_3_run = tmp_path / "v3-3-run"
+    v3_5_run = tmp_path / "v3-5-run"
+    v3_3_run.mkdir()
+    v3_5_run.mkdir()
     repository = tmp_path / "repository"
     repository.mkdir()
     return release.SiliconReleaseValidationConfig(
         external_oracle_report_path=external,
         equality_3x3_summary_path=equality_3,
         equality_5x5_summary_path=equality_5,
+        v3_3x3_manifest_path=v3_3_manifest,
+        v3_3x3_orchestration_path=v3_3_orchestration,
+        v3_3x3_run_directory_path=v3_3_run,
+        v3_5x5_manifest_path=v3_5_manifest,
+        v3_5x5_orchestration_path=v3_5_orchestration,
+        v3_5x5_run_directory_path=v3_5_run,
         repository_path=repository,
         output_path=tmp_path / "release.json",
     )
@@ -104,8 +129,7 @@ def _comparison_payload() -> dict[str, object]:
         "merged_result_sha256": "2" * 64,
         "merged_artifact_sha256": "3" * 64,
         "exact_field_passed": {
-            name: True
-            for name in release._CANONICAL_EXACT_COMPARISON_FIELDS
+            name: True for name in release._CANONICAL_EXACT_COMPARISON_FIELDS
         },
         "numerical_field_passed": {
             name: True
@@ -237,14 +261,10 @@ def test_release_runtime_requires_exact_installed_0_2_0() -> None:
 def test_qualified_full_ifc_must_match_target_generation() -> None:
     qualification = {
         role: {"sha256": str(index) * 64}
-        for index, role in enumerate(
-            release._SHARED_TARGET_ROLE_MAP, start=1
-        )
+        for index, role in enumerate(release._SHARED_TARGET_ROLE_MAP, start=1)
     }
     target = {
-        target_role: {
-            "sha256": qualification[qualification_role]["sha256"]
-        }
+        target_role: {"sha256": qualification[qualification_role]["sha256"]}
         for qualification_role, target_role in (
             release._SHARED_TARGET_ROLE_MAP.items()
         )
@@ -260,6 +280,277 @@ def test_qualified_full_ifc_must_match_target_generation() -> None:
     ):
         release._require_qualification_target_match(
             qualification, target, name="fixture"
+        )
+
+
+def _fake_v3_validation(
+    scientific_manifest: Path,
+    orchestration: Path,
+    run_directory: Path,
+    **kwargs: object,
+) -> SimpleNamespace:
+    assert scientific_manifest.is_file()
+    assert run_directory.is_dir()
+    return SimpleNamespace(
+        path=orchestration,
+        file_sha256=release._sha256(orchestration),
+        payload_sha256="1" * 64,
+        campaign_sha256="2" * 64,
+        source_identity_sha256="3" * 64,
+        source_authenticated=True,
+        source_revision=kwargs["expected_source_revision"],
+        source_tree_sha256=kwargs["expected_source_tree_sha256"],
+        environment_sha256=kwargs["expected_environment_sha256"],
+        mesh=tuple(kwargs["expected_mesh"]),
+        target_grid_points=tuple(kwargs["expected_target_grid_points"]),
+        target_bands=tuple(kwargs["expected_target_bands"]),
+        selected_execution_ids=("maximum", "reservoirs"),
+        selected_communicator_sizes=(2, 2),
+        selected_modes=("mpi", "mpi"),
+        restart_resume_recorded=False,
+        physical_core_binding_passed=True,
+        mpi_origin_lineage_passed=True,
+    )
+
+
+def _v3_helper_inputs(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    Path,
+    Path,
+    dict[str, dict[str, object]],
+    SimpleNamespace,
+    release._EvidenceTracker,
+]:
+    manifest = tmp_path / "samples.json"
+    orchestration = tmp_path / "samples.mpi.json"
+    run_directory = tmp_path / "v3-run"
+    manifest.write_text('{"samples":[]}\n', encoding="utf-8")
+    orchestration.write_text('{"orchestration":true}\n', encoding="utf-8")
+    run_directory.mkdir()
+    tracker = release._EvidenceTracker()
+    qualified = tracker.snapshot_path(manifest, name="qualified manifest")
+    reference = SimpleNamespace(
+        mesh=(3, 3, 3),
+        grid_points_grg=np.arange(27, dtype=np.int64),
+        band_indices=np.arange(2, dtype=np.int64),
+    )
+    return (
+        manifest.resolve(),
+        orchestration.resolve(),
+        run_directory.resolve(),
+        {"interaction_samples": qualified},
+        reference,
+        tracker,
+    )
+
+
+def test_equality_reference_mpi_evidence_is_mandatory() -> None:
+    reference = SimpleNamespace(
+        mesh=(3, 3, 3),
+        grid_points_grg=np.arange(27, dtype=np.int64),
+        band_indices=np.arange(2, dtype=np.int64),
+        n_qpoints=27,
+        n_bands=2,
+    )
+    with pytest.raises(
+        release.SiliconReleaseValidationError,
+        match="lacks mandatory reference-MPI evidence",
+    ):
+        release._validate_equality_reference_mpi(
+            expected_mesh=(3, 3, 3),
+            target_records={},
+            reference=reference,
+        )
+    reference.mesh = (5, 5, 5)
+    with pytest.raises(
+        release.SiliconReleaseValidationError,
+        match="wrong mesh",
+    ):
+        release._validate_equality_reference_mpi(
+            expected_mesh=(3, 3, 3),
+            target_records={},
+            reference=reference,
+        )
+
+
+def test_equality_reference_mpi_revalidation_is_bound_to_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestration = tmp_path / "reference-mpi-orchestration.json"
+    archive = tmp_path / "reference-mpi-evidence.tar"
+    reference_path = tmp_path / "si-phono3py-reference.hdf5"
+    orchestration.write_text('{"schema":"fixture"}\n', encoding="utf-8")
+    archive.write_bytes(b"reference MPI archive")
+    reference_path.write_bytes(b"reference HDF5")
+    tracker = release._EvidenceTracker()
+    target_records = {
+        release._REFERENCE_MPI_TARGET_ROLES["orchestration"]: (
+            tracker.snapshot_path(orchestration, name="orchestration")
+        ),
+        release._REFERENCE_MPI_TARGET_ROLES["evidence_archive"]: (
+            tracker.snapshot_path(archive, name="archive")
+        ),
+        "target_bundle_si-phono3py-reference.hdf5": (
+            tracker.snapshot_path(reference_path, name="reference")
+        ),
+    }
+    reference = SimpleNamespace(
+        mesh=(3, 3, 3),
+        grid_points_grg=np.arange(27, dtype=np.int64),
+        band_indices=np.arange(2, dtype=np.int64),
+        n_qpoints=27,
+        n_bands=2,
+    )
+
+    def validate(
+        root: Path,
+        document: dict[str, object],
+        **kwargs: object,
+    ) -> dict[str, object]:
+        assert root == tmp_path.resolve()
+        assert document == {"schema": "fixture"}
+        assert tuple(kwargs["expected_mesh"]) == reference.mesh
+        archive_stat = archive.stat()
+        reference_stat = reference_path.stat()
+        return {
+            "campaign_sha256": "a" * 64,
+            "evidence_archive": {
+                "path": str(archive.resolve()),
+                "name": archive.name,
+                "size_bytes": archive_stat.st_size,
+                "sha256": release._sha256(archive.resolve()),
+            },
+            "evidence_members": [],
+            "task_count": 27,
+            "execution_count": 1,
+            "execution_ids": ["fresh"],
+            "restart": {"total_resumed_task_assignments": 0},
+            "worker_bindings_by_execution": {"fresh": {"passed": True}},
+            "bundle_identity": {"passed": True},
+            "merged_reference": {
+                "name": reference_path.name,
+                "size_bytes": reference_stat.st_size,
+                "sha256": release._sha256(reference_path.resolve()),
+            },
+            "canonical_merge": {"passed": True},
+            "full_q_selection": True,
+            "full_band_selection": True,
+            "floating_point_mpi_reductions": False,
+        }
+
+    monkeypatch.setattr(release, "validate_reference_mpi_evidence", validate)
+    evidence = release._validate_equality_reference_mpi(
+        expected_mesh=(3, 3, 3),
+        target_records=target_records,
+        reference=reference,
+    )
+    assert evidence["campaign_sha256"] == "a" * 64
+    assert evidence["task_count"] == 27
+    assert evidence["canonical_merge"] == {"passed": True}
+
+    archive.write_bytes(b"tampered")
+    with pytest.raises(Exception, match="current immutable bytes"):
+        tracker.recheck()
+
+
+def test_equality_v3_manifest_must_match_serial_qualification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        manifest,
+        orchestration,
+        run_directory,
+        qualification,
+        reference,
+        tracker,
+    ) = _v3_helper_inputs(tmp_path)
+    other = tmp_path / "other-samples.json"
+    other.write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        release,
+        "validate_v3_mpi_orchestration_evidence",
+        _fake_v3_validation,
+    )
+
+    with pytest.raises(
+        release.SiliconReleaseValidationError,
+        match="not the exact manifest",
+    ):
+        release._validate_equality_v3_mpi(
+            expected_mesh=(3, 3, 3),
+            manifest_path=other.resolve(),
+            orchestration_path=orchestration,
+            run_directory=run_directory,
+            qualification_inputs=qualification,
+            reference=reference,
+            tracker=tracker,
+            repository={"head_commit": "a" * 40},
+            imported_code={"record": {"source_tree_sha256": "b" * 64}},
+            environment_sha256="c" * 64,
+            source_identity={"authenticated": True},
+        )
+
+
+def test_equality_v3_rejects_wrong_mesh_and_postvalidation_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        manifest,
+        orchestration,
+        run_directory,
+        qualification,
+        reference,
+        tracker,
+    ) = _v3_helper_inputs(tmp_path)
+
+    def wrong_mesh(*args: object, **kwargs: object) -> SimpleNamespace:
+        result = _fake_v3_validation(*args, **kwargs)
+        result.mesh = (5, 5, 5)
+        return result
+
+    monkeypatch.setattr(
+        release,
+        "validate_v3_mpi_orchestration_evidence",
+        wrong_mesh,
+    )
+    helper_arguments = {
+        "expected_mesh": (3, 3, 3),
+        "manifest_path": manifest,
+        "orchestration_path": orchestration,
+        "run_directory": run_directory,
+        "qualification_inputs": qualification,
+        "reference": reference,
+        "tracker": tracker,
+        "repository": {"head_commit": "a" * 40},
+        "imported_code": {"record": {"source_tree_sha256": "b" * 64}},
+        "environment_sha256": "c" * 64,
+        "source_identity": {"authenticated": True},
+    }
+    with pytest.raises(
+        release.SiliconReleaseValidationError,
+        match="differs from the explicit release inputs",
+    ):
+        release._validate_equality_v3_mpi(**helper_arguments)
+
+    monkeypatch.setattr(
+        release,
+        "validate_v3_mpi_orchestration_evidence",
+        _fake_v3_validation,
+    )
+    evidence = release._validate_equality_v3_mpi(**helper_arguments)
+    orchestration.write_text('{"tampered":true}\n', encoding="utf-8")
+    with pytest.raises(
+        release.SiliconReleaseValidationError,
+        match="changed during final aggregation",
+    ):
+        release._recheck_equality_v3_mpi(
+            evidence,
+            source_identity={"authenticated": True},
         )
 
 
@@ -281,9 +572,7 @@ def test_execution_assignment_files_are_opened_hashed_and_rechecked(
 ) -> None:
     run_root = tmp_path / "run"
     artifact = run_root / "task-artifacts" / "target-q-00000000.h5"
-    checkpoint = (
-        run_root / "task-outcomes" / "target-q-00000000.json"
-    )
+    checkpoint = run_root / "task-outcomes" / "target-q-00000000.json"
     artifact.parent.mkdir(parents=True)
     checkpoint.parent.mkdir(parents=True)
     artifact.write_bytes(b"artifact")
@@ -401,6 +690,8 @@ def test_final_release_decision_only_after_all_three_validators_pass(
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
         },
     }
     imported = {
@@ -418,9 +709,7 @@ def test_final_release_decision_only_after_all_three_validators_pass(
         "_repository_identity",
         lambda *args, **kwargs: dict(repository),
     )
-    monkeypatch.setattr(
-        release, "_runtime_identity", lambda: dict(runtime)
-    )
+    monkeypatch.setattr(release, "_runtime_identity", lambda: dict(runtime))
     monkeypatch.setattr(
         release,
         "_code_identity",
@@ -479,8 +768,12 @@ def test_final_release_decision_only_after_all_three_validators_pass(
         path: Path,
         *,
         expected_mesh: tuple[int, int, int],
+        v3_manifest_path: Path,
+        v3_orchestration_path: Path,
+        v3_run_directory: Path,
         **kwargs: object,
     ) -> dict[str, object]:
+        qpoints = list(range(expected_mesh[0] ** 3))
         return {
             "summary_path": str(path),
             "summary_sha256": (
@@ -489,33 +782,74 @@ def test_final_release_decision_only_after_all_three_validators_pass(
             "mesh": list(expected_mesh),
             "fresh_complete_mpi_execution": True,
             "full_field_equality": True,
+            "v3_mpi_sampling": {
+                "scientific_manifest": {
+                    "path": str(v3_manifest_path),
+                    "sha256": release._sha256(v3_manifest_path),
+                },
+                "orchestration": {
+                    "path": str(v3_orchestration_path),
+                    "sha256": release._sha256(v3_orchestration_path),
+                },
+                "run_directory": str(v3_run_directory),
+                "orchestration_file_sha256": release._sha256(
+                    v3_orchestration_path
+                ),
+                "payload_sha256": "2" * 64,
+                "campaign_sha256": "3" * 64,
+                "source_identity_sha256": "4" * 64,
+                "source_authenticated": True,
+                "source_revision": repository["head_commit"],
+                "source_tree_sha256": imported["record"]["source_tree_sha256"],
+                "environment_sha256": "5" * 64,
+                "mesh": list(expected_mesh),
+                "target_grid_points": qpoints,
+                "target_bands": [0],
+                "selected_execution_ids": ["maximum", "reservoirs"],
+                "selected_communicator_sizes": [2, 4],
+                "selected_modes": ["mpi", "mpi"],
+                "restart_resume_recorded": True,
+                "physical_core_binding_passed": True,
+                "mpi_origin_lineage_passed": True,
+                "floating_point_mpi_reductions": False,
+                "canonical_merge_revalidated": True,
+            },
         }
 
-    monkeypatch.setattr(
-        release, "_validate_equality_summary", equality
-    )
-    monkeypatch.setattr(
-        release,
-        "validate_v3_mpi_orchestration_evidence",
-        lambda *args, **kwargs: SimpleNamespace(
-            file_sha256=release._sha256(orchestration_path.resolve()),
+    monkeypatch.setattr(release, "_validate_equality_summary", equality)
+
+    def validate_v3(
+        scientific_manifest: Path,
+        orchestration: Path,
+        run_directory: Path,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        del scientific_manifest, run_directory
+        return SimpleNamespace(
+            path=orchestration,
+            file_sha256=release._sha256(orchestration),
             payload_sha256="2" * 64,
             campaign_sha256="3" * 64,
             source_identity_sha256="4" * 64,
             source_authenticated=True,
-            source_revision=repository["head_commit"],
-            source_tree_sha256=imported["record"]["source_tree_sha256"],
-            environment_sha256="5" * 64,
-            mesh=(1, 1, 1),
-            target_grid_points=(0,),
-            target_bands=(0,),
+            source_revision=kwargs["expected_source_revision"],
+            source_tree_sha256=kwargs["expected_source_tree_sha256"],
+            environment_sha256=kwargs["expected_environment_sha256"],
+            mesh=tuple(kwargs["expected_mesh"]),
+            target_grid_points=tuple(kwargs["expected_target_grid_points"]),
+            target_bands=tuple(kwargs["expected_target_bands"]),
             selected_execution_ids=("maximum", "reservoirs"),
             selected_communicator_sizes=(2, 4),
             selected_modes=("mpi", "mpi"),
             restart_resume_recorded=True,
             physical_core_binding_passed=True,
             mpi_origin_lineage_passed=True,
-        ),
+        )
+
+    monkeypatch.setattr(
+        release,
+        "validate_v3_mpi_orchestration_evidence",
+        validate_v3,
     )
     monkeypatch.setattr(
         release,

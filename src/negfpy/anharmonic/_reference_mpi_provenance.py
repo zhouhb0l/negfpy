@@ -15,29 +15,196 @@ import json
 import math
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import tarfile
 import tempfile
 from typing import Any, Mapping, Sequence
+import unicodedata
 
 
 REFERENCE_MPI_ORCHESTRATION_SCHEMA = (
     "negfpy_phono3py_si_reference_mpi_orchestration"
 )
-REFERENCE_MPI_ORCHESTRATION_VERSION = 2
+REFERENCE_MPI_ORCHESTRATION_VERSION = 3
 REFERENCE_MPI_EVIDENCE_ARCHIVE = "reference-mpi-evidence.tar"
 _CAMPAIGN_SCHEMA = "negfpy_phono3py_si_reference_mpi_manifest"
 _EXECUTION_SCHEMA = "negfpy_phono3py_si_reference_mpi_execution"
 _TASK_SCHEMA = "negfpy_phono3py_si_reference_mpi_task_record"
+_ORIGIN_ASSIGNMENT_SCHEMA = (
+    "negfpy_phono3py_si_reference_mpi_origin_assignment"
+)
+_SCRATCH_CLEANUP_SCHEMA = (
+    "negfpy_phono3py_si_reference_mpi_scratch_cleanup"
+)
+_SCRATCH_CLEANUP_KEYS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "campaign_sha256",
+        "execution_id",
+        "status",
+        "removed",
+        "scratch_empty_after_cleanup",
+        "completed_at_utc",
+    }
+)
+_SCRATCH_REMOVED_KEYS = frozenset({"directory", "files"})
+_SCRATCH_FILE_KEYS = frozenset(
+    {"relative_path", "size_bytes", "sha256"}
+)
+_SCRATCH_DIRECTORY_PATTERN = re.compile(
+    r"^\.target-grg-[0-9]{8}-rank[0-9]+-[A-Za-z0-9_-]+$"
+)
+_PRIVATE_TEMPORARY_PATTERN = re.compile(
+    r"^\.(?P<target>.+)\.(?:[a-z0-9_]{8}|[0-9a-f]{32})\.tmp$"
+)
+_PRIVATE_TEMPORARY_TARGETS = {
+    ".": re.compile(r"^reference-mpi-manifest\.json$"),
+    "tasks": re.compile(r"^target-grg-[0-9]{8}\.json$"),
+    "assignments": re.compile(
+        r"^target-grg-[0-9]{8}\.[A-Za-z0-9._-]{1,64}"
+        r"\.assignment\.json$"
+    ),
+    "failures": re.compile(r"^target-grg-[0-9]{8}\.json$"),
+    "executions": re.compile(r"^[A-Za-z0-9._-]{1,64}\.json$"),
+    "scratch-cleanups": re.compile(r"^[A-Za-z0-9._-]{1,64}\.json$"),
+}
+_PRIVATE_TEMPORARY_SCOPE_ORDER = tuple(_PRIVATE_TEMPORARY_TARGETS)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _THREAD_NAMES = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
+_THREAD_NAME_SET = frozenset(_THREAD_NAMES)
 _PHYSICAL_CORE_BINDING_POLICY = (
     "one_physical_core_per_numerical_worker_disjoint_per_host"
 )
+_TASK_RECORD_KEYS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "campaign_sha256",
+        "grid_point_grg",
+        "status",
+        "disposition",
+        "origin_assignment",
+        "artifact",
+        "scientific",
+        "execution",
+        "runtime",
+    }
+)
+_TASK_ARTIFACT_KEYS = frozenset({"name", "size_bytes", "sha256"})
+_TASK_SCIENTIFIC_KEYS = frozenset(
+    {
+        "grid_point_grg",
+        "grid_point_bzg",
+        "bands",
+        "n_qpoints",
+        "n_bands",
+        "gamma_shape",
+        "target_frequency_shape",
+        "common_reference_sha256",
+    }
+)
+_TASK_EXECUTION_KEYS = frozenset(
+    {
+        "rank",
+        "hostname",
+        "started_at_utc",
+        "completed_at_utc",
+        "wall_seconds",
+        "thread_environment",
+    }
+)
+_ORIGIN_ASSIGNMENT_KEYS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "campaign_sha256",
+        "grid_point_grg",
+        "execution_id",
+        "status",
+        "mode",
+        "rank",
+        "communicator_size",
+        "hostname",
+        "assigned_at_utc",
+        "worker_binding",
+        "thread_environment",
+    }
+)
+_EXECUTION_RECORD_KEYS = frozenset(
+    {
+        "schema_name",
+        "schema_version",
+        "execution_id",
+        "campaign_sha256",
+        "started_at_utc",
+        "completed_at_utc",
+        "wall_seconds",
+        "communicator_size",
+        "coordinator_rank",
+        "rank_zero_numerical_tasks",
+        "floating_point_mpi_reductions",
+        "worker_binding_policy",
+        "worker_binding_evidence",
+        "canonical_assignment_order",
+        "task_grid_points_grg",
+        "assignment_grid_points_grg",
+        "resumed_grid_points_grg",
+        "computed_or_adopted_grid_points_grg",
+        "exact_checkpoint_resume",
+        "hostname",
+        "python",
+        "thread_environment",
+        "scratch_cleanup",
+        "assignments",
+        "complete",
+    }
+)
+_EXECUTION_PYTHON_KEYS = frozenset({"version", "executable"})
+_RESUMED_ASSIGNMENT_KEYS = frozenset(
+    {
+        "grid_point_grg",
+        "rank",
+        "status",
+        "wall_seconds",
+        "origin_assignment",
+    }
+)
+_SERIAL_NUMERICAL_ASSIGNMENT_KEYS = frozenset(
+    {
+        "grid_point_grg",
+        "rank",
+        "status",
+        "wall_seconds",
+        "artifact",
+        "origin_assignment",
+    }
+)
+_MPI_NUMERICAL_ASSIGNMENT_KEYS = frozenset(
+    {
+        "grid_point_grg",
+        "rank",
+        "status",
+        "wall_seconds",
+        "worker_binding",
+        "artifact",
+        "origin_assignment",
+    }
+)
+_AUTHENTICATED_COMPUTE_DISPOSITIONS = frozenset(
+    {
+        "computed",
+        "computed_after_interrupted_record_publication",
+    }
+)
+_ADOPTED_DISPOSITION = "adopted_after_interrupted_record_publication"
 
 
 class ReferenceMPIProvenanceError(RuntimeError):
@@ -48,6 +215,219 @@ def _mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ReferenceMPIProvenanceError(f"{name} must be a JSON object.")
     return value
+
+
+def _strict_thread_environment(value: Any, *, name: str) -> dict[str, str]:
+    environment = dict(_mapping(value, name=name))
+    if (
+        set(environment) != _THREAD_NAME_SET
+        or any(environment[variable] != "1" for variable in _THREAD_NAMES)
+    ):
+        raise ReferenceMPIProvenanceError(
+            f"{name} must contain exactly the six pinned thread variables "
+            "with value '1'."
+        )
+    return environment
+
+
+def _private_temporary_target(scope: str, name: str) -> str | None:
+    pattern = _PRIVATE_TEMPORARY_TARGETS.get(scope)
+    match = _PRIVATE_TEMPORARY_PATTERN.fullmatch(name)
+    if pattern is None or match is None:
+        return None
+    target = str(match.group("target"))
+    if pattern.fullmatch(target) is None:
+        return None
+    if scope in {"executions", "scratch-cleanups"}:
+        identifier = target.removesuffix(".json")
+        if identifier in {"", ".", ".."}:
+            return None
+    return target
+
+
+def _strict_final_output_name(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or "\x00" in value
+        or "/" in value
+        or "\\" in value
+        or PurePosixPath(value).name != value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise ReferenceMPIProvenanceError(
+            "campaign.final_output_name must be a traversal-safe basename."
+        )
+    return value
+
+
+def _strict_scratch_cleanup_removed(
+    value: Any,
+    *,
+    execution_id: str,
+    final_output_name: str,
+) -> None:
+    if not isinstance(value, list):
+        raise ReferenceMPIProvenanceError(
+            f"execution {execution_id!r} scratch cleanup removed must be "
+            "an array."
+        )
+    seen_directories: set[str] = set()
+    last_worker_directory: str | None = None
+    last_private_scope = -1
+    last_staging_directory: str | None = None
+    directory_phase = 0
+    staging_pattern = re.compile(
+        rf"^output-parent/\.{re.escape(final_output_name)}\."
+        r"[0-9a-f]{32}\.tmp$"
+    )
+    for ordinal, item in enumerate(value):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != _SCRATCH_REMOVED_KEYS
+            or not isinstance(item.get("directory"), str)
+            or not isinstance(item.get("files"), list)
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"execution {execution_id!r} scratch cleanup "
+                f"removed[{ordinal}] has an ambiguous schema."
+            )
+        directory = str(item["directory"])
+        is_worker_scratch = (
+            _SCRATCH_DIRECTORY_PATTERN.fullmatch(directory) is not None
+        )
+        is_private_scope = directory in _PRIVATE_TEMPORARY_TARGETS
+        is_final_staging = staging_pattern.fullmatch(directory) is not None
+        if (
+            directory in seen_directories
+            or not (
+                is_worker_scratch
+                or is_private_scope
+                or is_final_staging
+            )
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"execution {execution_id!r} scratch cleanup "
+                f"removed[{ordinal}] has an invalid directory."
+            )
+        if is_worker_scratch:
+            if (
+                directory_phase != 0
+                or (
+                    last_worker_directory is not None
+                    and directory <= last_worker_directory
+                )
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} scratch cleanup directories "
+                    "are not in generator order."
+                )
+            last_worker_directory = directory
+        elif is_private_scope:
+            if directory_phase > 1:
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} scratch cleanup private "
+                    "directories are not in generator order."
+                )
+            directory_phase = 1
+            private_scope = _PRIVATE_TEMPORARY_SCOPE_ORDER.index(directory)
+            if (
+                private_scope <= last_private_scope
+                or not item["files"]
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} scratch cleanup private "
+                    "directories are not in generator order."
+                )
+            last_private_scope = private_scope
+        else:
+            directory_phase = 2
+            if (
+                last_staging_directory is not None
+                and directory <= last_staging_directory
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} final-staging cleanup "
+                    "directories are not in generator order."
+                )
+            last_staging_directory = directory
+        seen_directories.add(directory)
+
+        seen_files: set[str] = set()
+        last_path_parts: tuple[str, ...] | None = None
+        for file_ordinal, file_value in enumerate(item["files"]):
+            if (
+                not isinstance(file_value, Mapping)
+                or set(file_value) != _SCRATCH_FILE_KEYS
+                or not isinstance(file_value.get("relative_path"), str)
+                or isinstance(file_value.get("size_bytes"), bool)
+                or not isinstance(file_value.get("size_bytes"), int)
+                or int(file_value["size_bytes"]) < 0
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} scratch cleanup file "
+                    "identity has an ambiguous schema at "
+                    f"removed[{ordinal}].files[{file_ordinal}]."
+                )
+            relative_path = str(file_value["relative_path"])
+            canonical_path = PurePosixPath(relative_path)
+            path_parts = canonical_path.parts
+            if (
+                not relative_path
+                or "\x00" in relative_path
+                or canonical_path.is_absolute()
+                or canonical_path.as_posix() != relative_path
+                or any(part in {"", ".", ".."} for part in path_parts)
+                or relative_path in seen_files
+                or (
+                    last_path_parts is not None
+                    and path_parts <= last_path_parts
+                )
+                or (
+                    is_private_scope
+                    and (
+                        len(path_parts) != 1
+                        or _private_temporary_target(
+                            directory,
+                            relative_path,
+                        )
+                        is None
+                    )
+                )
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} scratch cleanup file "
+                    "identity is noncanonical at "
+                    f"removed[{ordinal}].files[{file_ordinal}]."
+                )
+            _sha256_value(
+                file_value.get("sha256"),
+                name=(
+                    f"execution {execution_id!r} scratch cleanup "
+                    f"removed[{ordinal}].files[{file_ordinal}].sha256"
+                ),
+            )
+            seen_files.add(relative_path)
+            last_path_parts = path_parts
+
+
+def _immutable_regular_file(path: Path, *, name: str) -> Any:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ReferenceMPIProvenanceError(
+            f"{name} must be an immutable regular file."
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ReferenceMPIProvenanceError(
+            f"{name} must be a regular non-symlink file."
+        )
+    if metadata.st_nlink != 1:
+        raise ReferenceMPIProvenanceError(
+            f"{name} must not be hard-linked."
+        )
+    return metadata
 
 
 def _sha256_value(value: Any, *, name: str) -> str:
@@ -162,10 +542,10 @@ def _archive_record(root: Path, value: Any) -> tuple[Path, dict[str, Any]]:
             "evidence_archive has a noncanonical filename."
         )
     path = root / REFERENCE_MPI_EVIDENCE_ARCHIVE
-    if path.is_symlink() or not path.is_file():
-        raise ReferenceMPIProvenanceError(
-            "reference MPI evidence archive must be a regular non-symlink file."
-        )
+    metadata = _immutable_regular_file(
+        path,
+        name="reference MPI evidence archive",
+    )
     expected_size = record.get("size_bytes")
     expected_sha256 = _sha256_value(
         record.get("sha256"), name="evidence_archive.sha256"
@@ -174,7 +554,7 @@ def _archive_record(root: Path, value: Any) -> tuple[Path, dict[str, Any]]:
         not isinstance(expected_size, int)
         or isinstance(expected_size, bool)
         or expected_size <= 0
-        or path.stat().st_size != expected_size
+        or metadata.st_size != expected_size
         or _sha256_file(path) != expected_sha256
     ):
         raise ReferenceMPIProvenanceError(
@@ -253,17 +633,15 @@ def _read_archive(
 
 def _regular_bundle_file(root: Path, name: str) -> Path:
     path = root / name
-    if path.is_symlink() or not path.is_file():
-        raise ReferenceMPIProvenanceError(
-            f"reference bundle file {name!r} must be regular and non-symlink."
-        )
+    _immutable_regular_file(path, name=f"reference bundle file {name!r}")
     return path
 
 
 def _file_identity(path: Path) -> dict[str, Any]:
+    metadata = _immutable_regular_file(path, name=f"evidence file {path.name!r}")
     return {
         "name": path.name,
-        "size_bytes": path.stat().st_size,
+        "size_bytes": metadata.st_size,
         "sha256": _sha256_file(path),
     }
 
@@ -291,6 +669,7 @@ def _validate_campaign_bundle(
         "runtime_environment",
         "thread_environment",
         "task_grid_points_grg",
+        "final_output_name",
     }
     generators = _mapping(document.get("generators"), name="generators")
     if (
@@ -355,11 +734,11 @@ def _validate_campaign_bundle(
             "archived campaign source, settings, or runtime differs from the "
             "actual reference bundle."
         )
-    threads = _mapping(
+    threads = _strict_thread_environment(
         campaign.get("thread_environment"),
         name="campaign.thread_environment",
     )
-    runtime_threads = _mapping(
+    runtime_threads = _strict_thread_environment(
         _mapping(
             campaign.get("runtime_environment"),
             name="campaign.runtime_environment",
@@ -368,7 +747,6 @@ def _validate_campaign_bundle(
     )
     if (
         dict(threads) != dict(runtime_threads)
-        or any(threads.get(name) != "1" for name in _THREAD_NAMES)
     ):
         raise ReferenceMPIProvenanceError(
             "archived campaign numerical thread environment is inconsistent."
@@ -815,6 +1193,30 @@ def _validate_canonical_hdf5_merge(
                     raise ReferenceMPIProvenanceError(
                         f"archived task HDF5 {point} runtime differs from its "
                         "sidecar."
+                    )
+                origin_text = source.attrs.get(
+                    "mpi_reference_origin_assignment_json"
+                )
+                if not isinstance(origin_text, str) or not origin_text:
+                    raise ReferenceMPIProvenanceError(
+                        f"archived task HDF5 {point} lacks origin provenance."
+                    )
+                origin_identity = _strict_json_bytes(
+                    origin_text.encode("utf-8"),
+                    name=f"archived task HDF5 {point} origin",
+                )
+                origin_member = _mapping(
+                    task["origin_assignment"],
+                    name=f"task {point}.origin_assignment",
+                )
+                if dict(origin_identity) != {
+                    "relative_path": origin_member["archive_member"],
+                    "size_bytes": origin_member["size_bytes"],
+                    "sha256": origin_member["sha256"],
+                }:
+                    raise ReferenceMPIProvenanceError(
+                        f"archived task HDF5 {point} origin differs from "
+                        "its sidecar."
                     )
                 _compare_hdf_attributes(
                     source,
@@ -1373,7 +1775,12 @@ def validate_reference_mpi_evidence(
     }
     for ordinal, value in enumerate(tasks_raw):
         task = _mapping(value, name=f"tasks[{ordinal}]")
-        if set(task) != {"grid_point_grg", "hdf5", "record"}:
+        if set(task) != {
+            "grid_point_grg",
+            "hdf5",
+            "record",
+            "origin_assignment",
+        }:
             raise ReferenceMPIProvenanceError(
                 f"tasks[{ordinal}] has an ambiguous schema."
             )
@@ -1386,15 +1793,25 @@ def validate_reference_mpi_evidence(
         sidecar = _member_record(
             task.get("record"), name=f"tasks[{ordinal}].record"
         )
+        origin_assignment = _member_record(
+            task.get("origin_assignment"),
+            name=f"tasks[{ordinal}].origin_assignment",
+        )
         expected_stem = f"target-grg-{point:08d}"
         if (
             hdf5["archive_member"] != f"tasks/{expected_stem}.hdf5"
             or sidecar["archive_member"] != f"tasks/{expected_stem}.json"
+            or not origin_assignment["archive_member"].startswith(
+                f"assignments/{expected_stem}."
+            )
+            or not origin_assignment["archive_member"].endswith(
+                ".assignment.json"
+            )
         ):
             raise ReferenceMPIProvenanceError(
                 f"task {point} uses noncanonical evidence member paths."
             )
-        for member_record in (hdf5, sidecar):
+        for member_record in (hdf5, sidecar, origin_assignment):
             member = member_record["archive_member"]
             if member in declared_members:
                 raise ReferenceMPIProvenanceError(
@@ -1402,7 +1819,12 @@ def validate_reference_mpi_evidence(
                 )
             declared_members[member] = member_record
         tasks.append(
-            {"grid_point_grg": point, "hdf5": hdf5, "record": sidecar}
+            {
+                "grid_point_grg": point,
+                "hdf5": hdf5,
+                "record": sidecar,
+                "origin_assignment": origin_assignment,
+            }
         )
 
     executions_raw = record.get("executions")
@@ -1414,7 +1836,11 @@ def validate_reference_mpi_evidence(
     execution_ids: list[str] = []
     for ordinal, value in enumerate(executions_raw):
         execution = _mapping(value, name=f"executions[{ordinal}]")
-        if set(execution) != {"execution_id", "record"}:
+        if set(execution) != {
+            "execution_id",
+            "record",
+            "scratch_cleanup",
+        }:
             raise ReferenceMPIProvenanceError(
                 f"executions[{ordinal}] has an ambiguous schema."
             )
@@ -1436,18 +1862,33 @@ def validate_reference_mpi_evidence(
             execution.get("record"),
             name=f"executions[{ordinal}].record",
         )
-        if sidecar["archive_member"] != f"executions/{execution_id}.json":
+        scratch_cleanup = _member_record(
+            execution.get("scratch_cleanup"),
+            name=f"executions[{ordinal}].scratch_cleanup",
+        )
+        if (
+            sidecar["archive_member"] != f"executions/{execution_id}.json"
+            or scratch_cleanup["archive_member"]
+            != f"scratch-cleanups/{execution_id}.json"
+        ):
             raise ReferenceMPIProvenanceError(
                 f"execution {execution_id!r} has a noncanonical archive path."
             )
-        member = sidecar["archive_member"]
-        if member in declared_members:
-            raise ReferenceMPIProvenanceError(
-                f"duplicate declared evidence member {member!r}."
-            )
-        declared_members[member] = sidecar
+        for member_record in (sidecar, scratch_cleanup):
+            member = member_record["archive_member"]
+            if member in declared_members:
+                raise ReferenceMPIProvenanceError(
+                    f"duplicate declared evidence member {member!r}."
+                )
+            declared_members[member] = member_record
         execution_ids.append(execution_id)
-        executions.append({"execution_id": execution_id, "record": sidecar})
+        executions.append(
+            {
+                "execution_id": execution_id,
+                "record": sidecar,
+                "scratch_cleanup": scratch_cleanup,
+            }
+        )
     if execution_ids != sorted(set(execution_ids)):
         raise ReferenceMPIProvenanceError(
             "reference MPI executions are not unique canonical identifiers."
@@ -1473,9 +1914,89 @@ def validate_reference_mpi_evidence(
         raise ReferenceMPIProvenanceError(
             "archived campaign manifest does not bind the exact campaign."
         )
+    final_output_name = _strict_final_output_name(
+        campaign.get("final_output_name")
+    )
 
     for task in tasks:
         point = int(task["grid_point_grg"])
+        origin_member = task["origin_assignment"]
+        origin = _strict_json_bytes(
+            json_payloads[origin_member["archive_member"]],
+            name=f"archived task origin assignment {point}",
+        )
+        _strict_thread_environment(
+            origin.get("thread_environment"),
+            name=f"task {point}.origin.thread_environment",
+        )
+        origin_rank = origin.get("rank")
+        origin_size = origin.get("communicator_size")
+        origin_mode = origin.get("mode")
+        origin_execution_id = origin.get("execution_id")
+        if (
+            set(origin) != _ORIGIN_ASSIGNMENT_KEYS
+            or origin.get("schema_name") != _ORIGIN_ASSIGNMENT_SCHEMA
+            or origin.get("schema_version") != 1
+            or origin.get("campaign_sha256") != campaign_sha256
+            or origin.get("grid_point_grg") != point
+            or origin.get("status") != "assigned_before_numerical_work"
+            or not isinstance(origin_execution_id, str)
+            or not origin_execution_id
+            or len(origin_execution_id) > 64
+            or any(
+                not (character.isalnum() or character in "._-")
+                for character in origin_execution_id
+            )
+            or origin_execution_id in {".", ".."}
+            or origin_mode not in {"serial", "mpi"}
+            or isinstance(origin_rank, bool)
+            or not isinstance(origin_rank, int)
+            or isinstance(origin_size, bool)
+            or not isinstance(origin_size, int)
+            or origin_size <= 0
+            or origin_rank < 0
+            or origin_rank >= origin_size
+            or (
+                origin_mode == "serial"
+                and (origin_size != 1 or origin_rank != 0)
+            )
+            or (
+                origin_mode == "mpi"
+                and (origin_size < 2 or origin_rank == 0)
+            )
+            or not isinstance(origin.get("hostname"), str)
+            or not origin.get("hostname")
+            or not isinstance(origin.get("assigned_at_utc"), str)
+            or not origin.get("assigned_at_utc")
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"archived task origin assignment {point} is inconsistent."
+            )
+        if origin_mode == "serial":
+            if origin.get("worker_binding") is not None:
+                raise ReferenceMPIProvenanceError(
+                    f"serial task origin assignment {point} claims binding."
+                )
+        else:
+            normalized_origin_binding = _normalize_worker_binding(
+                origin.get("worker_binding"),
+                expected_rank=origin_rank,
+                name=f"task {point}.origin.worker_binding",
+            )
+            if (
+                dict(
+                    _mapping(
+                        origin.get("worker_binding"),
+                        name=f"task {point}.origin.worker_binding",
+                    )
+                )
+                != normalized_origin_binding
+                or normalized_origin_binding["hostname"]
+                != origin["hostname"]
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"task origin assignment {point} binding is inconsistent."
+                )
         sidecar = task["record"]
         payload = _strict_json_bytes(
             json_payloads[sidecar["archive_member"]],
@@ -1493,60 +2014,33 @@ def validate_reference_mpi_evidence(
         task_execution = _mapping(
             payload.get("execution"), name=f"task {point}.execution"
         )
-        task_threads = _mapping(
+        _strict_thread_environment(
             task_execution.get("thread_environment"),
             name=f"task {point}.execution.thread_environment",
         )
         hdf5 = task["hdf5"]
         if (
-            set(payload)
-            != {
-                "schema_name",
-                "schema_version",
-                "campaign_sha256",
-                "grid_point_grg",
-                "status",
-                "disposition",
-                "artifact",
-                "scientific",
-                "execution",
-                "runtime",
-            }
-            or set(scientific)
-            != {
-                "grid_point_grg",
-                "grid_point_bzg",
-                "bands",
-                "n_qpoints",
-                "n_bands",
-                "gamma_shape",
-                "target_frequency_shape",
-                "common_reference_sha256",
-            }
-            or set(task_execution)
-            != {
-                "rank",
-                "hostname",
-                "started_at_utc",
-                "completed_at_utc",
-                "wall_seconds",
-                "thread_environment",
-            }
+            set(payload) != _TASK_RECORD_KEYS
+            or set(artifact) != _TASK_ARTIFACT_KEYS
+            or set(scientific) != _TASK_SCIENTIFIC_KEYS
+            or set(task_execution) != _TASK_EXECUTION_KEYS
             or not isinstance(task_execution.get("hostname"), str)
             or not task_execution.get("hostname")
-            or any(
-                task_threads.get(name) != "1" for name in _THREAD_NAMES
-            )
-            or
-            payload.get("schema_name") != _TASK_SCHEMA
+            or payload.get("schema_name") != _TASK_SCHEMA
             or payload.get("schema_version") != 1
             or payload.get("campaign_sha256") != campaign_sha256
             or payload.get("grid_point_grg") != point
             or payload.get("status") != "complete"
             or payload.get("disposition")
-            not in {
-                "computed",
-                "adopted_after_interrupted_record_publication",
+            not in (
+                _AUTHENTICATED_COMPUTE_DISPOSITIONS
+                | {_ADOPTED_DISPOSITION}
+            )
+            or payload.get("origin_assignment")
+            != {
+                "relative_path": origin_member["archive_member"],
+                "size_bytes": origin_member["size_bytes"],
+                "sha256": origin_member["sha256"],
             }
             or artifact.get("name") != Path(hdf5["archive_member"]).name
             or artifact.get("size_bytes") != hdf5["size_bytes"]
@@ -1555,6 +2049,10 @@ def validate_reference_mpi_evidence(
             or scientific.get("bands") != bands
             or scientific.get("n_qpoints") != expected_n_qpoints
             or scientific.get("n_bands") != expected_n_bands
+            or task_execution.get("rank") != origin_rank
+            or task_execution.get("hostname") != origin["hostname"]
+            or task_execution.get("started_at_utc")
+            != origin["assigned_at_utc"]
         ):
             raise ReferenceMPIProvenanceError(
                 f"archived task record {point} is inconsistent."
@@ -1563,6 +2061,7 @@ def validate_reference_mpi_evidence(
         task["runtime"] = dict(runtime)
         task["task_execution"] = dict(task_execution)
         task["disposition"] = payload["disposition"]
+        task["origin"] = dict(origin)
 
     resumed_counts: dict[str, int] = {}
     resumed_execution_ids: list[str] = []
@@ -1571,11 +2070,123 @@ def validate_reference_mpi_evidence(
     tasks_by_point = {
         int(task["grid_point_grg"]): task for task in tasks
     }
+    origin_assignments_by_execution: dict[
+        str,
+        list[dict[str, Any]],
+    ] = {}
+    for point, task in tasks_by_point.items():
+        origin = _mapping(task["origin"], name=f"task {point}.origin")
+        disposition = task.get("disposition")
+        if require_mpi and disposition == _ADOPTED_DISPOSITION:
+            raise ReferenceMPIProvenanceError(
+                f"task {point} is an adopted legacy artifact and does not "
+                "prove fresh worker-MPI computation."
+            )
+        if require_mpi and (
+            origin.get("mode") != "mpi"
+            or not isinstance(origin.get("rank"), int)
+            or isinstance(origin.get("rank"), bool)
+            or int(origin["rank"]) <= 0
+            or not isinstance(origin.get("communicator_size"), int)
+            or isinstance(origin.get("communicator_size"), bool)
+            or int(origin["communicator_size"]) < 2
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"task {point} lacks fresh worker-MPI origin."
+            )
+        if (
+            origin.get("mode") == "mpi"
+            and disposition in _AUTHENTICATED_COMPUTE_DISPOSITIONS
+        ):
+            numerically_generated_points.add(point)
+            origin_assignments_by_execution.setdefault(
+                str(origin["execution_id"]),
+                [],
+            ).append(
+                {
+                    "grid_point_grg": point,
+                    "rank": int(origin["rank"]),
+                    "status": "computed",
+                    "worker_binding": origin["worker_binding"],
+                }
+            )
+    for execution_id, origin_assignments in (
+        origin_assignments_by_execution.items()
+    ):
+        sizes = {
+            int(tasks_by_point[int(item["grid_point_grg"])]["origin"][
+                "communicator_size"
+            ])
+            for item in origin_assignments
+        }
+        if len(sizes) != 1:
+            raise ReferenceMPIProvenanceError(
+                f"origin execution {execution_id!r} communicator changed."
+            )
+        worker_bindings_by_execution[execution_id] = (
+            _execution_worker_bindings(
+                origin_assignments,
+                communicator_size=next(iter(sizes)),
+                execution_id=execution_id,
+            )
+        )
     for execution in executions:
         execution_id = str(execution["execution_id"])
         payload = _strict_json_bytes(
             json_payloads[execution["record"]["archive_member"]],
             name=f"archived execution {execution_id}",
+        )
+        execution_python = _mapping(
+            payload.get("python"),
+            name=f"execution {execution_id!r}.python",
+        )
+        _strict_thread_environment(
+            payload.get("thread_environment"),
+            name=f"execution {execution_id!r}.thread_environment",
+        )
+        if (
+            set(payload) != _EXECUTION_RECORD_KEYS
+            or set(execution_python) != _EXECUTION_PYTHON_KEYS
+            or not isinstance(execution_python.get("version"), str)
+            or not execution_python.get("version")
+            or not isinstance(execution_python.get("executable"), str)
+            or not execution_python.get("executable")
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"archived execution {execution_id!r} has an ambiguous schema."
+            )
+        cleanup_member = execution["scratch_cleanup"]
+        cleanup = _strict_json_bytes(
+            json_payloads[cleanup_member["archive_member"]],
+            name=f"archived scratch cleanup {execution_id}",
+        )
+        if (
+            set(cleanup) != _SCRATCH_CLEANUP_KEYS
+            or cleanup.get("schema_name")
+            != _SCRATCH_CLEANUP_SCHEMA
+            or cleanup.get("schema_version")
+            != REFERENCE_MPI_ORCHESTRATION_VERSION
+            or cleanup.get("campaign_sha256") != campaign_sha256
+            or cleanup.get("execution_id") != execution_id
+            or cleanup.get("status") != "complete"
+            or not isinstance(cleanup.get("removed"), list)
+            or cleanup.get("scratch_empty_after_cleanup") is not True
+            or payload.get("scratch_cleanup")
+            != {
+                "name": Path(
+                    cleanup_member["archive_member"]
+                ).name,
+                "size_bytes": cleanup_member["size_bytes"],
+                "sha256": cleanup_member["sha256"],
+            }
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"execution {execution_id!r} scratch cleanup is inconsistent."
+            )
+        _strict_scratch_cleanup_removed(
+            cleanup["removed"],
+            execution_id=execution_id,
+            final_output_name=final_output_name,
         )
         assignments = payload.get("assignments")
         if not isinstance(assignments, list):
@@ -1589,10 +2200,54 @@ def validate_reference_mpi_evidence(
             assignment = _mapping(
                 item, name=f"execution {execution_id!r} assignment"
             )
+            status = assignment.get("status")
+            if status == "resumed":
+                expected_assignment_keys = _RESUMED_ASSIGNMENT_KEYS
+            elif status in {"computed", "adopted"}:
+                expected_assignment_keys = (
+                    _SERIAL_NUMERICAL_ASSIGNMENT_KEYS
+                    if size == 1
+                    else _MPI_NUMERICAL_ASSIGNMENT_KEYS
+                )
+            else:
+                expected_assignment_keys = frozenset()
+            wall_seconds = assignment.get("wall_seconds")
+            if (
+                set(assignment) != expected_assignment_keys
+                or isinstance(wall_seconds, bool)
+                or not isinstance(wall_seconds, (int, float))
+                or not math.isfinite(float(wall_seconds))
+                or float(wall_seconds) < 0.0
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} assignment has an "
+                    "ambiguous schema."
+                )
             assignment_points.append(assignment.get("grid_point_grg"))
-            statuses.append(assignment.get("status"))
+            statuses.append(status)
             rank = assignment.get("rank")
             point = assignment.get("grid_point_grg")
+            if (
+                isinstance(point, int)
+                and not isinstance(point, bool)
+                and point in tasks_by_point
+                and assignment.get("origin_assignment")
+                != {
+                    "relative_path": tasks_by_point[point][
+                        "origin_assignment"
+                    ]["archive_member"],
+                    "size_bytes": tasks_by_point[point][
+                        "origin_assignment"
+                    ]["size_bytes"],
+                    "sha256": tasks_by_point[point][
+                        "origin_assignment"
+                    ]["sha256"],
+                }
+            ):
+                raise ReferenceMPIProvenanceError(
+                    f"execution {execution_id!r} task {point} origin differs "
+                    "from archived provenance."
+                )
             if rank is not None and (
                 not isinstance(rank, int)
                 or isinstance(rank, bool)
@@ -1649,6 +2304,16 @@ def validate_reference_mpi_evidence(
                     or task_execution.get("rank") != rank
                     or task_execution.get("hostname")
                     != worker_binding.get("hostname")
+                    or tasks_by_point[point]["origin"].get(
+                        "execution_id"
+                    )
+                    != execution_id
+                    or tasks_by_point[point]["origin"].get("rank")
+                    != rank
+                    or tasks_by_point[point]["origin"].get(
+                        "communicator_size"
+                    )
+                    != size
                 ):
                     raise ReferenceMPIProvenanceError(
                         f"execution {execution_id!r} fresh task {point} lineage "
@@ -1692,10 +2357,6 @@ def validate_reference_mpi_evidence(
             )
         else:
             worker_binding_evidence = {}
-        threads = _mapping(
-            payload.get("thread_environment"),
-            name=f"execution {execution_id!r}.thread_environment",
-        )
         if (
             payload.get("schema_name") != _EXECUTION_SCHEMA
             or payload.get("schema_version")
@@ -1726,26 +2387,25 @@ def validate_reference_mpi_evidence(
             != computed
             or payload.get("exact_checkpoint_resume") is not bool(resumed)
             or payload.get("complete") is not True
-            or any(threads.get(name) != "1" for name in _THREAD_NAMES)
         ):
             raise ReferenceMPIProvenanceError(
                 f"archived execution {execution_id!r} is inconsistent."
             )
         resumed_counts[execution_id] = len(resumed)
-        worker_bindings_by_execution[execution_id] = worker_binding_evidence
-        numerically_generated_points.update(
-            int(point)
-            for point, status in zip(
-                assignment_points,
-                statuses,
-                strict=True,
+        previous_binding = worker_bindings_by_execution.get(execution_id)
+        if (
+            previous_binding is not None
+            and previous_binding != worker_binding_evidence
+        ):
+            raise ReferenceMPIProvenanceError(
+                f"execution {execution_id!r} worker binding differs from "
+                "durable task origins."
             )
-            if status == "computed"
-        )
+        worker_bindings_by_execution[execution_id] = worker_binding_evidence
         if resumed:
             resumed_execution_ids.append(execution_id)
 
-    if numerically_generated_points != set(grid_points):
+    if require_mpi and numerically_generated_points != set(grid_points):
         raise ReferenceMPIProvenanceError(
             "archived executions do not prove a fresh, bound MPI computation "
             "of every target q-point."

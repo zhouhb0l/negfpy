@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import importlib
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -666,6 +667,171 @@ def test_invalid_orphan_artifact_is_rejected_without_overwrite(
     assert captured.value.report is not None
 
 
+def test_durable_origin_cannot_authenticate_an_orphan_adoption() -> None:
+    adopted = replace(
+        _assignment(
+            "q0",
+            rank=1,
+            logical_cpus=(1, 45),
+            physical_core=(0, 1),
+        ),
+        resumed=True,
+        orphan_artifact_adopted=True,
+        origin_execution_id="killed-two-rank",
+        origin_assignment_relative_path="q0.assignment.json",
+        origin_assignment_sha256=_sha("d"),
+    )
+    selected = MPIExecutionReport(
+        execution_id="restart-four-rank",
+        manifest_sha256=_sha("c"),
+        mode="mpi",
+        communicator_size=4,
+        coordinator_hostname="worker",
+        started_utc="2026-01-01T00:00:02Z",
+        finished_utc="2026-01-01T00:00:03Z",
+        elapsed_seconds=1.0,
+        thread_limit=1,
+        assignments=(adopted,),
+        missing_task_ids=(),
+        infrastructure_errors=(),
+    )
+    durable = {
+        "q0": {
+            "task_id": "q0",
+            "execution_id": "killed-two-rank",
+            "mode": "mpi",
+            "rank": 1,
+            "communicator_size": 3,
+            "hostname": "worker",
+            "relative_path": "q0.assignment.json",
+            "sha256": _sha("d"),
+        }
+    }
+
+    with pytest.raises(TaskManifestError, match="origin lineage"):
+        task_execution_mpi_origin_lineage_evidence(
+            selected,
+            (selected,),
+            require_mpi_origin=True,
+            durable_origin_assignments=durable,
+        )
+
+
+def test_executor_rejects_symlinked_owned_child_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / ".sentinel.not-a-private-temp"
+    sentinel.write_bytes(b"preserve")
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "task-artifacts").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(TaskManifestError, match="symlink"):
+        execute_task_manifest(
+            _manifest(("safe",)),
+            _worker,
+            run,
+            comm=serial_task_communicator(),
+            execution_id="safe-child-check",
+        )
+    assert sentinel.read_bytes() == b"preserve"
+    assert not (run / mpi_tasks._EXECUTION_LEASE_NAME).exists()  # noqa: SLF001
+
+
+def test_immutable_records_and_checkpoint_loaders_reject_link_aliases(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(("one",))
+    manifest_path = write_task_manifest(
+        tmp_path / "task-manifest.json",
+        manifest,
+    )
+    alias = tmp_path / "manifest-alias.json"
+    os.link(manifest_path, alias)
+    with pytest.raises(TaskManifestError, match="single-link"):
+        load_task_manifest(manifest_path)
+    with pytest.raises(TaskManifestError, match="single-link"):
+        write_task_manifest(manifest_path, manifest)
+
+    run = tmp_path / "run"
+    execute_task_manifest(
+        manifest,
+        _worker,
+        run,
+        comm=serial_task_communicator(),
+        artifact_validator=_validator,
+        execution_id="checkpoint-link-fixture",
+    )
+    checkpoint = task_checkpoint_path(
+        manifest,
+        "one",
+        run / "task-outcomes",
+    )
+    os.link(checkpoint, tmp_path / "checkpoint-alias.json")
+    with pytest.raises(TaskCheckpointCorruptionError, match="single-link"):
+        load_task_checkpoint(
+            checkpoint,
+            manifest=manifest,
+            artifact_root=run / "task-artifacts",
+            artifact_validator=_validator,
+        )
+
+
+def test_execution_lease_fails_fast_and_stale_unlocked_inode_resumes(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    lease = mpi_tasks._acquire_execution_lease(run)  # noqa: SLF001
+    try:
+        with pytest.raises(TaskExecutionError, match="already owns"):
+            execute_task_manifest(
+                _manifest(("one",)),
+                _worker,
+                run,
+                comm=serial_task_communicator(),
+                execution_id="concurrent-attempt",
+            )
+    finally:
+        mpi_tasks._release_execution_lease(lease)  # noqa: SLF001
+
+    stale = run / mpi_tasks._EXECUTION_LEASE_NAME  # noqa: SLF001
+    stale.touch()
+    report = execute_task_manifest(
+        _manifest(("one",)),
+        _worker,
+        run,
+        comm=serial_task_communicator(),
+        artifact_validator=_validator,
+        execution_id="stale-lease-resume",
+    )
+    assert report is not None and report.complete
+    assert not stale.exists()
+
+
+@pytest.mark.parametrize(
+    "execution_id",
+    ("bad:id", ".leading-dot", "x" * 65, "contains space"),
+)
+def test_execution_id_uses_one_canonical_filename_grammar(
+    tmp_path: Path,
+    execution_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="must match"):
+        execute_task_manifest(
+            _manifest(("one",)),
+            _worker,
+            tmp_path / "run",
+            comm=serial_task_communicator(),
+            execution_id=execution_id,
+        )
+    assert not (tmp_path / "run").exists()
+
+
 def test_physical_core_evidence_accepts_smt_siblings_on_one_core() -> None:
     assignments = (
         _assignment(
@@ -878,6 +1044,67 @@ def test_mpi_origin_lineage_accepts_completed_task_from_partial_attempt() -> Non
         "q0": "partial-two-rank",
         "q1": "resume-four-rank",
     }
+
+
+def test_mpi_origin_lineage_accepts_authenticated_hard_interruption_only() -> None:
+    resumed_assignment = replace(
+        _assignment(
+            "q0",
+            rank=1,
+            logical_cpus=(1, 45),
+            physical_core=(0, 1),
+        ),
+        resumed=True,
+        origin_execution_id="killed-two-rank",
+        origin_assignment_relative_path="q0.assignment.json",
+        origin_assignment_sha256=_sha("d"),
+    )
+    selected = MPIExecutionReport(
+        execution_id="restart-four-rank",
+        manifest_sha256=_sha("c"),
+        mode="mpi",
+        communicator_size=4,
+        coordinator_hostname="worker",
+        started_utc="2026-01-01T00:00:02Z",
+        finished_utc="2026-01-01T00:00:03Z",
+        elapsed_seconds=1.0,
+        thread_limit=1,
+        assignments=(resumed_assignment,),
+        missing_task_ids=(),
+        infrastructure_errors=(),
+    )
+    durable = {
+        "q0": {
+            "task_id": "q0",
+            "execution_id": "killed-two-rank",
+            "mode": "mpi",
+            "rank": 1,
+            "communicator_size": 3,
+            "hostname": "worker",
+            "relative_path": "q0.assignment.json",
+            "sha256": _sha("d"),
+        }
+    }
+
+    evidence = task_execution_mpi_origin_lineage_evidence(
+        selected,
+        (selected,),
+        require_mpi_origin=True,
+        durable_origin_assignments=durable,
+    )
+    assert evidence["lineage"][0]["origin_execution_id"] == (
+        "killed-two-rank"
+    )
+
+    with pytest.raises(TaskManifestError, match="origin lineage"):
+        task_execution_mpi_origin_lineage_evidence(
+            selected,
+            (selected,),
+            require_mpi_origin=True,
+            durable_origin_assignments={
+                "q0": {**durable["q0"], "sha256": _sha("e")}
+            },
+        )
 
 
 def test_physical_core_evidence_scopes_reused_rank_by_origin_execution() -> None:

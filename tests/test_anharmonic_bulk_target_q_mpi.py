@@ -590,6 +590,8 @@ def test_real_mpi_target_q_execution_and_changed_count_restart(
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
         }
     )
     source_root = Path(__file__).resolve().parents[1] / "src"

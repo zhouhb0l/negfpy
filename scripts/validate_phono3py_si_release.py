@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from negfpy.anharmonic.silicon_oracle_validation import (
     write_json_atomic_exclusive,
@@ -27,15 +27,15 @@ def _parser() -> argparse.ArgumentParser:
             "then emit the immutable NEGFPy 0.2.0 release decision."
         )
     )
-    parser.add_argument(
-        "--external-oracle-report", required=True, type=Path
-    )
-    parser.add_argument(
-        "--equality-3x3-summary", required=True, type=Path
-    )
-    parser.add_argument(
-        "--equality-5x5-summary", required=True, type=Path
-    )
+    parser.add_argument("--external-oracle-report", required=True, type=Path)
+    parser.add_argument("--equality-3x3-summary", required=True, type=Path)
+    parser.add_argument("--equality-5x5-summary", required=True, type=Path)
+    parser.add_argument("--v3-3x3-manifest", required=True, type=Path)
+    parser.add_argument("--v3-3x3-orchestration", required=True, type=Path)
+    parser.add_argument("--v3-3x3-run-directory", required=True, type=Path)
+    parser.add_argument("--v3-5x5-manifest", required=True, type=Path)
+    parser.add_argument("--v3-5x5-orchestration", required=True, type=Path)
+    parser.add_argument("--v3-5x5-run-directory", required=True, type=Path)
     parser.add_argument("--repository", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     return parser
@@ -48,11 +48,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             external_oracle_report_path=arguments.external_oracle_report,
             equality_3x3_summary_path=arguments.equality_3x3_summary,
             equality_5x5_summary_path=arguments.equality_5x5_summary,
+            v3_3x3_manifest_path=arguments.v3_3x3_manifest,
+            v3_3x3_orchestration_path=arguments.v3_3x3_orchestration,
+            v3_3x3_run_directory_path=arguments.v3_3x3_run_directory,
+            v3_5x5_manifest_path=arguments.v3_5x5_manifest,
+            v3_5x5_orchestration_path=arguments.v3_5x5_orchestration,
+            v3_5x5_run_directory_path=arguments.v3_5x5_run_directory,
             repository_path=arguments.repository,
             output_path=arguments.output,
         )
         report = run_silicon_release_validation(config)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - publish every validation failure.
         error_report = {
             "schema": SILICON_RELEASE_REPORT_SCHEMA,
             "schema_version": 1,
@@ -68,12 +74,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "external_oracle_report": str(
                     arguments.external_oracle_report
                 ),
-                "equality_3x3_summary": str(
-                    arguments.equality_3x3_summary
-                ),
-                "equality_5x5_summary": str(
-                    arguments.equality_5x5_summary
-                ),
+                "equality_3x3_summary": str(arguments.equality_3x3_summary),
+                "equality_5x5_summary": str(arguments.equality_5x5_summary),
+                "v3_3x3_manifest": str(arguments.v3_3x3_manifest),
+                "v3_3x3_orchestration": str(arguments.v3_3x3_orchestration),
+                "v3_3x3_run_directory": str(arguments.v3_3x3_run_directory),
+                "v3_5x5_manifest": str(arguments.v3_5x5_manifest),
+                "v3_5x5_orchestration": str(arguments.v3_5x5_orchestration),
+                "v3_5x5_run_directory": str(arguments.v3_5x5_run_directory),
                 "repository": str(arguments.repository),
             },
         }
@@ -81,15 +89,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             digest = write_json_atomic_exclusive(
                 arguments.output, error_report
             )
-        except Exception as publication_error:
+        except Exception as publication_error:  # noqa: BLE001
             print(
                 json.dumps(
                     {
                         "status": "error",
                         "error": str(exc),
-                        "report_publication_error": (
-                            str(publication_error)
-                        ),
+                        "report_publication_error": (str(publication_error)),
                     },
                     sort_keys=True,
                 ),
@@ -117,9 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "status": report["status"],
                 "validation_passed": report["validation_passed"],
-                "certification_eligible": (
-                    report["certification_eligible"]
-                ),
+                "certification_eligible": (report["certification_eligible"]),
                 "release_certified": report["release_certified"],
                 "release_version": report["release_version"],
                 "output": artifact["path"],

@@ -40,6 +40,8 @@ def _run_mpi(
             "OPENBLAS_NUM_THREADS": "1",
             "MKL_NUM_THREADS": "1",
             "NUMEXPR_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
             "PYTHONPATH": str(_ROOT / "src"),
         }
     )

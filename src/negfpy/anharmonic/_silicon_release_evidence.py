@@ -6,7 +6,8 @@ same-process replacement, but they cannot survive a checksum-preserving copy
 to another workstation.  This private module creates a separate, canonical
 logical archive manifest whose durable identity consists only of:
 
-* normalized paths relative to one recorded artifact root;
+* normalized paths relative to one recorded artifact root, plus exact
+  bundle-local paths declared by generated inventory schemas;
 * exact regular-file membership;
 * file sizes and SHA256 digests; and
 * the identity and certification decision of the final aggregate report.
@@ -16,6 +17,9 @@ self-referential inventory.  Verification accepts a relocated artifact root
 and remaps absolute file records embedded in strict JSON reports from the
 recorded root to that relocated root.  Device numbers, inodes, mtimes, and
 absolute current-machine paths never participate in the portable decision.
+Normalized input-manifest ``source.files`` records are validated source
+expectations, not declarations that those upstream files belong to the sealed
+artifact tree.
 
 External path records require a separate explicit staging operation.  Their
 verified bytes are copied into a content-addressed subtree, and an immutable
@@ -62,6 +66,22 @@ _EXTERNAL_ALIAS_FILENAME = "aliases.json"
 _HANDOFF_CHECKSUM_FILENAME = "SHA256SUMS"
 _HANDOFF_MANIFEST_FILENAME = "portable-manifest.json"
 _HANDOFF_RELEASE_REPORT_FILENAME = "silicon-release-report.json"
+_BUNDLE_INVENTORY_FILENAMES = frozenset(
+    {"force-constants-inventory.json", "inventory.json"}
+)
+_BUNDLE_INVENTORY_ROOT_KEYS = frozenset(
+    {"schema_version", "generated_at_utc", "artifacts"}
+)
+_NORMALIZED_INPUT_MANIFEST_FILENAME = "input-manifest.normalized.json"
+_NORMALIZED_INPUT_MANIFEST_ROOT_KEYS = frozenset(
+    {
+        "schema_version",
+        "dataset_id",
+        "versions",
+        "source",
+        "input_manifest_sha256",
+    }
+)
 
 
 class SiliconReleaseEvidenceError(RuntimeError):
@@ -187,6 +207,12 @@ class _FileSnapshot:
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _JsonPathSemantics:
+    bundle_relative_record_ids: frozenset[int] = frozenset()
+    source_expectation_record_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +561,236 @@ def _inventory_mapping(
     )
 
 
-def _record_relative_path(
+def _require_exact_keys(
+    value: Mapping[str, Any],
+    *,
+    expected: frozenset[str],
+    name: str,
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise SiliconReleaseEvidenceError(
+            f"{name} has an incomplete or ambiguous schema; "
+            f"missing={sorted(expected - actual)!r}, "
+            f"extra={sorted(actual - expected)!r}."
+        )
+
+
+def _bundle_inventory_semantics(
+    value: Any,
+    *,
+    name: str,
+) -> _JsonPathSemantics:
+    if not isinstance(value, Mapping):
+        raise SiliconReleaseEvidenceError(f"{name} must be a JSON object.")
+    _require_exact_keys(
+        value,
+        expected=_BUNDLE_INVENTORY_ROOT_KEYS,
+        name=name,
+    )
+    if (
+        isinstance(value["schema_version"], bool)
+        or value["schema_version"] != 1
+    ):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.schema_version must equal 1."
+        )
+    generated = value["generated_at_utc"]
+    if not isinstance(generated, str) or not generated.strip():
+        raise SiliconReleaseEvidenceError(
+            f"{name}.generated_at_utc must be nonempty text."
+        )
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        raise SiliconReleaseEvidenceError(
+            f"{name}.artifacts must be a nonempty array."
+        )
+    record_ids: set[int] = set()
+    observed_paths: set[str] = set()
+    expected_record_keys = frozenset(
+        {"path", "size_bytes", "sha256", "media_type"}
+    )
+    for index, record in enumerate(artifacts):
+        location = f"{name}.artifacts[{index}]"
+        if not isinstance(record, Mapping):
+            raise SiliconReleaseEvidenceError(
+                f"{location} must be a JSON object."
+            )
+        _require_exact_keys(
+            record,
+            expected=expected_record_keys,
+            name=location,
+        )
+        relative = _safe_relative_posix(
+            record["path"],
+            name=f"{location}.path",
+        )
+        if len(PurePosixPath(relative).parts) != 1:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.path must name one file in its declaring bundle."
+            )
+        if relative in observed_paths:
+            raise SiliconReleaseEvidenceError(
+                f"{name} contains duplicate artifact path {relative!r}."
+            )
+        observed_paths.add(relative)
+        _require_sha256(
+            record["sha256"],
+            name=f"{location}.sha256",
+        )
+        size = record["size_bytes"]
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.size_bytes is invalid."
+            )
+        media_type = record["media_type"]
+        if not isinstance(media_type, str) or not media_type.strip():
+            raise SiliconReleaseEvidenceError(
+                f"{location}.media_type must be nonempty text."
+            )
+        record_ids.add(id(record))
+    return _JsonPathSemantics(
+        bundle_relative_record_ids=frozenset(record_ids)
+    )
+
+
+def _normalized_input_manifest_semantics(
+    value: Any,
+    *,
+    name: str,
+) -> _JsonPathSemantics:
+    if not isinstance(value, Mapping):
+        raise SiliconReleaseEvidenceError(f"{name} must be a JSON object.")
+    _require_exact_keys(
+        value,
+        expected=_NORMALIZED_INPUT_MANIFEST_ROOT_KEYS,
+        name=name,
+    )
+    if (
+        isinstance(value["schema_version"], bool)
+        or value["schema_version"] != 1
+    ):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.schema_version must equal 1."
+        )
+    dataset_id = value["dataset_id"]
+    if not isinstance(dataset_id, str) or not dataset_id.strip():
+        raise SiliconReleaseEvidenceError(
+            f"{name}.dataset_id must be nonempty text."
+        )
+    versions = value["versions"]
+    if not isinstance(versions, Mapping):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.versions must be a JSON object."
+        )
+    _require_exact_keys(
+        versions,
+        expected=frozenset({"phono3py", "phonopy"}),
+        name=f"{name}.versions",
+    )
+    for role, version in versions.items():
+        if not isinstance(version, str) or not version.strip():
+            raise SiliconReleaseEvidenceError(
+                f"{name}.versions.{role} must be nonempty text."
+            )
+    source = value["source"]
+    if not isinstance(source, Mapping):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.source must be a JSON object."
+        )
+    _require_exact_keys(
+        source,
+        expected=frozenset({"repository", "commit", "files"}),
+        name=f"{name}.source",
+    )
+    repository = source["repository"]
+    if not isinstance(repository, str) or not repository.strip():
+        raise SiliconReleaseEvidenceError(
+            f"{name}.source.repository must be nonempty text."
+        )
+    commit = source["commit"]
+    if (
+        not isinstance(commit, str)
+        or len(commit) != 40
+        or any(character not in _SHA256_HEX for character in commit)
+    ):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.source.commit must be a lowercase 40-character Git hash."
+        )
+    files = source["files"]
+    if not isinstance(files, Mapping) or not files:
+        raise SiliconReleaseEvidenceError(
+            f"{name}.source.files must be a nonempty JSON object."
+        )
+    required_roles = {"phono3py_yaml", "forces_fc3"}
+    if not required_roles.issubset(files):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.source.files is missing required roles: "
+            f"{sorted(required_roles - set(files))!r}."
+        )
+    record_ids: set[int] = set()
+    observed_paths: set[str] = set()
+    for role, record in files.items():
+        location = f"{name}.source.files.{role}"
+        if not isinstance(role, str) or not role:
+            raise SiliconReleaseEvidenceError(
+                f"{name}.source.files contains an invalid role."
+            )
+        if not isinstance(record, Mapping):
+            raise SiliconReleaseEvidenceError(
+                f"{location} must be a JSON object."
+            )
+        _require_exact_keys(
+            record,
+            expected=frozenset({"path", "sha256"}),
+            name=location,
+        )
+        relative = _safe_relative_posix(
+            record["path"],
+            name=f"{location}.path",
+        )
+        if relative in observed_paths:
+            raise SiliconReleaseEvidenceError(
+                f"{name}.source.files contains duplicate source path "
+                f"{relative!r}."
+            )
+        observed_paths.add(relative)
+        _require_sha256(
+            record["sha256"],
+            name=f"{location}.sha256",
+        )
+        record_ids.add(id(record))
+    _require_sha256(
+        value["input_manifest_sha256"],
+        name=f"{name}.input_manifest_sha256",
+    )
+    return _JsonPathSemantics(
+        source_expectation_record_ids=frozenset(record_ids)
+    )
+
+
+def _json_path_semantics(
+    value: Any,
+    *,
+    relative_path: str,
+) -> _JsonPathSemantics:
+    filename = PurePosixPath(relative_path).name
+    name = f"JSON evidence {relative_path}"
+    keys = set(value) if isinstance(value, Mapping) else set()
+    if (
+        filename in _BUNDLE_INVENTORY_FILENAMES
+        or keys == _BUNDLE_INVENTORY_ROOT_KEYS
+    ):
+        return _bundle_inventory_semantics(value, name=name)
+    if (
+        filename == _NORMALIZED_INPUT_MANIFEST_FILENAME
+        or keys == _NORMALIZED_INPUT_MANIFEST_ROOT_KEYS
+    ):
+        return _normalized_input_manifest_semantics(value, name=name)
+    return _JsonPathSemantics()
+
+
+def _record_relative_path_candidates(
     value: Any,
     *,
     recorded_root: str,
@@ -543,7 +798,9 @@ def _record_relative_path(
     sha256: str,
     size_bytes: int | None,
     external_aliases: _ExternalAliasIndex | None,
-) -> str:
+    declaring_json_relative_path: str,
+    bundle_relative: bool,
+) -> tuple[str, ...]:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise SiliconReleaseEvidenceError(f"{name}.path must be nonempty path text.")
     candidate = PurePosixPath(value)
@@ -558,17 +815,30 @@ def _record_relative_path(
                     f"{name}.path lies outside the recorded artifact root "
                     "and no external alias manifest was bound."
                 )
-            return external_aliases.resolve(
-                source_path=source_path,
-                sha256=sha256,
-                size_bytes=size_bytes,
-                location=name,
+            return (
+                external_aliases.resolve(
+                    source_path=source_path,
+                    sha256=sha256,
+                    size_bytes=size_bytes,
+                    location=name,
+                ),
             )
-        return _safe_relative_posix(
-            relative.as_posix(),
-            name=f"{name}.path",
+        return (
+            _safe_relative_posix(
+                relative.as_posix(),
+                name=f"{name}.path",
+            ),
         )
-    return _safe_relative_posix(value, name=f"{name}.path")
+    root_relative = _safe_relative_posix(value, name=f"{name}.path")
+    if not bundle_relative:
+        return (root_relative,)
+    declaring_parent = PurePosixPath(declaring_json_relative_path).parent
+    return (
+        _safe_relative_posix(
+            (declaring_parent / root_relative).as_posix(),
+            name=f"{name}.declaring_bundle_path",
+        ),
+    )
 
 
 def _audit_path_records(
@@ -578,9 +848,13 @@ def _audit_path_records(
     inventory: Mapping[str, _FileSnapshot],
     location: str,
     external_aliases: _ExternalAliasIndex | None,
+    declaring_json_relative_path: str,
+    semantics: _JsonPathSemantics,
 ) -> int:
     count = 0
     if isinstance(value, Mapping):
+        if id(value) in semantics.source_expectation_record_ids:
+            return 0
         if "path" in value:
             if "sha256" not in value:
                 raise SiliconReleaseEvidenceError(
@@ -603,20 +877,31 @@ def _audit_path_records(
                         f"{location}.size_bytes is invalid."
                     )
                 size = raw_size
-            relative = _record_relative_path(
+            candidates = _record_relative_path_candidates(
                 value["path"],
                 recorded_root=recorded_root,
                 name=location,
                 sha256=digest,
                 size_bytes=size,
                 external_aliases=external_aliases,
+                declaring_json_relative_path=(
+                    declaring_json_relative_path
+                ),
+                bundle_relative=(
+                    id(value) in semantics.bundle_relative_record_ids
+                ),
             )
-            member = inventory.get(relative)
-            if member is None:
+            existing = [
+                candidate
+                for candidate in candidates
+                if candidate in inventory
+            ]
+            if not existing:
                 raise SiliconReleaseEvidenceError(
                     f"{location}.path is absent from the sealed inventory: "
-                    f"{relative}"
+                    f"{list(candidates)!r}"
                 )
+            member = inventory[existing[0]]
             if digest != member.sha256:
                 raise SiliconReleaseEvidenceError(
                     f"{location} SHA256 differs from the sealed member."
@@ -633,6 +918,10 @@ def _audit_path_records(
                 inventory=inventory,
                 location=f"{location}.{key}",
                 external_aliases=external_aliases,
+                declaring_json_relative_path=(
+                    declaring_json_relative_path
+                ),
+                semantics=semantics,
             )
         return count
     if isinstance(value, list):
@@ -643,6 +932,10 @@ def _audit_path_records(
                 inventory=inventory,
                 location=f"{location}[{index}]",
                 external_aliases=external_aliases,
+                declaring_json_relative_path=(
+                    declaring_json_relative_path
+                ),
+                semantics=semantics,
             )
     return count
 
@@ -735,6 +1028,10 @@ def _audit_artifact_contents(
                 snapshot.path,
                 name=f"JSON evidence {snapshot.relative_path}",
             )
+            semantics = _json_path_semantics(
+                value,
+                relative_path=snapshot.relative_path,
+            )
             json_count += 1
             path_record_count += _audit_path_records(
                 value,
@@ -742,6 +1039,8 @@ def _audit_artifact_contents(
                 inventory=inventory,
                 location=snapshot.relative_path,
                 external_aliases=external_aliases,
+                declaring_json_relative_path=snapshot.relative_path,
+                semantics=semantics,
             )
         if suffix in _HDF5_SUFFIXES:
             _audit_hdf5(
@@ -1075,9 +1374,12 @@ def _external_record_declarations(
     *,
     recorded_root: str,
     location: str,
+    source_expectation_record_ids: frozenset[int],
 ) -> tuple[tuple[str, str, int | None, str], ...]:
     declarations: list[tuple[str, str, int | None, str]] = []
     if isinstance(value, Mapping):
+        if id(value) in source_expectation_record_ids:
+            return ()
         if "path" in value:
             if "sha256" not in value:
                 raise SiliconReleaseEvidenceError(
@@ -1134,6 +1436,9 @@ def _external_record_declarations(
                     child,
                     recorded_root=recorded_root,
                     location=f"{location}.{key}",
+                    source_expectation_record_ids=(
+                        source_expectation_record_ids
+                    ),
                 )
             )
     elif isinstance(value, list):
@@ -1143,6 +1448,9 @@ def _external_record_declarations(
                     child,
                     recorded_root=recorded_root,
                     location=f"{location}[{index}]",
+                    source_expectation_record_ids=(
+                        source_expectation_record_ids
+                    ),
                 )
             )
     return tuple(declarations)
@@ -1219,11 +1527,18 @@ def _discover_external_sources(
             document_path,
             name=f"JSON evidence {location}",
         )
+        semantics = _json_path_semantics(
+            value,
+            relative_path=document_path.name,
+        )
         for source_path, digest, size, record_location in (
             _external_record_declarations(
                 value,
                 recorded_root=recorded_root,
                 location=location,
+                source_expectation_record_ids=(
+                    semantics.source_expectation_record_ids
+                ),
             )
         ):
             previous = declarations.get(source_path)
@@ -1837,6 +2152,15 @@ def _manifest_payload(
         "recorded_artifact_root": recorded_root,
         "path_semantics": {
             "inventory_paths": "relative_posix_from_artifact_root",
+            "embedded_relative_paths": (
+                "artifact_root_except_validated_inventory_declaring_bundle"
+            ),
+            "bundle_inventory_paths": (
+                "relative_posix_from_declaring_json_directory"
+            ),
+            "normalized_source_file_paths": (
+                "source_repository_expectation_metadata"
+            ),
             "embedded_absolute_paths": (
                 "resolve_recorded_root_or_bound_external_alias"
                 if alias_enabled
@@ -2040,6 +2364,15 @@ def _validate_manifest_payload(
     )
     expected_semantics = {
         "inventory_paths": "relative_posix_from_artifact_root",
+        "embedded_relative_paths": (
+            "artifact_root_except_validated_inventory_declaring_bundle"
+        ),
+        "bundle_inventory_paths": (
+            "relative_posix_from_declaring_json_directory"
+        ),
+        "normalized_source_file_paths": (
+            "source_repository_expectation_metadata"
+        ),
         "embedded_absolute_paths": (
             "resolve_recorded_root_or_bound_external_alias"
             if alias_enabled

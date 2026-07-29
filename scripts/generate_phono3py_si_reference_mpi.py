@@ -19,23 +19,30 @@ different MPI worker count.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import hashlib
 import json
 import math
 import os
 import platform
+import re
+import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
 import traceback
+import unicodedata
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
 
 try:
     from scripts import generate_phono3py_si_reference as serial
@@ -43,12 +50,79 @@ except ModuleNotFoundError:  # Direct ``python scripts/...`` execution.
     import generate_phono3py_si_reference as serial  # type: ignore[no-redef]
 
 
-MPI_REFERENCE_SCHEMA_VERSION = 2
+MPI_REFERENCE_SCHEMA_VERSION = 3
 MPI_MANIFEST_FILENAME = "reference-mpi-manifest.json"
 MPI_ORCHESTRATION_FILENAME = "reference-mpi-orchestration.json"
 MPI_EVIDENCE_ARCHIVE_FILENAME = "reference-mpi-evidence.tar"
 _TASK_SCHEMA_NAME = "negfpy_phono3py_si_reference_mpi_task"
 _TASK_SCHEMA_VERSION = 1
+_ORIGIN_ASSIGNMENT_SCHEMA = (
+    "negfpy_phono3py_si_reference_mpi_origin_assignment"
+)
+_ORIGIN_ASSIGNMENT_SUFFIX = ".assignment.json"
+_SCRATCH_CLEANUP_SCHEMA = (
+    "negfpy_phono3py_si_reference_mpi_scratch_cleanup"
+)
+_SCRATCH_DIRECTORY_PATTERN = re.compile(
+    r"^\.target-grg-[0-9]{8}-rank[0-9]+-[A-Za-z0-9_-]+$"
+)
+_CAMPAIGN_EXECUTION_LOCK_FILENAME = "campaign-execution.lock"
+_PRIVATE_TEMPORARY_PATTERN = re.compile(
+    r"^\.(?P<target>.+)\.(?:[a-z0-9_]{8}|[0-9a-f]{32})\.tmp$"
+)
+_PRIVATE_TEMPORARY_TARGETS = {
+    ".": re.compile(r"^reference-mpi-manifest\.json$"),
+    "tasks": re.compile(r"^target-grg-[0-9]{8}\.json$"),
+    "assignments": re.compile(
+        r"^target-grg-[0-9]{8}\.[A-Za-z0-9._-]{1,64}"
+        r"\.assignment\.json$"
+    ),
+    "failures": re.compile(r"^target-grg-[0-9]{8}\.json$"),
+    "executions": re.compile(r"^[A-Za-z0-9._-]{1,64}\.json$"),
+    "scratch-cleanups": re.compile(r"^[A-Za-z0-9._-]{1,64}\.json$"),
+}
+_EXECUTION_RECORD_KEYS = {
+    "schema_name",
+    "schema_version",
+    "execution_id",
+    "campaign_sha256",
+    "started_at_utc",
+    "completed_at_utc",
+    "wall_seconds",
+    "communicator_size",
+    "coordinator_rank",
+    "rank_zero_numerical_tasks",
+    "floating_point_mpi_reductions",
+    "worker_binding_policy",
+    "worker_binding_evidence",
+    "canonical_assignment_order",
+    "task_grid_points_grg",
+    "assignment_grid_points_grg",
+    "resumed_grid_points_grg",
+    "computed_or_adopted_grid_points_grg",
+    "exact_checkpoint_resume",
+    "hostname",
+    "python",
+    "thread_environment",
+    "scratch_cleanup",
+    "assignments",
+    "complete",
+}
+_COMPUTED_ASSIGNMENT_KEYS = {
+    "grid_point_grg",
+    "rank",
+    "status",
+    "wall_seconds",
+    "artifact",
+    "origin_assignment",
+}
+_RESUMED_ASSIGNMENT_KEYS = {
+    "grid_point_grg",
+    "rank",
+    "status",
+    "wall_seconds",
+    "origin_assignment",
+}
 _TASK_PREFIX = "target-grg-"
 _TASK_SUFFIX = ".hdf5"
 _TASK_RECORD_SUFFIX = ".json"
@@ -57,6 +131,8 @@ _THREAD_NAMES = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
 _SHA256_HEX = frozenset("0123456789abcdef")
 
@@ -103,13 +179,39 @@ def _canonical_json_bytes(value: Any) -> bytes:
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
+            allow_nan=False,
         )
         + "\n"
     ).encode("utf-8")
 
 
 def _pretty_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _validate_final_output_name(value: Any, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or PurePosixPath(value).name != value
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise ReferenceMPIError(
+            f"{name} must be a single safe basename without separators or "
+            "control characters."
+        )
+    return value
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -140,6 +242,670 @@ def _regular_file(path: Path, *, name: str) -> Path:
     return path
 
 
+def _regular_single_link_file(path: Path, *, name: str) -> Path:
+    """Require an immutable evidence file with no alternate hard-link name."""
+
+    try:
+        details = os.lstat(path)
+    except OSError as exc:
+        raise ReferenceMPIError(
+            f"{name} must be a regular, single-link non-symlink file."
+        ) from exc
+    if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+        raise ReferenceMPIError(
+            f"{name} must be a regular, single-link non-symlink file."
+        )
+    return path
+
+
+def _require_no_symlink_path_components(path: Path, *, name: str) -> Path:
+    """Reject every existing symlink component without resolving the path."""
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            details = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise ReferenceMPIError(
+                f"Unable to authenticate {name} path component {current}."
+            ) from exc
+        if stat.S_ISLNK(details.st_mode):
+            raise ReferenceMPIError(
+                f"{name} path components must not be symbolic links: {current}."
+            )
+        if current != absolute and not stat.S_ISDIR(details.st_mode):
+            raise ReferenceMPIError(
+                f"{name} has a non-directory parent component: {current}."
+            )
+    return absolute
+
+
+def _open_directory_nofollow(path: Path, *, name: str) -> int:
+    absolute = _require_no_symlink_path_components(path, name=name)
+    required = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, flag) for flag in required):
+        raise ReferenceMPIError(
+            "Certified reference generation requires Linux no-follow "
+            "directory descriptors."
+        )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(absolute, flags)
+    except OSError as exc:
+        raise ReferenceMPIError(
+            f"{name} must be an existing non-symlink directory."
+        ) from exc
+    opened = os.fstat(descriptor)
+    try:
+        visible = os.lstat(absolute)
+    except OSError:
+        os.close(descriptor)
+        raise
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(visible.st_mode)
+        or (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino)
+    ):
+        os.close(descriptor)
+        raise ReferenceMPIError(f"{name} changed while it was opened.")
+    return descriptor
+
+
+def _verify_directory_descriptor(
+    path: Path,
+    descriptor: int,
+    *,
+    name: str,
+) -> None:
+    _require_no_symlink_path_components(path, name=name)
+    opened = os.fstat(descriptor)
+    try:
+        visible = os.lstat(path)
+    except OSError as exc:
+        raise ReferenceMPIError(f"{name} changed while in use.") from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(visible.st_mode)
+        or (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino)
+    ):
+        raise ReferenceMPIError(f"{name} changed while in use.")
+
+
+class _CampaignExecutionLock:
+    """Fail-fast advisory lock guarding one campaign's mutable run graph."""
+
+    def __init__(
+        self,
+        *,
+        run_dir: Path,
+        run_descriptor: int,
+        lock_descriptor: int,
+        run_identity: tuple[int, int],
+        lock_identity: tuple[int, int],
+    ) -> None:
+        self.run_dir = Path(os.path.abspath(os.fspath(run_dir)))
+        self._run_descriptor = run_descriptor
+        self._lock_descriptor = lock_descriptor
+        self._run_identity = run_identity
+        self._lock_identity = lock_identity
+        self._closed = False
+
+    @classmethod
+    def acquire(cls, run_dir: Path) -> _CampaignExecutionLock:
+        run_descriptor = _open_directory_nofollow(
+            run_dir,
+            name="run_dir",
+        )
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            os.close(run_descriptor)
+            raise ReferenceMPIError(
+                "Certified campaign locking requires Linux O_NOFOLLOW."
+            )
+        flags |= os.O_NOFOLLOW
+        try:
+            lock_descriptor = os.open(
+                _CAMPAIGN_EXECUTION_LOCK_FILENAME,
+                flags,
+                0o600,
+                dir_fd=run_descriptor,
+            )
+        except OSError as exc:
+            os.close(run_descriptor)
+            raise ReferenceMPIError(
+                "Campaign execution lock must be a regular, single-link "
+                "non-symlink file."
+            ) from exc
+        try:
+            lock_details = os.fstat(lock_descriptor)
+            if (
+                not stat.S_ISREG(lock_details.st_mode)
+                or lock_details.st_nlink != 1
+            ):
+                raise ReferenceMPIError(
+                    "Campaign execution lock must be a regular, single-link "
+                    "non-symlink file."
+                )
+            try:
+                fcntl.flock(
+                    lock_descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise ReferenceMPIError(
+                        "Another campaign execution is already active."
+                    ) from exc
+                raise ReferenceMPIError(
+                    "Campaign execution lock acquisition failed."
+                ) from exc
+            run_details = os.fstat(run_descriptor)
+            result = cls(
+                run_dir=run_dir,
+                run_descriptor=run_descriptor,
+                lock_descriptor=lock_descriptor,
+                run_identity=(run_details.st_dev, run_details.st_ino),
+                lock_identity=(lock_details.st_dev, lock_details.st_ino),
+            )
+            result.verify()
+            return result
+        except Exception:
+            os.close(lock_descriptor)
+            os.close(run_descriptor)
+            raise
+
+    @property
+    def run_descriptor(self) -> int:
+        self.verify()
+        return self._run_descriptor
+
+    def verify(self) -> None:
+        if self._closed:
+            raise ReferenceMPIError("Campaign execution lock is closed.")
+        _require_no_symlink_path_components(self.run_dir, name="run_dir")
+        run_details = os.fstat(self._run_descriptor)
+        lock_details = os.fstat(self._lock_descriptor)
+        try:
+            visible_run = os.lstat(self.run_dir)
+            visible_lock = os.stat(
+                _CAMPAIGN_EXECUTION_LOCK_FILENAME,
+                dir_fd=self._run_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise ReferenceMPIError(
+                "Campaign execution lock path changed while held."
+            ) from exc
+        if (
+            not stat.S_ISDIR(visible_run.st_mode)
+            or (visible_run.st_dev, visible_run.st_ino) != self._run_identity
+            or (run_details.st_dev, run_details.st_ino) != self._run_identity
+            or not stat.S_ISREG(lock_details.st_mode)
+            or lock_details.st_nlink != 1
+            or not stat.S_ISREG(visible_lock.st_mode)
+            or visible_lock.st_nlink != 1
+            or (lock_details.st_dev, lock_details.st_ino)
+            != self._lock_identity
+            or (visible_lock.st_dev, visible_lock.st_ino)
+            != self._lock_identity
+        ):
+            raise ReferenceMPIError(
+                "Campaign execution lock or run directory changed while held."
+            )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            fcntl.flock(self._lock_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._lock_descriptor)
+            os.close(self._run_descriptor)
+            self._closed = True
+
+    def __enter__(self) -> _CampaignExecutionLock:  # noqa: PYI034
+        self.verify()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+def _private_temporary_target(scope: str, name: str) -> str | None:
+    pattern = _PRIVATE_TEMPORARY_TARGETS.get(scope)
+    match = _PRIVATE_TEMPORARY_PATTERN.fullmatch(name)
+    if pattern is None or match is None:
+        return None
+    target = str(match.group("target"))
+    if pattern.fullmatch(target) is None:
+        return None
+    if scope in {"executions", "scratch-cleanups"}:
+        identifier = target.removesuffix(".json")
+        if identifier in {"", ".", ".."}:
+            return None
+    return target
+
+
+def _open_owned_run_subdirectory(
+    lock: _CampaignExecutionLock,
+    scope: str,
+) -> int:
+    lock.verify()
+    if scope == ".":
+        return os.dup(lock.run_descriptor)
+    if scope not in _PRIVATE_TEMPORARY_TARGETS:
+        raise ReferenceMPIError(f"Unknown owned run directory {scope!r}.")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(
+            scope,
+            flags,
+            dir_fd=lock.run_descriptor,
+        )
+        visible = os.stat(
+            scope,
+            dir_fd=lock.run_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise ReferenceMPIError(
+            f"Owned run directory {scope!r} is unavailable or unsafe."
+        ) from exc
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(visible.st_mode)
+        or not stat.S_ISDIR(opened.st_mode)
+        or (visible.st_dev, visible.st_ino)
+        != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(descriptor)
+        raise ReferenceMPIError(
+            f"Owned run directory {scope!r} changed while opened."
+        )
+    return descriptor
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    while True:
+        block = os.read(descriptor, 1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def _cleanup_private_atomic_temporaries(
+    lock: _CampaignExecutionLock,
+    *,
+    scopes: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Remove only exact generator-owned atomic-publication residues."""
+
+    removed: list[dict[str, Any]] = []
+    for scope in scopes:
+        descriptor = _open_owned_run_subdirectory(lock, scope)
+        files: list[dict[str, Any]] = []
+        try:
+            for entry in sorted(
+                os.scandir(descriptor),
+                key=lambda item: item.name,
+            ):
+                target = _private_temporary_target(scope, entry.name)
+                looks_private = entry.name.startswith(".") and entry.name.endswith(
+                    ".tmp"
+                )
+                if target is None:
+                    if looks_private:
+                        raise ReferenceMPIError(
+                            "Suspicious atomic-publication residue in "
+                            f"{scope!r}: {entry.name!r}."
+                        )
+                    continue
+                details = entry.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(details.st_mode)
+                    or details.st_nlink != 1
+                ):
+                    raise ReferenceMPIError(
+                        "Atomic-publication residue must be a regular, "
+                        f"single-link non-symlink file: {scope}/{entry.name}."
+                    )
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                temporary_descriptor = os.open(
+                    entry.name,
+                    flags,
+                    dir_fd=descriptor,
+                )
+                try:
+                    opened = os.fstat(temporary_descriptor)
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or opened.st_nlink != 1
+                        or (opened.st_dev, opened.st_ino)
+                        != (details.st_dev, details.st_ino)
+                    ):
+                        raise ReferenceMPIError(
+                            "Atomic-publication residue changed during cleanup."
+                        )
+                    files.append(
+                        {
+                            "relative_path": entry.name,
+                            "size_bytes": opened.st_size,
+                            "sha256": _sha256_descriptor(
+                                temporary_descriptor
+                            ),
+                        }
+                    )
+                finally:
+                    os.close(temporary_descriptor)
+                current = os.stat(
+                    entry.name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or current.st_nlink != 1
+                    or (current.st_dev, current.st_ino)
+                    != (details.st_dev, details.st_ino)
+                ):
+                    raise ReferenceMPIError(
+                        "Atomic-publication residue changed before unlink."
+                    )
+                os.unlink(entry.name, dir_fd=descriptor)
+            if files:
+                removed.append({"directory": scope, "files": files})
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    lock.verify()
+    return removed
+
+
+def _inspect_scratch_tree(
+    descriptor: int,
+    *,
+    prefix: Path = Path(),
+    require_single_link_files: bool = False,
+) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for entry in sorted(os.scandir(descriptor), key=lambda item: item.name):
+        details = entry.stat(follow_symlinks=False)
+        relative = prefix / entry.name
+        if stat.S_ISLNK(details.st_mode):
+            raise ReferenceMPIError(
+                f"Unsafe symbolic link in worker scratch: {relative}."
+            )
+        if stat.S_ISDIR(details.st_mode):
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            child_descriptor = os.open(
+                entry.name,
+                flags,
+                dir_fd=descriptor,
+            )
+            try:
+                opened = os.fstat(child_descriptor)
+                if (opened.st_dev, opened.st_ino) != (
+                    details.st_dev,
+                    details.st_ino,
+                ):
+                    raise ReferenceMPIError(
+                        "Worker scratch directory changed during inspection."
+                    )
+                files.extend(
+                    _inspect_scratch_tree(
+                        child_descriptor,
+                        prefix=relative,
+                        require_single_link_files=require_single_link_files,
+                    )
+                )
+            finally:
+                os.close(child_descriptor)
+            continue
+        if not stat.S_ISREG(details.st_mode):
+            raise ReferenceMPIError(
+                f"Unsafe non-regular worker scratch entry: {relative}."
+            )
+        if require_single_link_files and details.st_nlink != 1:
+            raise ReferenceMPIError(
+                f"Unsafe hard-linked owned cleanup entry: {relative}."
+            )
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        child_descriptor = os.open(entry.name, flags, dir_fd=descriptor)
+        try:
+            opened = os.fstat(child_descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (
+                    require_single_link_files
+                    and opened.st_nlink != 1
+                )
+                or (opened.st_dev, opened.st_ino)
+                != (details.st_dev, details.st_ino)
+            ):
+                raise ReferenceMPIError(
+                    "Worker scratch file changed during inspection."
+                )
+            files.append(
+                {
+                    "relative_path": relative.as_posix(),
+                    "size_bytes": opened.st_size,
+                    "sha256": _sha256_descriptor(child_descriptor),
+                }
+            )
+        finally:
+            os.close(child_descriptor)
+    return files
+
+
+def _final_staging_pattern(campaign: PreparedCampaign) -> re.Pattern[str]:
+    final_output_name = _authenticated_final_output_name(campaign)
+    return re.compile(
+        rf"^\.{re.escape(final_output_name)}\."
+        r"[0-9a-f]{32}\.tmp$"
+    )
+
+
+def _final_staging_evidence_directory(
+    campaign: PreparedCampaign,
+    staging_name: str,
+) -> str | None:
+    if _final_staging_pattern(campaign).fullmatch(staging_name) is None:
+        return None
+    return f"output-parent/{staging_name}"
+
+
+def _cleanup_abandoned_final_staging(
+    campaign: PreparedCampaign,
+    lock: _CampaignExecutionLock,
+) -> list[dict[str, Any]]:
+    """Remove only canonical abandoned staging owned by this output target."""
+
+    lock.verify()
+    final_output_name = _authenticated_final_output_name(campaign)
+    parent = _require_no_symlink_path_components(
+        campaign.output_dir.parent,
+        name="output_dir parent",
+    )
+    if not parent.exists():
+        return []
+    parent_descriptor = _open_directory_nofollow(
+        parent,
+        name="output_dir parent",
+    )
+    pattern = _final_staging_pattern(campaign)
+    prefix = f".{final_output_name}."
+    removed: list[dict[str, Any]] = []
+    identities: list[tuple[str, tuple[int, int]]] = []
+    try:
+        for entry in sorted(
+            os.scandir(parent_descriptor),
+            key=lambda item: item.name,
+        ):
+            canonical = pattern.fullmatch(entry.name) is not None
+            looks_owned = (
+                entry.name.startswith(prefix)
+                and entry.name.endswith(".tmp")
+            )
+            if not canonical:
+                if looks_owned:
+                    raise ReferenceMPIError(
+                        "Suspicious abandoned final-staging near-match: "
+                        f"{entry.name!r}."
+                    )
+                continue
+            details = entry.stat(follow_symlinks=False)
+            if not stat.S_ISDIR(details.st_mode):
+                raise ReferenceMPIError(
+                    "Abandoned final staging must be a non-symlink directory: "
+                    f"{entry.name!r}."
+                )
+            flags = (
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            )
+            descriptor = os.open(
+                entry.name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                opened = os.fstat(descriptor)
+                identity = (opened.st_dev, opened.st_ino)
+                if identity != (details.st_dev, details.st_ino):
+                    raise ReferenceMPIError(
+                        "Abandoned final staging changed during preflight."
+                    )
+                files = _inspect_scratch_tree(
+                    descriptor,
+                    require_single_link_files=True,
+                )
+            finally:
+                os.close(descriptor)
+            evidence_directory = _final_staging_evidence_directory(
+                campaign,
+                entry.name,
+            )
+            assert evidence_directory is not None
+            removed.append(
+                {"directory": evidence_directory, "files": files}
+            )
+            identities.append((entry.name, identity))
+        for name, identity in identities:
+            _remove_directory_tree_at(
+                parent_descriptor,
+                name,
+                expected_identity=identity,
+            )
+        os.fsync(parent_descriptor)
+        _verify_directory_descriptor(
+            parent,
+            parent_descriptor,
+            name="output_dir parent",
+        )
+    finally:
+        os.close(parent_descriptor)
+    lock.verify()
+    return removed
+
+
+def _remove_directory_tree_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Unlink one owned directory tree without following path components."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != expected_identity:
+            raise ReferenceMPIError(
+                "Owned directory changed before recursive cleanup."
+            )
+        for entry in list(os.scandir(descriptor)):
+            details = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(details.st_mode):
+                _remove_directory_tree_at(
+                    descriptor,
+                    entry.name,
+                    expected_identity=(details.st_dev, details.st_ino),
+                )
+            else:
+                os.unlink(entry.name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        raise ReferenceMPIError(
+            "Owned directory changed before final removal."
+        )
+    os.rmdir(name, dir_fd=parent_descriptor)
+
+
+def _remove_owned_worker_scratch(
+    run_dir: Path,
+    scratch: Path,
+    *,
+    expected_identity: tuple[int, int],
+) -> None:
+    if _SCRATCH_DIRECTORY_PATTERN.fullmatch(scratch.name) is None:
+        raise ReferenceMPIError("Refusing to remove noncanonical worker scratch.")
+    run_descriptor = _open_directory_nofollow(run_dir, name="run_dir")
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        scratch_root_descriptor = os.open(
+            "scratch",
+            flags,
+            dir_fd=run_descriptor,
+        )
+        try:
+            try:
+                current = os.stat(
+                    scratch.name,
+                    dir_fd=scratch_root_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise ReferenceMPIError(
+                    "Worker scratch path changed before final cleanup."
+                )
+            _remove_directory_tree_at(
+                scratch_root_descriptor,
+                scratch.name,
+                expected_identity=expected_identity,
+            )
+            os.fsync(scratch_root_descriptor)
+        finally:
+            os.close(scratch_root_descriptor)
+    finally:
+        os.close(run_descriptor)
+
+
+def _validate_thread_environment(value: Any, *, name: str) -> dict[str, str]:
+    expected = {thread_name: "1" for thread_name in _THREAD_NAMES}
+    if not isinstance(value, Mapping) or dict(value) != expected:
+        raise ReferenceMPIError(
+            f"{name} must contain exactly the six pinned thread controls."
+        )
+    return expected
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -165,10 +931,17 @@ def _write_json_exclusive(path: Path, value: Any) -> None:
 
 def _read_json_object(path: Path, *, name: str) -> dict[str, Any]:
     _regular_file(path, name=name)
+
+    def reject_nonfinite(value: str) -> Any:
+        raise ReferenceMPIError(
+            f"{name} contains nonfinite JSON value {value!r}."
+        )
+
     try:
         value = json.loads(
             path.read_text(encoding="utf-8"),
             object_pairs_hook=serial._reject_duplicate_keys,
+            parse_constant=reject_nonfinite,
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReferenceMPIError(f"{name} is not strict UTF-8 JSON.") from exc
@@ -525,8 +1298,12 @@ class CampaignIdentity:
     sha256: str
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "CampaignIdentity":
+    def from_payload(cls, payload: Mapping[str, Any]) -> CampaignIdentity:
         normalized = dict(payload)
+        _validate_final_output_name(
+            normalized.get("final_output_name"),
+            name="campaign.final_output_name",
+        )
         return cls(
             payload=normalized,
             sha256=_sha256_bytes(_canonical_json_bytes(normalized)),
@@ -547,6 +1324,23 @@ class PreparedCampaign:
     output_dir: Path
 
 
+def _authenticated_final_output_name(campaign: PreparedCampaign) -> str:
+    authenticated = _validate_final_output_name(
+        campaign.identity.payload.get("final_output_name"),
+        name="campaign.final_output_name",
+    )
+    visible = _validate_final_output_name(
+        campaign.output_dir.name,
+        name="output_dir.name",
+    )
+    if visible != authenticated:
+        raise ReferenceMPIError(
+            "output_dir basename does not match authenticated "
+            "campaign.final_output_name."
+        )
+    return authenticated
+
+
 def _manifest_document(identity: CampaignIdentity) -> dict[str, Any]:
     return {
         "schema_name": "negfpy_phono3py_si_reference_mpi_manifest",
@@ -561,13 +1355,29 @@ def _initialize_run_directory(
     *,
     identity: CampaignIdentity,
 ) -> None:
+    run_dir = _require_no_symlink_path_components(
+        run_dir,
+        name="run_dir",
+    )
     document = _manifest_document(identity)
-    if run_dir.exists():
-        if run_dir.is_symlink() or not run_dir.is_dir():
-            raise ReferenceMPIError("run_dir must be a non-symlink directory.")
+    if run_dir.exists() and not run_dir.is_dir():
+        raise ReferenceMPIError("run_dir must be a non-symlink directory.")
+    if not run_dir.exists():
+        run_dir.mkdir(parents=True)
+        _require_no_symlink_path_components(run_dir, name="run_dir")
+    with _CampaignExecutionLock.acquire(run_dir) as execution_lock:
         manifest_path = run_dir / MPI_MANIFEST_FILENAME
         if not manifest_path.exists():
-            if any(run_dir.iterdir()):
+            _cleanup_private_atomic_temporaries(
+                execution_lock,
+                scopes=(".",),
+            )
+            non_lock_entries = {
+                item.name
+                for item in run_dir.iterdir()
+                if item.name != _CAMPAIGN_EXECUTION_LOCK_FILENAME
+            }
+            if non_lock_entries:
                 raise ReferenceMPIError(
                     "Existing run_dir lacks the immutable campaign manifest."
                 )
@@ -579,26 +1389,55 @@ def _initialize_run_directory(
             raise ReferenceMPIError(
                 "Existing run_dir belongs to a different campaign."
             )
-    else:
-        run_dir.mkdir(parents=True)
-        _write_json_exclusive(run_dir / MPI_MANIFEST_FILENAME, document)
-    allowed = {
-        MPI_MANIFEST_FILENAME,
-        "tasks",
-        "failures",
-        "executions",
-        "scratch",
-    }
-    unknown = {item.name for item in run_dir.iterdir()} - allowed
-    if unknown:
-        raise ReferenceMPIError(
-            f"run_dir contains unknown entries: {sorted(unknown)!r}."
-        )
-    for name in ("tasks", "failures", "executions", "scratch"):
-        path = run_dir / name
-        if path.exists() and (path.is_symlink() or not path.is_dir()):
-            raise ReferenceMPIError(f"run_dir/{name} has an invalid type.")
-        path.mkdir(exist_ok=True)
+        allowed = {
+            MPI_MANIFEST_FILENAME,
+            _CAMPAIGN_EXECUTION_LOCK_FILENAME,
+            "tasks",
+            "assignments",
+            "failures",
+            "executions",
+            "scratch",
+            "scratch-cleanups",
+        }
+        entries = {item.name for item in run_dir.iterdir()}
+        suspicious = {
+            name
+            for name in entries
+            if name.startswith(".")
+            and name.endswith(".tmp")
+            and _private_temporary_target(".", name) is None
+        }
+        if suspicious:
+            raise ReferenceMPIError(
+                "run_dir contains suspicious atomic-publication residues: "
+                f"{sorted(suspicious)!r}."
+            )
+        unknown = {
+            name
+            for name in entries - allowed
+            if _private_temporary_target(".", name) is None
+        }
+        if unknown:
+            raise ReferenceMPIError(
+                f"run_dir contains unknown entries: {sorted(unknown)!r}."
+            )
+        for name in (
+            "tasks",
+            "assignments",
+            "failures",
+            "executions",
+            "scratch",
+            "scratch-cleanups",
+        ):
+            path = run_dir / name
+            try:
+                details = os.lstat(path)
+            except FileNotFoundError:
+                path.mkdir()
+                details = os.lstat(path)
+            if not stat.S_ISDIR(details.st_mode):
+                raise ReferenceMPIError(f"run_dir/{name} has an invalid type.")
+        execution_lock.verify()
 
 
 def prepare_campaign(
@@ -615,6 +1454,18 @@ def prepare_campaign(
 ) -> PreparedCampaign:
     """Authenticate inputs and create or resume an immutable run graph."""
 
+    run_dir = _require_no_symlink_path_components(
+        run_dir,
+        name="run_dir",
+    )
+    output_dir = _require_no_symlink_path_components(
+        output_dir,
+        name="output_dir",
+    )
+    final_output_name = _validate_final_output_name(
+        output_dir.name,
+        name="output_dir.name",
+    )
     if not isinstance(config, serial.GeneratorConfig):
         raise TypeError("config must be the serial GeneratorConfig type.")
     if config.force_constants_only or config.mesh is None:
@@ -680,6 +1531,7 @@ def prepare_campaign(
         "runtime_environment": environment,
         "thread_environment": _require_threads_one(),
         "task_grid_points_grg": list(config.grid_points),
+        "final_output_name": final_output_name,
     }
     identity = CampaignIdentity.from_payload(payload)
     _initialize_run_directory(run_dir, identity=identity)
@@ -706,6 +1558,402 @@ def _task_paths(run_dir: Path, grid_point: int) -> tuple[Path, Path, Path]:
         run_dir / "tasks" / f"{stem}{_TASK_RECORD_SUFFIX}",
         run_dir / "failures" / f"{stem}{_TASK_RECORD_SUFFIX}",
     )
+
+
+def _origin_assignment_path(
+    run_dir: Path,
+    grid_point: int,
+    execution_id: str,
+) -> Path:
+    _execution_path(run_dir, execution_id)
+    return (
+        run_dir
+        / "assignments"
+        / (
+            f"{_task_stem(grid_point)}.{execution_id}"
+            f"{_ORIGIN_ASSIGNMENT_SUFFIX}"
+        )
+    )
+
+
+def _origin_assignment_identity(
+    run_dir: Path,
+    path: Path,
+) -> dict[str, Any]:
+    relative = path.resolve().relative_to(run_dir.resolve()).as_posix()
+    return {
+        "relative_path": relative,
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256_file(path),
+    }
+
+
+def _publish_origin_assignment(
+    campaign: PreparedCampaign,
+    grid_point: int,
+    *,
+    execution_id: str,
+    rank: int,
+    communicator_size: int,
+    worker_binding: Mapping[str, Any] | None,
+) -> tuple[Path, dict[str, Any]]:
+    """Publish immutable task provenance before numerical work begins."""
+
+    mode = "serial" if communicator_size == 1 else "mpi"
+    if (
+        isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or isinstance(communicator_size, bool)
+        or not isinstance(communicator_size, int)
+        or communicator_size <= 0
+        or rank < 0
+        or rank >= communicator_size
+        or (mode == "serial" and rank != 0)
+        or (mode == "mpi" and rank == 0)
+    ):
+        raise ReferenceMPIError(
+            "Origin assignment rank and communicator are invalid."
+        )
+    normalized_binding: dict[str, Any] | None
+    if mode == "serial":
+        if worker_binding is not None:
+            raise ReferenceMPIError(
+                "Serial origin assignment cannot claim MPI core binding."
+            )
+        normalized_binding = None
+    else:
+        normalized_binding = _normalize_worker_binding(
+            worker_binding,
+            expected_rank=rank,
+            name="pre-work origin assignment worker_binding",
+        )
+    document = {
+        "schema_name": _ORIGIN_ASSIGNMENT_SCHEMA,
+        "schema_version": _TASK_SCHEMA_VERSION,
+        "campaign_sha256": campaign.identity.sha256,
+        "grid_point_grg": grid_point,
+        "execution_id": execution_id,
+        "status": "assigned_before_numerical_work",
+        "mode": mode,
+        "rank": rank,
+        "communicator_size": communicator_size,
+        "hostname": socket.gethostname(),
+        "assigned_at_utc": _utc_now(),
+        "worker_binding": normalized_binding,
+        "thread_environment": _require_threads_one(),
+    }
+    path = _origin_assignment_path(
+        campaign.run_dir,
+        grid_point,
+        execution_id,
+    )
+    _write_json_exclusive(path, document)
+    validated = _validate_origin_assignment(
+        path,
+        run_dir=campaign.run_dir,
+        campaign_sha256=campaign.identity.sha256,
+        grid_point=grid_point,
+    )
+    return path, validated
+
+
+def _validate_origin_assignment(
+    path: Path,
+    *,
+    run_dir: Path,
+    campaign_sha256: str,
+    grid_point: int,
+) -> dict[str, Any]:
+    document = _read_json_object(path, name="task origin assignment")
+    keys = {
+        "schema_name",
+        "schema_version",
+        "campaign_sha256",
+        "grid_point_grg",
+        "execution_id",
+        "status",
+        "mode",
+        "rank",
+        "communicator_size",
+        "hostname",
+        "assigned_at_utc",
+        "worker_binding",
+        "thread_environment",
+    }
+    execution_id = document.get("execution_id")
+    rank = document.get("rank")
+    size = document.get("communicator_size")
+    mode = document.get("mode")
+    if (
+        set(document) != keys
+        or document.get("schema_name") != _ORIGIN_ASSIGNMENT_SCHEMA
+        or document.get("schema_version") != _TASK_SCHEMA_VERSION
+        or document.get("campaign_sha256") != campaign_sha256
+        or document.get("grid_point_grg") != grid_point
+        or document.get("status") != "assigned_before_numerical_work"
+        or not isinstance(execution_id, str)
+        or not execution_id
+        or _origin_assignment_path(
+            run_dir,
+            grid_point,
+            execution_id,
+        )
+        != path
+        or mode not in {"serial", "mpi"}
+        or isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size <= 0
+        or rank < 0
+        or rank >= size
+        or (mode == "serial" and (size != 1 or rank != 0))
+        or (mode == "mpi" and (size < 2 or rank == 0))
+        or not isinstance(document.get("hostname"), str)
+        or not document.get("hostname")
+        or not isinstance(document.get("assigned_at_utc"), str)
+        or not document.get("assigned_at_utc")
+    ):
+        raise ReferenceMPIError(
+            f"Origin assignment for GRG {grid_point} is inconsistent."
+        )
+    _validate_thread_environment(
+        document.get("thread_environment"),
+        name=f"Origin assignment for GRG {grid_point}.thread_environment",
+    )
+    if mode == "serial":
+        if document.get("worker_binding") is not None:
+            raise ReferenceMPIError(
+                "Serial origin assignment claims worker binding."
+            )
+    else:
+        normalized = _normalize_worker_binding(
+            document.get("worker_binding"),
+            expected_rank=rank,
+            name=f"origin assignment for GRG {grid_point}",
+        )
+        if document.get("worker_binding") != normalized:
+            raise ReferenceMPIError(
+                "Origin assignment worker binding is noncanonical."
+            )
+        if normalized["hostname"] != document["hostname"]:
+            raise ReferenceMPIError(
+                "Origin assignment hostname differs from worker binding."
+            )
+    return document
+
+
+def _cleanup_interrupted_scratch(
+    campaign: PreparedCampaign,
+    *,
+    execution_id: str,
+    execution_lock: _CampaignExecutionLock | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Remove only validated disposable worker scratch and record the action."""
+
+    _execution_path(campaign.run_dir, execution_id)
+    owned_lock = execution_lock
+    acquired_here = owned_lock is None
+    if owned_lock is None:
+        owned_lock = _CampaignExecutionLock.acquire(campaign.run_dir)
+    try:
+        owned_lock.verify()
+        private_removed = _cleanup_private_atomic_temporaries(
+            owned_lock,
+            scopes=tuple(_PRIVATE_TEMPORARY_TARGETS),
+        )
+        staging_removed = _cleanup_abandoned_final_staging(
+            campaign,
+            owned_lock,
+        )
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        scratch_descriptor = os.open(
+            "scratch",
+            flags,
+            dir_fd=owned_lock.run_descriptor,
+        )
+        removed: list[dict[str, Any]] = []
+        directory_identities: list[tuple[str, tuple[int, int]]] = []
+        try:
+            for entry in sorted(
+                os.scandir(scratch_descriptor),
+                key=lambda item: item.name,
+            ):
+                details = entry.stat(follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(details.st_mode)
+                    or _SCRATCH_DIRECTORY_PATTERN.fullmatch(entry.name) is None
+                ):
+                    raise ReferenceMPIError(
+                        f"Suspicious worker scratch residue: {entry.name!r}."
+                    )
+                child_descriptor = os.open(
+                    entry.name,
+                    flags,
+                    dir_fd=scratch_descriptor,
+                )
+                try:
+                    opened = os.fstat(child_descriptor)
+                    identity = (opened.st_dev, opened.st_ino)
+                    if identity != (details.st_dev, details.st_ino):
+                        raise ReferenceMPIError(
+                            "Worker scratch changed during cleanup preflight."
+                        )
+                    files = _inspect_scratch_tree(child_descriptor)
+                finally:
+                    os.close(child_descriptor)
+                removed.append({"directory": entry.name, "files": files})
+                directory_identities.append((entry.name, identity))
+            for name, identity in directory_identities:
+                _remove_directory_tree_at(
+                    scratch_descriptor,
+                    name,
+                    expected_identity=identity,
+                )
+            if any(os.scandir(scratch_descriptor)):
+                raise ReferenceMPIError(
+                    "Worker scratch cleanup was incomplete."
+                )
+            os.fsync(scratch_descriptor)
+        finally:
+            os.close(scratch_descriptor)
+        removed.extend(private_removed)
+        removed.extend(staging_removed)
+        document = {
+            "schema_name": _SCRATCH_CLEANUP_SCHEMA,
+            "schema_version": MPI_REFERENCE_SCHEMA_VERSION,
+            "campaign_sha256": campaign.identity.sha256,
+            "execution_id": execution_id,
+            "status": "complete",
+            "removed": removed,
+            "scratch_empty_after_cleanup": True,
+            "completed_at_utc": _utc_now(),
+        }
+        path = (
+            campaign.run_dir
+            / "scratch-cleanups"
+            / f"{execution_id}.json"
+        )
+        _write_json_exclusive(path, document)
+        owned_lock.verify()
+        return path, document
+    finally:
+        if acquired_here:
+            owned_lock.close()
+
+
+def _validate_scratch_cleanup_record(
+    campaign: PreparedCampaign,
+    identity: Any,
+    *,
+    execution_id: str,
+) -> tuple[Path, dict[str, Any]]:
+    _authenticated_final_output_name(campaign)
+    if not isinstance(identity, Mapping):
+        raise ReferenceMPIError("Execution lacks scratch-cleanup identity.")
+    path = campaign.run_dir / "scratch-cleanups" / f"{execution_id}.json"
+    _regular_single_link_file(path, name="scratch-cleanup record")
+    if (
+        _file_identity(path) != dict(identity)
+    ):
+        raise ReferenceMPIError("Scratch-cleanup record changed.")
+    document = _read_json_object(path, name="scratch cleanup")
+    if (
+        set(document)
+        != {
+            "schema_name",
+            "schema_version",
+            "campaign_sha256",
+            "execution_id",
+            "status",
+            "removed",
+            "scratch_empty_after_cleanup",
+            "completed_at_utc",
+        }
+        or document.get("schema_name") != _SCRATCH_CLEANUP_SCHEMA
+        or document.get("schema_version")
+        != MPI_REFERENCE_SCHEMA_VERSION
+        or document.get("campaign_sha256") != campaign.identity.sha256
+        or document.get("execution_id") != execution_id
+        or document.get("status") != "complete"
+        or not isinstance(document.get("removed"), list)
+        or document.get("scratch_empty_after_cleanup") is not True
+        or not isinstance(document.get("completed_at_utc"), str)
+        or not document.get("completed_at_utc")
+    ):
+        raise ReferenceMPIError("Scratch-cleanup record is inconsistent.")
+    seen_directories: set[str] = set()
+    for ordinal, item in enumerate(document["removed"]):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"directory", "files"}
+            or not isinstance(item.get("directory"), str)
+            or not isinstance(item.get("files"), list)
+        ):
+            raise ReferenceMPIError(
+                f"Scratch-cleanup removed[{ordinal}] has an ambiguous schema."
+            )
+        directory = str(item["directory"])
+        staging_name = (
+            directory.removeprefix("output-parent/")
+            if directory.startswith("output-parent/")
+            else ""
+        )
+        valid_staging_directory = (
+            bool(staging_name)
+            and _final_staging_evidence_directory(
+                campaign,
+                staging_name,
+            )
+            == directory
+        )
+        if (
+            directory in seen_directories
+            or (
+                _SCRATCH_DIRECTORY_PATTERN.fullmatch(directory) is None
+                and directory not in _PRIVATE_TEMPORARY_TARGETS
+                and not valid_staging_directory
+            )
+        ):
+            raise ReferenceMPIError(
+                f"Scratch-cleanup removed[{ordinal}] has an invalid directory."
+            )
+        seen_directories.add(directory)
+        seen_files: set[str] = set()
+        for file_ordinal, value in enumerate(item["files"]):
+            if (
+                not isinstance(value, Mapping)
+                or set(value) != {"relative_path", "size_bytes", "sha256"}
+                or not isinstance(value.get("relative_path"), str)
+                or not value.get("relative_path")
+                or Path(str(value["relative_path"])).is_absolute()
+                or ".." in Path(str(value["relative_path"])).parts
+                or str(value["relative_path"]) in seen_files
+                or isinstance(value.get("size_bytes"), bool)
+                or not isinstance(value.get("size_bytes"), int)
+                or int(value["size_bytes"]) < 0
+            ):
+                raise ReferenceMPIError(
+                    "Scratch-cleanup file identity has an ambiguous schema at "
+                    f"removed[{ordinal}].files[{file_ordinal}]."
+                )
+            relative_path = str(value["relative_path"])
+            _require_sha256(
+                value.get("sha256"),
+                name=(
+                    "scratch-cleanup "
+                    f"removed[{ordinal}].files[{file_ordinal}].sha256"
+                ),
+            )
+            if (
+                directory in _PRIVATE_TEMPORARY_TARGETS
+                and _private_temporary_target(directory, relative_path) is None
+            ):
+                raise ReferenceMPIError(
+                    "Scratch-cleanup private temporary evidence is invalid."
+                )
+            seen_files.add(relative_path)
+    return path, document
 
 
 def _h5_attr_value(value: Any) -> Any:
@@ -896,6 +2144,52 @@ def _validate_task_hdf5(
             raise ReferenceMPIError("Task runtime metadata is invalid.") from exc
         if not isinstance(runtime, dict):
             raise ReferenceMPIError("Task runtime metadata must be an object.")
+        origin_text = h5.attrs.get(
+            "mpi_reference_origin_assignment_json",
+            "",
+        )
+        if not isinstance(origin_text, str):
+            raise ReferenceMPIError(
+                "Task HDF5 origin-assignment metadata is invalid."
+            )
+        if origin_text:
+            try:
+                origin_assignment = json.loads(
+                    origin_text,
+                    object_pairs_hook=serial._reject_duplicate_keys,
+                )
+            except json.JSONDecodeError as exc:
+                raise ReferenceMPIError(
+                    "Task HDF5 origin-assignment metadata is invalid."
+                ) from exc
+            if (
+                not isinstance(origin_assignment, dict)
+                or set(origin_assignment)
+                != {"relative_path", "size_bytes", "sha256"}
+                or not isinstance(
+                    origin_assignment.get("relative_path"), str
+                )
+                or Path(origin_assignment["relative_path"]).is_absolute()
+                or ".." in Path(origin_assignment["relative_path"]).parts
+                or isinstance(
+                    origin_assignment.get("size_bytes"), bool
+                )
+                or not isinstance(
+                    origin_assignment.get("size_bytes"), int
+                )
+                or origin_assignment["size_bytes"] <= 0
+                or not isinstance(origin_assignment.get("sha256"), str)
+                or len(origin_assignment["sha256"]) != 64
+                or any(
+                    character not in _SHA256_HEX
+                    for character in origin_assignment["sha256"]
+                )
+            ):
+                raise ReferenceMPIError(
+                    "Task HDF5 origin-assignment identity is invalid."
+                )
+        else:
+            origin_assignment = None
         return {
             "grid_point_grg": grid_point,
             "grid_point_bzg": int(bzg[0]),
@@ -906,6 +2200,7 @@ def _validate_task_hdf5(
             "target_frequency_shape": list(target_frequency_shape),
             "common_reference_sha256": _common_reference_digest(h5),
             "runtime": runtime,
+            "origin_assignment": origin_assignment,
         }
 
 
@@ -921,6 +2216,7 @@ def _task_record(
     completed_utc: str,
     wall_seconds: float | None,
     disposition: str,
+    origin_assignment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_name": "negfpy_phono3py_si_reference_mpi_task_record",
@@ -929,6 +2225,11 @@ def _task_record(
         "grid_point_grg": grid_point,
         "status": "complete",
         "disposition": disposition,
+        "origin_assignment": (
+            None
+            if origin_assignment is None
+            else dict(origin_assignment)
+        ),
         "artifact": _file_identity(hdf5_path),
         "scientific": {
             key: validation[key]
@@ -964,7 +2265,22 @@ def _validate_task_record(
     grid_point: int,
 ) -> dict[str, Any]:
     record = _read_json_object(record_path, name="task record")
+    expected_keys = {
+        "schema_name",
+        "schema_version",
+        "campaign_sha256",
+        "grid_point_grg",
+        "status",
+        "disposition",
+        "origin_assignment",
+        "artifact",
+        "scientific",
+        "execution",
+        "runtime",
+    }
     if (
+        set(record) != expected_keys
+        or
         record.get("schema_name")
         != "negfpy_phono3py_si_reference_mpi_task_record"
         or record.get("schema_version") != _TASK_SCHEMA_VERSION
@@ -1003,9 +2319,89 @@ def _validate_task_record(
             "common_reference_sha256",
         )
     }
-    if declared != expected or record.get("runtime") != validation["runtime"]:
+    if (
+        declared != expected
+        or record.get("runtime") != validation["runtime"]
+        or record.get("origin_assignment")
+        != validation["origin_assignment"]
+    ):
         raise ReferenceMPIError(
             f"Task record for GRG {grid_point} conflicts with HDF5 fields."
+        )
+    disposition = record.get("disposition")
+    task_execution = record.get("execution")
+    origin_identity = record.get("origin_assignment")
+    if (
+        not isinstance(task_execution, Mapping)
+        or set(task_execution)
+        != {
+            "rank",
+            "hostname",
+            "started_at_utc",
+            "completed_at_utc",
+            "wall_seconds",
+            "thread_environment",
+        }
+        or disposition
+        not in {
+            "computed",
+            "computed_after_interrupted_record_publication",
+            "adopted_after_interrupted_record_publication",
+        }
+    ):
+        raise ReferenceMPIError("Task record execution is invalid.")
+    _validate_thread_environment(
+        task_execution.get("thread_environment"),
+        name=f"Task record for GRG {grid_point}.execution.thread_environment",
+    )
+    if disposition in {
+        "computed",
+        "computed_after_interrupted_record_publication",
+    }:
+        if origin_identity is None:
+            return record
+        if (
+            not isinstance(origin_identity, Mapping)
+            or set(origin_identity)
+            != {"relative_path", "size_bytes", "sha256"}
+            or not isinstance(origin_identity.get("relative_path"), str)
+            or Path(origin_identity["relative_path"]).is_absolute()
+            or ".." in Path(origin_identity["relative_path"]).parts
+        ):
+            raise ReferenceMPIError(
+                f"Computed task GRG {grid_point} lacks origin assignment."
+            )
+        origin_path = campaign_path = record_path.parents[1]
+        origin_path = campaign_path / origin_identity["relative_path"]
+        if (
+            not origin_path.is_file()
+            or _origin_assignment_identity(campaign_path, origin_path)
+            != dict(origin_identity)
+        ):
+            raise ReferenceMPIError(
+                f"Task origin assignment for GRG {grid_point} changed."
+            )
+        origin = _validate_origin_assignment(
+            origin_path,
+            run_dir=campaign_path,
+            campaign_sha256=campaign_sha256,
+            grid_point=grid_point,
+        )
+        if (
+            task_execution.get("rank") != origin["rank"]
+            or task_execution.get("hostname") != origin["hostname"]
+            or task_execution.get("started_at_utc")
+            != origin["assigned_at_utc"]
+        ):
+            raise ReferenceMPIError(
+                f"Task GRG {grid_point} differs from its origin assignment."
+            )
+    elif (
+        disposition == "adopted_after_interrupted_record_publication"
+        and origin_identity is not None
+    ):
+        raise ReferenceMPIError(
+            f"Adopted task GRG {grid_point} claims computed origin."
         )
     return record
 
@@ -1050,6 +2446,43 @@ def _adopt_or_validate_task(
         config=campaign.config,
         grid_point=grid_point,
     )
+    origin_identity = validation["origin_assignment"]
+    if origin_identity is not None:
+        origin_path = campaign.run_dir / origin_identity["relative_path"]
+        if (
+            not origin_path.is_file()
+            or _origin_assignment_identity(
+                campaign.run_dir,
+                origin_path,
+            )
+            != origin_identity
+        ):
+            raise ReferenceMPIError(
+                f"Interrupted task GRG {grid_point} has invalid origin."
+            )
+        origin = _validate_origin_assignment(
+            origin_path,
+            run_dir=campaign.run_dir,
+            campaign_sha256=campaign.identity.sha256,
+            grid_point=grid_point,
+        )
+        record = _task_record(
+            campaign_sha256=campaign.identity.sha256,
+            grid_point=grid_point,
+            hdf5_path=hdf5_path,
+            validation=validation,
+            rank=int(origin["rank"]),
+            hostname=str(origin["hostname"]),
+            started_utc=str(origin["assigned_at_utc"]),
+            completed_utc=_utc_now(),
+            wall_seconds=None,
+            disposition=(
+                "computed_after_interrupted_record_publication"
+            ),
+            origin_assignment=origin_identity,
+        )
+        _write_json_exclusive(record_path, record)
+        return record
     record = _task_record(
         campaign_sha256=campaign.identity.sha256,
         grid_point=grid_point,
@@ -1105,12 +2538,27 @@ def _generate_one_task(
     *,
     rank: int,
     runtime_factory: Callable[[], Any],
+    origin_assignment_path: Path | None = None,
 ) -> dict[str, Any]:
     existing = _adopt_or_validate_task(campaign, grid_point)
     if existing is not None:
         return {"grid_point_grg": grid_point, "status": "resumed"}
     hdf5_path, record_path, _ = _task_paths(campaign.run_dir, grid_point)
-    started_utc = _utc_now()
+    origin: dict[str, Any] | None = None
+    if origin_assignment_path is not None:
+        origin = _validate_origin_assignment(
+            origin_assignment_path,
+            run_dir=campaign.run_dir,
+            campaign_sha256=campaign.identity.sha256,
+            grid_point=grid_point,
+        )
+        if origin["rank"] != rank:
+            raise ReferenceMPIError(
+                "Task rank differs from its pre-work origin assignment."
+            )
+    started_utc = (
+        _utc_now() if origin is None else str(origin["assigned_at_utc"])
+    )
     started = time.perf_counter()
     scratch = Path(
         tempfile.mkdtemp(
@@ -1118,6 +2566,8 @@ def _generate_one_task(
             dir=campaign.run_dir / "scratch",
         )
     )
+    scratch_details = os.lstat(scratch)
+    scratch_identity = (scratch_details.st_dev, scratch_details.st_ino)
     try:
         for name in ("fc2.compact.hdf5", "fc3.compact.hdf5"):
             source = _regular_file(
@@ -1171,6 +2621,18 @@ def _generate_one_task(
             h5.attrs["mpi_reference_runtime_json"] = (
                 _canonical_json_bytes(metadata).decode("ascii").rstrip("\n")
             )
+            h5.attrs["mpi_reference_origin_assignment_json"] = (
+                ""
+                if origin_assignment_path is None
+                else _canonical_json_bytes(
+                    _origin_assignment_identity(
+                        campaign.run_dir,
+                        origin_assignment_path,
+                    )
+                )
+                .decode("ascii")
+                .rstrip("\n")
+            )
             h5.flush()
         descriptor = os.open(temporary_hdf5, os.O_RDONLY)
         try:
@@ -1195,6 +2657,14 @@ def _generate_one_task(
             completed_utc=_utc_now(),
             wall_seconds=time.perf_counter() - started,
             disposition="computed",
+            origin_assignment=(
+                None
+                if origin_assignment_path is None
+                else _origin_assignment_identity(
+                    campaign.run_dir,
+                    origin_assignment_path,
+                )
+            ),
         )
         _write_json_exclusive(record_path, record)
         return {"grid_point_grg": grid_point, "status": "computed"}
@@ -1202,7 +2672,7 @@ def _generate_one_task(
         if hdf5_path.exists() and not record_path.exists():
             # A valid artifact published just before interruption is adoptable.
             try:
-                _adopt_or_validate_task(campaign, grid_point)
+                recovered = _adopt_or_validate_task(campaign, grid_point)
             except Exception:
                 _publish_failure(
                     campaign,
@@ -1213,7 +2683,15 @@ def _generate_one_task(
                     error=exc,
                 )
                 raise
-            return {"grid_point_grg": grid_point, "status": "adopted"}
+            assert recovered is not None
+            status = (
+                "computed"
+                if str(recovered.get("disposition", "")).startswith(
+                    "computed"
+                )
+                else "adopted"
+            )
+            return {"grid_point_grg": grid_point, "status": status}
         _publish_failure(
             campaign,
             grid_point,
@@ -1224,7 +2702,11 @@ def _generate_one_task(
         )
         raise
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        _remove_owned_worker_scratch(
+            campaign.run_dir,
+            scratch,
+            expected_identity=scratch_identity,
+        )
 
 
 def _copy_attrs(source: Any, destination: Any, *, omit_mpi: bool = False) -> None:
@@ -1494,7 +2976,14 @@ def _copy_force_stage(source: Path, destination: Path) -> None:
 def _archive_member_identity(path: Path, member: str) -> dict[str, Any]:
     """Return the immutable identity used for one regular tar member."""
 
-    source = _regular_file(path, name=f"MPI evidence source {member}")
+    _require_no_symlink_path_components(
+        path,
+        name=f"MPI evidence source {member}",
+    )
+    source = _regular_single_link_file(
+        path,
+        name=f"MPI evidence source {member}",
+    )
     if (
         not member
         or member.startswith("/")
@@ -1516,10 +3005,19 @@ def _validate_execution_record(
     """Validate one immutable execution before it enters release evidence."""
 
     normalized = dict(record)
+    if set(normalized) != _EXECUTION_RECORD_KEYS:
+        raise ReferenceMPIError(
+            "MPI execution record has an ambiguous top-level schema."
+        )
     execution_id = normalized.get("execution_id")
     if not isinstance(execution_id, str):
         raise ReferenceMPIError("MPI execution record lacks execution_id.")
     _execution_path(campaign.run_dir, execution_id)
+    _validate_scratch_cleanup_record(
+        campaign,
+        normalized.get("scratch_cleanup"),
+        execution_id=execution_id,
+    )
     assignments = normalized.get("assignments")
     if not isinstance(assignments, list):
         raise ReferenceMPIError("MPI execution assignments must be an array.")
@@ -1544,6 +3042,23 @@ def _validate_execution_record(
     ]
     size = normalized.get("communicator_size")
     threads = normalized.get("thread_environment")
+    _validate_thread_environment(
+        threads,
+        name=f"Execution {execution_id!r}.thread_environment",
+    )
+    python = normalized.get("python")
+    if (
+        not isinstance(python, Mapping)
+        or set(python) != {"version", "executable"}
+        or not isinstance(python.get("version"), str)
+        or not python.get("version")
+        or not isinstance(python.get("executable"), str)
+        or not python.get("executable")
+        or not Path(str(python["executable"])).is_absolute()
+    ):
+        raise ReferenceMPIError(
+            f"Execution {execution_id!r}.python has an ambiguous schema."
+        )
     worker_binding_evidence = (
         _normalize_execution_worker_bindings(
             assignments,
@@ -1577,8 +3092,16 @@ def _validate_execution_record(
         or normalized.get("computed_or_adopted_grid_points_grg") != computed
         or normalized.get("exact_checkpoint_resume") is not bool(resumed)
         or normalized.get("complete") is not True
-        or not isinstance(threads, Mapping)
-        or any(threads.get(name) != "1" for name in _THREAD_NAMES)
+        or not isinstance(normalized.get("hostname"), str)
+        or not normalized.get("hostname")
+        or not isinstance(normalized.get("started_at_utc"), str)
+        or not normalized.get("started_at_utc")
+        or not isinstance(normalized.get("completed_at_utc"), str)
+        or not normalized.get("completed_at_utc")
+        or isinstance(normalized.get("wall_seconds"), bool)
+        or not isinstance(normalized.get("wall_seconds"), (int, float))
+        or not math.isfinite(float(normalized["wall_seconds"]))
+        or float(normalized["wall_seconds"]) < 0.0
     ):
         raise ReferenceMPIError(
             f"Execution {execution_id!r} is incomplete or inconsistent."
@@ -1586,6 +3109,28 @@ def _validate_execution_record(
     for item in assignments:
         if not isinstance(item, Mapping):
             raise ReferenceMPIError("MPI execution assignment is not an object.")
+        status = item.get("status")
+        expected_assignment_keys = (
+            _RESUMED_ASSIGNMENT_KEYS
+            if status == "resumed"
+            else _COMPUTED_ASSIGNMENT_KEYS
+            | ({"worker_binding"} if size > 1 else set())
+        )
+        if set(item) != expected_assignment_keys:
+            raise ReferenceMPIError(
+                f"Execution {execution_id!r} assignment has an ambiguous schema."
+            )
+        wall_seconds = item.get("wall_seconds")
+        if (
+            isinstance(wall_seconds, bool)
+            or not isinstance(wall_seconds, (int, float))
+            or not math.isfinite(float(wall_seconds))
+            or float(wall_seconds) < 0.0
+        ):
+            raise ReferenceMPIError(
+                f"Execution {execution_id!r} assignment wall_seconds "
+                "must be finite and nonnegative."
+            )
         rank = item.get("rank")
         if rank is not None and (
             not isinstance(rank, int)
@@ -1596,16 +3141,12 @@ def _validate_execution_record(
             raise ReferenceMPIError(
                 f"Execution {execution_id!r} has an invalid worker rank."
             )
-        if size > 1 and item.get("status") != "resumed" and rank == 0:
+        if size > 1 and status != "resumed" and rank == 0:
             raise ReferenceMPIError(
                 f"Execution {execution_id!r} assigned numerical work to rank zero."
             )
         point = item.get("grid_point_grg")
-        if item.get("status") in {"computed", "adopted"}:
-            if not isinstance(point, int) or isinstance(point, bool):
-                raise ReferenceMPIError(
-                    f"Execution {execution_id!r} has an invalid task point."
-                )
+        if isinstance(point, int) and not isinstance(point, bool):
             hdf5_path, record_path, _ = _task_paths(
                 campaign.run_dir,
                 point,
@@ -1617,12 +3158,59 @@ def _validate_execution_record(
                 config=campaign.config,
                 grid_point=point,
             )
+            if item.get("origin_assignment") != task_record.get(
+                "origin_assignment"
+            ):
+                raise ReferenceMPIError(
+                    f"Execution {execution_id!r} task origin differs from "
+                    "its immutable task record."
+                )
+        if status in {"computed", "adopted"}:
+            if not isinstance(point, int) or isinstance(point, bool):
+                raise ReferenceMPIError(
+                    f"Execution {execution_id!r} has an invalid task point."
+                )
             if item.get("artifact") != task_record["artifact"]:
                 raise ReferenceMPIError(
                     f"Execution {execution_id!r} assignment artifact differs "
                     "from its immutable task."
                 )
-        elif item.get("status") == "resumed" and "artifact" in item:
+            if (
+                status == "adopted"
+                and task_record.get("disposition")
+                != "adopted_after_interrupted_record_publication"
+            ):
+                raise ReferenceMPIError(
+                    f"Execution {execution_id!r} adoption lineage differs "
+                    "from its immutable task."
+                )
+            if status == "computed":
+                if task_record.get("disposition") != "computed":
+                    raise ReferenceMPIError(
+                        f"Execution {execution_id!r} computed lineage differs "
+                        "from its immutable task."
+                    )
+                origin_identity = task_record.get("origin_assignment")
+                assert isinstance(origin_identity, Mapping)
+                origin = _validate_origin_assignment(
+                    campaign.run_dir
+                    / str(origin_identity["relative_path"]),
+                    run_dir=campaign.run_dir,
+                    campaign_sha256=campaign.identity.sha256,
+                    grid_point=point,
+                )
+                if (
+                    origin["execution_id"] != execution_id
+                    or origin["rank"] != rank
+                    or origin["communicator_size"] != size
+                    or origin["worker_binding"]
+                    != item.get("worker_binding")
+                ):
+                    raise ReferenceMPIError(
+                        f"Execution {execution_id!r} fresh task origin is "
+                        "mismatched."
+                    )
+        elif status == "resumed" and "artifact" in item:
             raise ReferenceMPIError(
                 f"Execution {execution_id!r} resumed assignment claims a fresh "
                 "artifact."
@@ -1649,8 +3237,53 @@ def _write_evidence_archive(
     sources.append((manifest_path, campaign_manifest))
 
     tasks: list[dict[str, Any]] = []
+    fresh_origin_points: set[int] = set()
     for grid_point in campaign.config.grid_points:
         hdf5_path, record_path, _ = _task_paths(campaign.run_dir, grid_point)
+        task_record = _validate_task_record(
+            record_path,
+            hdf5_path,
+            campaign_sha256=campaign.identity.sha256,
+            config=campaign.config,
+            grid_point=grid_point,
+        )
+        if task_record.get("disposition") not in {
+            "computed",
+            "computed_after_interrupted_record_publication",
+        }:
+            raise ReferenceMPIError(
+                "Release evidence requires computed tasks; legacy adoption "
+                f"without an authenticated numerical origin is ineligible "
+                f"for GRG {grid_point}."
+            )
+        origin_identity = task_record.get("origin_assignment")
+        if not isinstance(origin_identity, Mapping):
+            raise ReferenceMPIError(
+                "Release evidence requires a durable pre-work origin for "
+                f"GRG {grid_point}."
+            )
+        origin_path = campaign.run_dir / str(
+            origin_identity["relative_path"]
+        )
+        origin = _validate_origin_assignment(
+            origin_path,
+            run_dir=campaign.run_dir,
+            campaign_sha256=campaign.identity.sha256,
+            grid_point=grid_point,
+        )
+        if (
+            _origin_assignment_identity(campaign.run_dir, origin_path)
+            != dict(origin_identity)
+        ):
+            raise ReferenceMPIError(
+                f"Origin assignment for GRG {grid_point} changed."
+            )
+        if (
+            origin["mode"] == "mpi"
+            and int(origin["rank"]) > 0
+            and int(origin["communicator_size"]) >= 2
+        ):
+            fresh_origin_points.add(grid_point)
         hdf5 = _archive_member_identity(
             hdf5_path,
             f"tasks/{hdf5_path.name}",
@@ -1660,11 +3293,17 @@ def _write_evidence_archive(
             f"tasks/{record_path.name}",
         )
         sources.extend(((hdf5_path, hdf5), (record_path, record)))
+        origin_record = _archive_member_identity(
+            origin_path,
+            f"assignments/{origin_path.name}",
+        )
+        sources.append((origin_path, origin_record))
         tasks.append(
             {
                 "grid_point_grg": grid_point,
                 "hdf5": hdf5,
                 "record": record,
+                "origin_assignment": origin_record,
             }
         )
 
@@ -1676,17 +3315,10 @@ def _write_evidence_archive(
         ),
         key=lambda item: str(item["execution_id"]),
     )
-    freshly_computed = {
-        int(assignment["grid_point_grg"])
-        for execution in normalized_executions
-        for assignment in execution["assignments"]
-        if assignment.get("status") == "computed"
-    }
-    if freshly_computed != set(campaign.config.grid_points):
+    if fresh_origin_points != set(campaign.config.grid_points):
         raise ReferenceMPIError(
-            "Release evidence requires one archived fresh MPI-computed "
-            "assignment for every target q-point; adopted or resumed tasks do "
-            "not establish numerical origin."
+            "Release evidence requires one archived, task-bound pre-work "
+            "MPI origin assignment for every target q-point."
         )
     for execution in normalized_executions:
         execution_id = str(execution["execution_id"])
@@ -1704,10 +3336,21 @@ def _write_evidence_archive(
             f"executions/{path.name}",
         )
         sources.append((path, evidence))
+        cleanup_path, _ = _validate_scratch_cleanup_record(
+            campaign,
+            execution.get("scratch_cleanup"),
+            execution_id=execution_id,
+        )
+        cleanup_evidence = _archive_member_identity(
+            cleanup_path,
+            f"scratch-cleanups/{cleanup_path.name}",
+        )
+        sources.append((cleanup_path, cleanup_evidence))
         executions.append(
             {
                 "execution_id": execution_id,
                 "record": evidence,
+                "scratch_cleanup": cleanup_evidence,
             }
         )
     if not executions:
@@ -1727,8 +3370,30 @@ def _write_evidence_archive(
             info.gid = 0
             info.uname = ""
             info.gname = ""
-            with source.open("rb") as stream:
-                archive.addfile(info, stream)
+            _require_no_symlink_path_components(
+                source,
+                name=f"MPI evidence source {info.name}",
+            )
+            descriptor = os.open(
+                source,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+            try:
+                details = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(details.st_mode)
+                    or details.st_nlink != 1
+                    or details.st_size != info.size
+                    or _sha256_descriptor(descriptor) != identity["sha256"]
+                ):
+                    raise ReferenceMPIError(
+                        f"MPI evidence source {info.name} changed before archive."
+                    )
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with os.fdopen(os.dup(descriptor), "rb") as stream:
+                    archive.addfile(info, stream)
+            finally:
+                os.close(descriptor)
     descriptor = os.open(destination, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -1816,24 +3481,58 @@ def _reference_runtime_metadata(
     return metadata
 
 
-def _finalize_reference_bundle(
+def _finalize_reference_bundle_locked(
     campaign: PreparedCampaign,
     *,
     execution_records: Sequence[Mapping[str, Any]],
+    execution_lock: _CampaignExecutionLock,
 ) -> Path:
+    execution_lock.verify()
+    final_output_name = _authenticated_final_output_name(campaign)
+    _require_no_symlink_path_components(
+        campaign.output_dir,
+        name="output_dir",
+    )
     if campaign.output_dir.exists():
         raise FileExistsError("Final output directory already exists.")
     parent = campaign.output_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=f".{campaign.output_dir.name}.",
-            suffix=".tmp",
-            dir=parent,
-        )
+    parent = _require_no_symlink_path_components(
+        parent,
+        name="output_dir parent",
     )
+    parent_descriptor = _open_directory_nofollow(
+        parent,
+        name="output_dir parent",
+    )
+    staging_name: str | None = None
+    for _ in range(100):
+        candidate = (
+            f".{final_output_name}.{secrets.token_hex(16)}.tmp"
+        )
+        try:
+            os.mkdir(candidate, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        staging_name = candidate
+        break
+    if staging_name is None:
+        os.close(parent_descriptor)
+        raise ReferenceMPIError("Unable to allocate a private staging directory.")
+    staging = parent / staging_name
+    staging_details = os.stat(
+        staging_name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    staging_identity = (staging_details.st_dev, staging_details.st_ino)
+    renamed = False
     try:
-        # tempfile created the staging directory; populate it directly.
+        _verify_directory_descriptor(
+            parent,
+            parent_descriptor,
+            name="output_dir parent",
+        )
         for name in sorted(serial._FORCE_STAGE_FILENAMES):
             shutil.copyfile(
                 campaign.force_stage_dir / name,
@@ -1940,12 +3639,97 @@ def _finalize_reference_bundle(
         if not serial.verify_sha256sums(staging / "SHA256SUMS", root=staging):
             raise ReferenceMPIError("Final bundle checksum self-check failed.")
         _fsync_directory(staging)
-        os.rename(staging, campaign.output_dir)
-        _fsync_directory(parent)
+        _verify_directory_descriptor(
+            parent,
+            parent_descriptor,
+            name="output_dir parent",
+        )
+        try:
+            os.stat(
+                final_output_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError("Final output directory already exists.")
+        os.rename(
+            staging_name,
+            final_output_name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        renamed = True
+        published = os.stat(
+            final_output_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(published.st_mode)
+            or (published.st_dev, published.st_ino) != staging_identity
+        ):
+            raise ReferenceMPIError(
+                "Final output directory changed during publication."
+            )
+        _verify_directory_descriptor(
+            parent,
+            parent_descriptor,
+            name="output_dir parent",
+        )
+        os.fsync(parent_descriptor)
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        if not renamed:
+            try:
+                remaining = os.stat(
+                    staging_name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if (
+                    not stat.S_ISDIR(remaining.st_mode)
+                    or (remaining.st_dev, remaining.st_ino)
+                    != staging_identity
+                ):
+                    os.close(parent_descriptor)
+                    raise ReferenceMPIError(
+                        "Final staging directory changed before cleanup."
+                    )
+                _remove_directory_tree_at(
+                    parent_descriptor,
+                    staging_name,
+                    expected_identity=staging_identity,
+                )
+        os.close(parent_descriptor)
+    execution_lock.verify()
     return campaign.output_dir
+
+
+def _finalize_reference_bundle(
+    campaign: PreparedCampaign,
+    *,
+    execution_records: Sequence[Mapping[str, Any]],
+    execution_lock: _CampaignExecutionLock | None = None,
+) -> Path:
+    """Finalize while holding the campaign-wide mutation lock."""
+
+    owned_lock = execution_lock
+    acquired_here = owned_lock is None
+    if owned_lock is None:
+        owned_lock = _CampaignExecutionLock.acquire(campaign.run_dir)
+    try:
+        return _finalize_reference_bundle_locked(
+            campaign,
+            execution_records=execution_records,
+            execution_lock=owned_lock,
+        )
+    finally:
+        if acquired_here:
+            owned_lock.close()
 
 
 def _execution_path(run_dir: Path, execution_id: str) -> Path:
@@ -1975,6 +3759,7 @@ def _execution_record(
     started: float,
     assignments: Sequence[Mapping[str, Any]],
     complete: bool,
+    scratch_cleanup: Mapping[str, Any],
 ) -> dict[str, Any]:
     normalized_assignments = [dict(item) for item in assignments]
     points = [
@@ -2022,6 +3807,7 @@ def _execution_record(
             "executable": str(Path(sys.executable).resolve()),
         },
         "thread_environment": _require_threads_one(),
+        "scratch_cleanup": dict(scratch_cleanup),
         "assignments": normalized_assignments,
         "complete": complete,
     }
@@ -2036,15 +3822,39 @@ def _serial_schedule(
     campaign: PreparedCampaign,
     *,
     runtime_factory: Callable[[], Any],
+    execution_id: str,
 ) -> list[dict[str, Any]]:
     assignments = []
     for point in campaign.config.grid_points:
         started = time.perf_counter()
+        existing = _adopt_or_validate_task(campaign, point)
+        if existing is not None:
+            assignments.append(
+                {
+                    "grid_point_grg": point,
+                    "rank": None,
+                    "status": "resumed",
+                    "wall_seconds": time.perf_counter() - started,
+                    "origin_assignment": existing.get(
+                        "origin_assignment"
+                    ),
+                }
+            )
+            continue
+        origin_path, _ = _publish_origin_assignment(
+            campaign,
+            point,
+            execution_id=execution_id,
+            rank=0,
+            communicator_size=1,
+            worker_binding=None,
+        )
         result = _generate_one_task(
             campaign,
             point,
             rank=0,
             runtime_factory=runtime_factory,
+            origin_assignment_path=origin_path,
         )
         hdf5_path, record_path, _ = _task_paths(campaign.run_dir, point)
         task_record = _validate_task_record(
@@ -2061,6 +3871,9 @@ def _serial_schedule(
                 "status": result["status"],
                 "wall_seconds": time.perf_counter() - started,
                 "artifact": dict(task_record["artifact"]),
+                "origin_assignment": dict(
+                    task_record["origin_assignment"]
+                ),
             }
         )
     return assignments
@@ -2086,14 +3899,34 @@ def _worker_loop(
         ):
             raise ReferenceMPIError("Worker received an unknown command.")
         point = int(message["grid_point_grg"])
+        execution_id = message.get("execution_id")
+        communicator_size = message.get("communicator_size")
         started = time.perf_counter()
         try:
             worker_binding = _physical_core_binding(rank)
+            if (
+                not isinstance(execution_id, str)
+                or not isinstance(communicator_size, int)
+                or isinstance(communicator_size, bool)
+                or communicator_size != comm.Get_size()
+            ):
+                raise ReferenceMPIError(
+                    "Worker task command lacks execution provenance."
+                )
+            origin_path, _ = _publish_origin_assignment(
+                campaign,
+                point,
+                execution_id=execution_id,
+                rank=rank,
+                communicator_size=communicator_size,
+                worker_binding=worker_binding,
+            )
             result = _generate_one_task(
                 campaign,
                 point,
                 rank=rank,
                 runtime_factory=runtime_factory,
+                origin_assignment_path=origin_path,
             )
             hdf5_path, record_path, _ = _task_paths(
                 campaign.run_dir,
@@ -2112,8 +3945,11 @@ def _worker_loop(
                 "wall_seconds": time.perf_counter() - started,
                 "worker_binding": worker_binding,
                 "artifact": dict(task_record["artifact"]),
+                "origin_assignment": dict(
+                    task_record["origin_assignment"]
+                ),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - worker reports all failures
             response = {
                 "grid_point_grg": point,
                 "status": "failed",
@@ -2129,6 +3965,7 @@ def _mpi_schedule(
     comm: _Communicator,
     *,
     runtime_factory: Callable[[], Any],
+    execution_id: str,
 ) -> list[dict[str, Any]] | None:
     from mpi4py import MPI
 
@@ -2169,6 +4006,9 @@ def _mpi_schedule(
                     "rank": None,
                     "status": "resumed",
                     "wall_seconds": 0.0,
+                    "origin_assignment": existing.get(
+                        "origin_assignment"
+                    ),
                 }
             )
     workers = list(range(1, size))
@@ -2178,7 +4018,12 @@ def _mpi_schedule(
             break
         point = pending.pop(0)
         comm.send(
-            {"command": "task", "grid_point_grg": point},
+            {
+                "command": "task",
+                "grid_point_grg": point,
+                "execution_id": execution_id,
+                "communicator_size": size,
+            },
             dest=worker,
             tag=_TAG_TASK,
         )
@@ -2213,6 +4058,7 @@ def _mpi_schedule(
                 "wall_seconds": response.get("wall_seconds"),
                 "worker_binding": response.get("worker_binding"),
                 "artifact": response.get("artifact"),
+                "origin_assignment": response.get("origin_assignment"),
             }
             assignments.append(record)
             if response.get("status") == "failed":
@@ -2220,7 +4066,12 @@ def _mpi_schedule(
         if pending:
             point = pending.pop(0)
             comm.send(
-                {"command": "task", "grid_point_grg": point},
+                {
+                    "command": "task",
+                    "grid_point_grg": point,
+                    "execution_id": execution_id,
+                    "communicator_size": size,
+                },
                 dest=worker,
                 tag=_TAG_TASK,
             )
@@ -2233,6 +4084,120 @@ def _mpi_schedule(
     )
 
 
+def _execute_campaign_under_lock(
+    campaign: PreparedCampaign,
+    *,
+    comm: _Communicator,
+    runtime_factory: Callable[[], Any],
+    execution_id: str,
+    execution_lock: _CampaignExecutionLock | None,
+) -> Path | None:
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    execution_path = _execution_path(campaign.run_dir, execution_id)
+    execution_preflight_error = (
+        (
+            "Execution record already exists: "
+            f"{execution_path.name}."
+        )
+        if rank == 0 and execution_path.exists()
+        else None
+    )
+    execution_preflight_error = comm.bcast(
+        execution_preflight_error,
+        root=0,
+    )
+    if execution_preflight_error is not None:
+        raise FileExistsError(execution_preflight_error)
+    scratch_cleanup_path: Path | None = None
+    scratch_cleanup_error: str | None = None
+    if rank == 0:
+        try:
+            scratch_cleanup_path, _ = _cleanup_interrupted_scratch(
+                campaign,
+                execution_id=execution_id,
+                execution_lock=execution_lock,
+            )
+        except Exception as exc:  # noqa: BLE001 - broadcast rank-zero failure
+            scratch_cleanup_error = f"{type(exc).__name__}: {exc}"
+    scratch_cleanup_error = comm.bcast(
+        scratch_cleanup_error,
+        root=0,
+    )
+    if scratch_cleanup_error is not None:
+        raise ReferenceMPIError(
+            f"Scratch cleanup preflight failed: {scratch_cleanup_error}"
+        )
+    started_utc = _utc_now()
+    started = time.perf_counter()
+    assignments: list[dict[str, Any]] | None
+    if size == 1:
+        assignments = _serial_schedule(
+            campaign,
+            runtime_factory=runtime_factory,
+            execution_id=execution_id,
+        )
+    else:
+        assignments = _mpi_schedule(
+            campaign,
+            comm,
+            runtime_factory=runtime_factory,
+            execution_id=execution_id,
+        )
+    comm.Barrier()
+    if rank != 0:
+        return None
+    assert assignments is not None
+    if any((campaign.run_dir / "scratch").iterdir()):
+        raise ReferenceMPIError(
+            "Completed campaign retained worker scratch."
+        )
+    validation_failures: list[int] = []
+    for point in campaign.config.grid_points:
+        try:
+            if _adopt_or_validate_task(campaign, point) is None:
+                validation_failures.append(point)
+        except ReferenceMPIError:
+            validation_failures.append(point)
+    complete_statuses = {"computed", "adopted", "resumed"}
+    assignment_points = [
+        item.get("grid_point_grg") for item in assignments
+    ]
+    complete = bool(
+        not validation_failures
+        and assignment_points == list(campaign.config.grid_points)
+        and all(
+            item.get("status") in complete_statuses for item in assignments
+        )
+    )
+    assert scratch_cleanup_path is not None
+    record = _execution_record(
+        campaign=campaign,
+        execution_id=execution_id,
+        size=size,
+        started_utc=started_utc,
+        started=started,
+        assignments=assignments,
+        complete=complete,
+        scratch_cleanup=_file_identity(scratch_cleanup_path),
+    )
+    _write_json_exclusive(execution_path, record)
+    if not complete:
+        raise ReferenceMPIError(
+            "Campaign ended without all authenticated target artifacts: "
+            f"{validation_failures!r}."
+        )
+    execution_records = [
+        _read_json_object(path, name=f"execution record {path.name}")
+        for path in sorted((campaign.run_dir / "executions").glob("*.json"))
+    ]
+    return _finalize_reference_bundle(
+        campaign,
+        execution_records=execution_records,
+        execution_lock=execution_lock,
+    )
+
+
 def execute_campaign(
     campaign: PreparedCampaign,
     *,
@@ -2241,7 +4206,7 @@ def execute_campaign(
     execution_id: str,
     require_mpi: bool = False,
 ) -> Path | None:
-    """Execute, checkpoint, merge, and atomically publish one campaign."""
+    """Execute under one fail-fast lock from cleanup through finalization."""
 
     if comm is None:
         if require_mpi:
@@ -2261,80 +4226,29 @@ def execute_campaign(
             "Certified MPI reference generation requires at least two ranks."
         )
     _require_threads_one()
-    execution_path = _execution_path(campaign.run_dir, execution_id)
-    execution_preflight_error = (
-        (
-            "Execution record already exists: "
-            f"{execution_path.name}."
-        )
-        if rank == 0 and execution_path.exists()
-        else None
-    )
-    execution_preflight_error = comm.bcast(
-        execution_preflight_error,
-        root=0,
-    )
-    if execution_preflight_error is not None:
-        raise FileExistsError(execution_preflight_error)
-    started_utc = _utc_now()
-    started = time.perf_counter()
-    assignments: list[dict[str, Any]] | None
-    if size == 1:
-        assignments = _serial_schedule(
-            campaign,
-            runtime_factory=runtime_factory,
-        )
-    else:
-        assignments = _mpi_schedule(
-            campaign,
-            comm,
-            runtime_factory=runtime_factory,
-        )
-    comm.Barrier()
-    if rank != 0:
-        return None
-    assert assignments is not None
-    validation_failures: list[int] = []
-    for point in campaign.config.grid_points:
+    execution_lock: _CampaignExecutionLock | None = None
+    lock_error: str | None = None
+    if rank == 0:
         try:
-            if _adopt_or_validate_task(campaign, point) is None:
-                validation_failures.append(point)
-        except ReferenceMPIError:
-            validation_failures.append(point)
-    complete_statuses = {"computed", "adopted", "resumed"}
-    assignment_points = [
-        item.get("grid_point_grg") for item in assignments
-    ]
-    complete = bool(
-        not validation_failures
-        and assignment_points == list(campaign.config.grid_points)
-        and all(
-            item.get("status") in complete_statuses for item in assignments
-        )
-    )
-    record = _execution_record(
-        campaign=campaign,
-        execution_id=execution_id,
-        size=size,
-        started_utc=started_utc,
-        started=started,
-        assignments=assignments,
-        complete=complete,
-    )
-    _write_json_exclusive(execution_path, record)
-    if not complete:
+            execution_lock = _CampaignExecutionLock.acquire(campaign.run_dir)
+        except Exception as exc:  # noqa: BLE001 - broadcast rank-zero failure
+            lock_error = f"{type(exc).__name__}: {exc}"
+    lock_error = comm.bcast(lock_error, root=0)
+    if lock_error is not None:
         raise ReferenceMPIError(
-            "Campaign ended without all authenticated target artifacts: "
-            f"{validation_failures!r}."
+            f"Campaign execution lock acquisition failed: {lock_error}"
         )
-    execution_records = [
-        _read_json_object(path, name=f"execution record {path.name}")
-        for path in sorted((campaign.run_dir / "executions").glob("*.json"))
-    ]
-    return _finalize_reference_bundle(
-        campaign,
-        execution_records=execution_records,
-    )
+    try:
+        return _execute_campaign_under_lock(
+            campaign,
+            comm=comm,
+            runtime_factory=runtime_factory,
+            execution_id=execution_id,
+            execution_lock=execution_lock,
+        )
+    finally:
+        if execution_lock is not None:
+            execution_lock.close()
 
 
 class _SerialCommunicator:
@@ -2390,7 +4304,7 @@ def _broadcast_prepared(
                 "source_verification": prepared.source_verification,
                 "environment_identity": prepared.environment_identity,
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - broadcast rank-zero failure
             descriptor = {
                 "ok": False,
                 "error_type": type(exc).__name__,
@@ -2407,7 +4321,7 @@ def _broadcast_prepared(
     identity = CampaignIdentity.from_payload(descriptor["payload"])
     if identity.sha256 != descriptor["campaign_sha256"]:
         raise ReferenceMPIError("Broadcast campaign hash is invalid.")
-    return PreparedCampaign(
+    prepared = PreparedCampaign(
         identity=identity,
         config=config,
         source_files={
@@ -2420,6 +4334,8 @@ def _broadcast_prepared(
         run_dir=arguments.run_dir,
         output_dir=arguments.output_dir,
     )
+    _authenticated_final_output_name(prepared)
+    return prepared
 
 
 def _build_parser() -> argparse.ArgumentParser:

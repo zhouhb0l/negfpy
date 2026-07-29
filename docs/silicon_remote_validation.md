@@ -89,14 +89,46 @@ and the task is not silently dropped.
    \(\lvert V^{(3)}\rvert^2\), phase space, linewidths, task artifacts,
    generation records, code identity, and input hashes.
 7. Run `validate_phono3py_si_release.py` with the \(11^3\) external report
-   and the fresh \(3^3\)/\(5^3\) equality summaries. This is the only command
-   permitted to emit `release_certified=true`. It independently re-merges
-   every target-\(q\) task, rejects external/VDS/non-hard HDF5 storage,
-   reconstructs the authenticated \(3^3\) and \(5^3\) problems, reruns the
-   serial linewidth kernel, and repeats both full-field comparisons.
-8. Stage external file records, seal the complete artifact tree, and verify
-   the portable manifest as described in
+   and the fresh \(3^3\)/\(5^3\) equality summaries. Pass each equality
+   mesh's exact bounded-v2 V3 scientific manifest, adjacent content-addressed
+   MPI orchestration sidecar, and MPI run directory explicitly:
+
+   ```bash
+   python scripts/validate_phono3py_si_release.py \
+     --external-oracle-report artifacts/11x11x11/mpi-oracle.json \
+     --equality-3x3-summary artifacts/3x3x3/target-q/summaries/execution-id.json \
+     --equality-5x5-summary artifacts/5x5x5/target-q/summaries/execution-id.json \
+     --v3-3x3-manifest artifacts/3x3x3/v3/interaction-samples.json \
+     --v3-3x3-orchestration artifacts/3x3x3/v3/interaction-samples.json.mpi-orchestration.payload-sha256.json \
+     --v3-3x3-run-directory artifacts/3x3x3/v3/run \
+     --v3-5x5-manifest artifacts/5x5x5/v3/interaction-samples.json \
+     --v3-5x5-orchestration artifacts/5x5x5/v3/interaction-samples.json.mpi-orchestration.payload-sha256.json \
+     --v3-5x5-run-directory artifacts/5x5x5/v3/run \
+     --repository worktree \
+     --output artifacts/release/silicon-release.json
+   ```
+
+   The explicit V3 manifest must be byte-for-byte the
+   `interaction_samples` input used by that mesh's serial qualification.
+   Both \(3^3\) and \(5^3\) target bundles must also contain the checksummed
+   `reference-mpi-orchestration.json` and
+   `reference-mpi-evidence.tar`; serially generated compatibility bundles are
+   not release eligible. This is the only command permitted to emit
+   `release_certified=true`. It independently revalidates reference-MPI and
+   V3-MPI task provenance, re-merges every target-\(q\) task, rejects
+   external/VDS/non-hard HDF5 storage, reconstructs the authenticated
+   \(3^3\) and \(5^3\) problems, reruns the serial linewidth kernel, and
+   repeats both full-field comparisons.
+8. Use the single `finalize` operation to stage external file records, seal
+   the complete artifact tree, and publish the handoff, then verify it as
+   described in
    [`validation/silicon-portable-evidence.md`](validation/silicon-portable-evidence.md).
+   Do not run `stage` before `finalize`: `finalize` requires an initially
+   absent staging tree and performs that step atomically. The only supported
+   manual alternative is `stage` followed by `seal` (without `finalize`).
+   Keep the handoff, finalizer operation logs, and authenticated checksum
+   record outside the artifact root; nothing may be written beneath the
+   artifact root after it has been sealed.
    Retrieval verification must supply both trusted digests from the
    authenticated remote checksum record; a self-hash is integrity-only.
 

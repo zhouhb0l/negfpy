@@ -74,7 +74,9 @@ PINNED_SILICON_ENVIRONMENT_LOCK_SHA256 = (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_MESH_POINTS = 4096
-_MAX_TARGET_GRID_POINTS = 32
+# The release contract requires authoritative full-selection qualification on
+# the 5x5x5 mesh before its task-MPI equality result can be certified.
+_MAX_TARGET_GRID_POINTS = 5**3
 _MAX_TARGET_BANDS = 128
 _MAX_TEMPERATURES = 64
 _MAX_INTERACTION_SAMPLES = 512
@@ -84,6 +86,8 @@ _THREAD_VARIABLES = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
 _STRATUM_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 

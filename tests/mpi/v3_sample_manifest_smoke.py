@@ -14,8 +14,12 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY / "src"))
 sys.path.insert(0, str(REPOSITORY / "tests"))
 
+from negfpy.anharmonic import (  # noqa: E402
+    _v3_sample_manifest_mpi as mpi_sampler,
+)
 from negfpy.anharmonic._v3_sample_manifest_mpi import (  # noqa: E402
     V3SampleMPICampaign,
+    V3SampleMPIMergeError,
     current_v3_sampling_source_identity,
     run_v3_sample_manifest_mpi,
     validate_v3_mpi_orchestration_evidence,
@@ -38,9 +42,17 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument(
-        "--phase", choices=("initial", "restart"), required=True
+        "--phase",
+        choices=("initial", "restart", "merge-failure"),
+        required=True,
     )
     return parser
+
+
+def _injected_merge_failure(
+    _values: object,
+) -> object:
+    raise RuntimeError("injected rank-zero maximum merge failure")
 
 
 def main() -> int:
@@ -49,18 +61,19 @@ def main() -> int:
     rank = int(comm.Get_rank())
     root = arguments.root.resolve()
     fixture = root / "fixture"
-    if rank == 0 and arguments.phase == "initial":
+    if rank == 0 and arguments.phase in {"initial", "merge-failure"}:
         fixture.mkdir(parents=True, exist_ok=False)
         reference_path = _write_reference(fixture)
         inputs = _inputs(fixture)
-        reference = read_phono3py_silicon_reference(reference_path)
-        create_v3_sample_manifest(
-            reference,
-            output_path=root / "serial.json",
-            selection_mode=LARGE_MESH_BOUNDED_SELECTION,
-            maximum_promoted_blocks=96,
-            **inputs,
-        )
+        if arguments.phase == "initial":
+            reference = read_phono3py_silicon_reference(reference_path)
+            create_v3_sample_manifest(
+                reference,
+                output_path=root / "serial.json",
+                selection_mode=LARGE_MESH_BOUNDED_SELECTION,
+                maximum_promoted_blocks=96,
+                **inputs,
+            )
     comm.Barrier()
 
     reference = read_phono3py_silicon_reference(
@@ -87,13 +100,40 @@ def main() -> int:
         require_authenticated_source=False,
         maximum_promoted_blocks=96,
     )
-    result = run_v3_sample_manifest_mpi(
-        campaign,
-        run_directory=root / "run",
-        output_path=root / "mpi.json",
-        comm=comm,
-        require_mpi=True,
-    )
+    original_merge = mpi_sampler._merge_maxima
+    if arguments.phase == "merge-failure":
+        mpi_sampler._merge_maxima = _injected_merge_failure
+    try:
+        result = run_v3_sample_manifest_mpi(
+            campaign,
+            run_directory=root / "run",
+            output_path=root / "mpi.json",
+            comm=comm,
+            require_mpi=True,
+        )
+    except V3SampleMPIMergeError as exc:
+        if arguments.phase != "merge-failure":
+            raise
+        failure = (type(exc).__name__, str(exc))
+        failures = comm.allgather(failure)
+        expected = (
+            "V3SampleMPIMergeError",
+            "rank-zero maximum-phase artifact/merge failed: RuntimeError: "
+            "injected rank-zero maximum merge failure",
+        )
+        assert failures == [expected] * comm.Get_size()
+        comm.Barrier()
+        if rank == 0:
+            print(
+                "v3-sample-mpi-merge-failure-passed "
+                f"ranks={comm.Get_size()}",
+                flush=True,
+            )
+        return 0
+    finally:
+        mpi_sampler._merge_maxima = original_merge
+    if arguments.phase == "merge-failure":
+        raise AssertionError("injected rank-zero merge failure did not fail")
     if rank == 0:
         assert result is not None
         assert (root / "mpi.json").read_bytes() == (
@@ -134,6 +174,8 @@ if __name__ == "__main__":
         "OPENBLAS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
     ):
         if os.environ.get(variable) != "1":
             raise RuntimeError(f"{variable} must equal 1.")

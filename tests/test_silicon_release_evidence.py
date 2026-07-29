@@ -151,6 +151,63 @@ def _seal(tree: _EvidenceTree) -> portable.PortableSiliconReleaseEvidence:
     )
 
 
+def _normalized_input_manifest_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "dataset_id": "phono3py-4.4.0-Si-PBEsol",
+        "versions": {
+            "phono3py": "4.4.0",
+            "phonopy": "4.4.0",
+        },
+        "source": {
+            "repository": "https://github.com/phonopy/phono3py.git",
+            "commit": "3" * 40,
+            "files": {
+                "forces_fc3": {
+                    "path": "example/Si-PBEsol/FORCES_FC3",
+                    "sha256": "4" * 64,
+                },
+                "phono3py_yaml": {
+                    "path": "example/Si-PBEsol/phono3py_disp.yaml",
+                    "sha256": "5" * 64,
+                },
+                "poscar_unitcell": {
+                    "path": "example/Si-PBEsol/POSCAR-unitcell",
+                    "sha256": "6" * 64,
+                },
+                "readme": {
+                    "path": "example/Si-PBEsol/README.md",
+                    "sha256": "7" * 64,
+                },
+            },
+        },
+        "input_manifest_sha256": "8" * 64,
+    }
+
+
+def _bundle_inventory_record(path: Path) -> dict[str, object]:
+    return {
+        "path": path.name,
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+        "media_type": "application/octet-stream",
+    }
+
+
+def _write_bundle_inventory(
+    path: Path,
+    records: list[dict[str, object]],
+) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "generated_at_utc": "2026-07-29T00:00:00+00:00",
+            "artifacts": records,
+        },
+    )
+
+
 def _load_driver() -> ModuleType:
     path = (
         Path(__file__).resolve().parents[1]
@@ -221,6 +278,151 @@ def test_seal_and_verify_after_relocation(tmp_path: Path) -> None:
         )
     assert verified.verified_artifact_root == relocated.resolve()
     assert verified.recorded_artifact_root == str(tree.root.resolve())
+
+
+def test_finalize_nested_bundle_inventory_and_normalized_source_manifest(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    bundle = (
+        tree.root
+        / "mesh-5x5x5"
+        / "reference-bundle"
+    )
+    bundle.mkdir(parents=True)
+    payload = bundle / "reference-payload.bin"
+    payload.write_bytes(b"nested reference payload\n")
+    normalized = bundle / "input-manifest.normalized.json"
+    _write_json(normalized, _normalized_input_manifest_payload())
+    _write_bundle_inventory(
+        bundle / "inventory.json",
+        [
+            _bundle_inventory_record(normalized),
+            _bundle_inventory_record(payload),
+        ],
+    )
+
+    root_relative = tree.root / "reports" / "root-relative.json"
+    _write_json(
+        root_relative,
+        {
+            "schema": "test.root-relative.evidence.v1",
+            "artifact": {
+                "path": tree.data.relative_to(tree.root).as_posix(),
+                "sha256": _sha256(tree.data),
+                "size_bytes": tree.data.stat().st_size,
+            },
+        },
+    )
+
+    handoff = tmp_path / "nested-release-handoff"
+    finalized = portable.finalize_silicon_release_evidence(
+        tree.root,
+        tree.report,
+        handoff,
+    )
+
+    assert not finalized.external_evidence_staged
+    assert finalized.portable_evidence.path_record_count == 6
+    relocated_root = tmp_path / "nested-relocated-artifacts"
+    relocated_handoff = tmp_path / "nested-relocated-handoff"
+    shutil.copytree(tree.root, relocated_root)
+    shutil.copytree(handoff, relocated_handoff)
+    verified = portable.verify_silicon_release_handoff(
+        relocated_root,
+        relocated_handoff / "SHA256SUMS",
+    )
+    assert verified.portable_evidence.path_record_count == 6
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("root-decoy", "absent from the sealed inventory"),
+        ("missing", "absent from the sealed inventory"),
+        ("tamper", "SHA256 differs from the sealed member"),
+    ],
+)
+def test_nested_bundle_inventory_rejects_root_decoy_missing_or_tampered_member(
+    tmp_path: Path,
+    failure: str,
+    message: str,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    bundle = tree.root / "mesh-3x3x3" / "reference-bundle"
+    bundle.mkdir(parents=True)
+    local = bundle / "payload.bin"
+    declared_digest = "9" * 64
+    declared_size = 1
+    if failure == "tamper":
+        local.write_bytes(b"bundle payload\n")
+        declared_digest = _sha256(local)
+        declared_size = local.stat().st_size
+    if failure == "root-decoy":
+        decoy = tree.root / local.name
+        decoy.write_bytes(b"root decoy payload\n")
+        declared_digest = _sha256(decoy)
+        declared_size = decoy.stat().st_size
+    elif failure == "tamper":
+        declared_digest = "9" * 64
+    _write_bundle_inventory(
+        bundle / "inventory.json",
+        [
+            {
+                "path": local.name,
+                "size_bytes": declared_size,
+                "sha256": declared_digest,
+                "media_type": "application/octet-stream",
+            }
+        ],
+    )
+
+    with pytest.raises(
+        portable.SiliconReleaseEvidenceError,
+        match=message,
+    ):
+        _seal(tree)
+
+
+def test_nested_bundle_inventory_ignores_same_name_root_decoy(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    bundle = tree.root / "mesh-3x3x3" / "reference-bundle"
+    bundle.mkdir(parents=True)
+    local = bundle / "payload.bin"
+    local.write_bytes(b"authenticated bundle payload\n")
+    (tree.root / local.name).write_bytes(b"unrelated root payload\n")
+    _write_bundle_inventory(
+        bundle / "inventory.json",
+        [_bundle_inventory_record(local)],
+    )
+
+    sealed = _seal(tree)
+
+    assert sealed.path_record_count == 4
+
+
+def test_normalized_source_manifest_requires_exact_schema(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    normalized = tree.root / "input-manifest.normalized.json"
+    payload = _normalized_input_manifest_payload()
+    source = payload["source"]
+    assert isinstance(source, dict)
+    files = source["files"]
+    assert isinstance(files, dict)
+    forces = files["forces_fc3"]
+    assert isinstance(forces, dict)
+    forces["sealed_member"] = False
+    _write_json(normalized, payload)
+
+    with pytest.raises(
+        portable.SiliconReleaseEvidenceError,
+        match="incomplete or ambiguous schema",
+    ):
+        _seal(tree)
 
 
 def test_tampered_member_is_rejected(tmp_path: Path) -> None:

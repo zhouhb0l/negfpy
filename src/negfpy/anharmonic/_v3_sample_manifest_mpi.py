@@ -25,6 +25,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 import platform
 import re
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -73,7 +74,6 @@ from .v3_sample_manifest import (
     _select_bounded_blocks,
     _vectorized_maximum_promoted_block,
     read_v3_sample_manifest,
-    write_v3_sample_manifest,
 )
 
 
@@ -87,6 +87,8 @@ _THREAD_ENVIRONMENT = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
 _PHASE_MAXIMUM = "maximum"
 _PHASE_RESERVOIRS = "reservoirs"
@@ -517,7 +519,11 @@ def _validated_source_identity(
 
 def _strict_json(path: Path) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
+        raw = mpi_tasks._read_single_link_bytes(  # noqa: SLF001
+            path,
+            name="V3 strict-JSON evidence",
+            error_type=V3SampleMPIArtifactError,
+        )
         value = json.loads(
             raw.decode("ascii"),
             parse_constant=lambda token: (_ for _ in ()).throw(
@@ -545,8 +551,13 @@ def _read_unique_json_object(path: Path, *, name: str) -> dict[str, Any]:
         return result
 
     try:
+        raw = mpi_tasks._read_single_link_bytes(  # noqa: SLF001
+            path,
+            name=name,
+            error_type=V3SampleMPIArtifactError,
+        )
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=unique,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"nonfinite JSON token {token}")
@@ -1694,31 +1705,64 @@ def _collective_reference_identity_check(
     *,
     full_hash_on_root: bool,
 ) -> None:
-    stat = campaign.reference.path.stat()
-    local_stat = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    local_ok = local_stat == campaign.reference_stat_identity
     size = int(communicator.Get_size())
     rank = int(communicator.Get_rank())
+    try:
+        observed_stat = campaign.reference.path.stat()
+        local = {
+            "ok": (
+                (
+                    observed_stat.st_dev,
+                    observed_stat.st_ino,
+                    observed_stat.st_size,
+                    observed_stat.st_mtime_ns,
+                )
+                == campaign.reference_stat_identity
+            ),
+            "error": None,
+        }
+    except Exception as exc:
+        local = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     observed = (
-        (local_ok,)
+        (local,)
         if size == 1
-        else tuple(communicator.allgather(local_ok))
+        else tuple(communicator.allgather(local))
     )
-    if not all(observed):
+    if any(item["ok"] is not True for item in observed):
+        details = "; ".join(
+            str(item["error"])
+            for item in observed
+            if item["error"] is not None
+        )
         raise V3SampleMPICampaignError(
             "reference HDF5 stat identity changed during the campaign."
+            + ("" if not details else f" {details}")
         )
-    hash_ok = True
+    hash_outcome: dict[str, Any] = {"ok": True, "error": None}
     if full_hash_on_root and rank == 0:
-        hash_ok = (
-            _file_sha256(campaign.reference.path)
-            == campaign.reference.sha256
-        )
+        try:
+            hash_outcome["ok"] = (
+                _file_sha256(campaign.reference.path)
+                == campaign.reference.sha256
+            )
+        except Exception as exc:
+            hash_outcome = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     if size > 1:
-        hash_ok = bool(communicator.bcast(hash_ok, root=0))
-    if not hash_ok:
+        hash_outcome = communicator.bcast(hash_outcome, root=0)
+    if hash_outcome["ok"] is not True:
         raise V3SampleMPICampaignError(
             "reference HDF5 SHA256 changed during the campaign."
+            + (
+                ""
+                if hash_outcome["error"] is None
+                else f" {hash_outcome['error']}"
+            )
         )
 
 
@@ -1758,6 +1802,112 @@ def _collective_source_identity_check(
         )
 
 
+def _validate_v3_run_root_inventory(run_directory: Path) -> None:
+    """Reject every top-level entry not owned by the V3 MPI campaign."""
+
+    allowed = {
+        "source-identity.json": "file",
+        "phase-maximum": "directory",
+        "phase-reservoirs": "directory",
+        mpi_tasks._EXECUTION_LEASE_NAME: "lease",  # noqa: SLF001
+    }
+    for path in sorted(run_directory.iterdir(), key=lambda item: item.name):
+        expected = allowed.get(path.name)
+        if expected is None:
+            match = mpi_tasks._PRIVATE_TEMP_PATTERN.fullmatch(  # noqa: SLF001
+                path.name
+            )
+            if (
+                match is not None
+                and match.group("target") == "source-identity.json"
+            ):
+                continue
+            raise TaskManifestError(
+                f"V3 run directory has an unowned top-level entry: {path}"
+            )
+        try:
+            status = path.lstat()
+        except OSError as exc:
+            raise TaskManifestError(
+                f"cannot inspect V3 run-directory entry: {path}"
+            ) from exc
+        if expected == "directory":
+            valid = stat.S_ISDIR(status.st_mode)
+        else:
+            valid = (
+                stat.S_ISREG(status.st_mode)
+                and status.st_nlink == 1
+            )
+        if not valid:
+            raise TaskManifestError(
+                f"V3 run-directory entry has an unsafe type: {path}"
+            )
+
+
+def _cleanup_exact_output_temps(target: Path) -> tuple[str, ...]:
+    """Remove only this target's UUID publication temps in a shared parent."""
+
+    parent = mpi_tasks._resolve_nonsymlink_path(  # noqa: SLF001
+        target.parent,
+        name="V3 output parent",
+        must_exist=True,
+        expected_kind="directory",
+        error_type=V3SampleMPIMergeError,
+    )
+    pattern = re.compile(
+        rf"^\.{re.escape(target.name)}\.[0-9a-f]{{32}}\.tmp$"
+    )
+    removed: list[str] = []
+    for path in sorted(parent.iterdir(), key=lambda item: item.name):
+        if pattern.fullmatch(path.name) is None:
+            continue
+        status = path.lstat()
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise V3SampleMPIMergeError(
+                f"unsafe V3 output publication residue: {path}"
+            )
+        path.unlink()
+        removed.append(path.name)
+    if removed:
+        mpi_tasks._fsync_directory(parent)  # noqa: SLF001
+    return tuple(removed)
+
+
+def _cleanup_v3_output_family_temps(target: Path) -> tuple[str, ...]:
+    """Clean exact scientific and content-addressed sidecar UUID temps."""
+
+    parent = mpi_tasks._resolve_nonsymlink_path(  # noqa: SLF001
+        target.parent,
+        name="V3 output parent",
+        must_exist=True,
+        expected_kind="directory",
+        error_type=V3SampleMPIMergeError,
+    )
+    patterns = (
+        re.compile(
+            rf"^\.{re.escape(target.name)}\.[0-9a-f]{{32}}\.tmp$"
+        ),
+        re.compile(
+            rf"^\.{re.escape(target.name + _ORCHESTRATION_SUFFIX)}\."
+            r"[0-9a-f]{64}\.json\.[0-9a-f]{32}\.tmp$"
+        ),
+    )
+    removed: list[str] = []
+    for path in sorted(parent.iterdir(), key=lambda item: item.name):
+        if not any(pattern.fullmatch(path.name) for pattern in patterns):
+            continue
+        status = path.lstat()
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise V3SampleMPIMergeError(
+                f"unsafe V3 output publication residue: {path}"
+            )
+        path.unlink()
+        removed.append(path.name)
+    if removed:
+        mpi_tasks._fsync_directory(parent)  # noqa: SLF001
+    return tuple(removed)
+
+
 def _publish_source_identity_evidence(
     campaign: V3SampleMPICampaign,
     run_directory: Path,
@@ -1769,21 +1919,35 @@ def _publish_source_identity_evidence(
     size = int(communicator.Get_size())
     outcome: dict[str, Any] | None = None
     if rank == 0:
-        payload = {
-            "schema": _SOURCE_IDENTITY_SCHEMA,
-            "schema_version": _SCHEMA_VERSION,
-            "campaign_sha256": campaign.campaign_sha256,
-            "source_identity_sha256": _payload_sha256(
-                campaign.source_identity
-            ),
-            "source_identity": campaign.source_identity,
-        }
         try:
+            run_directory = mpi_tasks._ensure_owned_directory(  # noqa: SLF001
+                run_directory,
+                name="V3 MPI run directory",
+                error_type=TaskManifestError,
+            )
+            _validate_v3_run_root_inventory(run_directory)
+            mpi_tasks._cleanup_interrupted_publications(  # noqa: SLF001
+                run_directory,
+                allowed_target=lambda name: name == "source-identity.json",
+                allowed_private_entries=frozenset(
+                    {mpi_tasks._EXECUTION_LEASE_NAME}  # noqa: SLF001
+                ),
+            )
+            payload = {
+                "schema": _SOURCE_IDENTITY_SCHEMA,
+                "schema_version": _SCHEMA_VERSION,
+                "campaign_sha256": campaign.campaign_sha256,
+                "source_identity_sha256": _payload_sha256(
+                    campaign.source_identity
+                ),
+                "source_identity": campaign.source_identity,
+            }
             mpi_tasks._publish_immutable(  # noqa: SLF001
                 run_directory / "source-identity.json",
                 _canonical_bytes(payload),
                 conflict_type=TaskManifestError,
             )
+            _validate_v3_run_root_inventory(run_directory)
             outcome = {"ok": True, "error": None}
         except Exception as exc:
             outcome = {
@@ -1849,11 +2013,15 @@ def _evidence_file_record(
         raise V3SampleMPIArtifactError(
             "orchestration evidence resolves outside its run directory."
         ) from exc
-    stat = resolved.stat()
+    status = resolved.lstat()
+    if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+        raise V3SampleMPIArtifactError(
+            f"orchestration evidence is not a single-link file: {resolved}"
+        )
     return {
         "role": role,
         "relative_path": lexical.as_posix(),
-        "size_bytes": int(stat.st_size),
+        "size_bytes": int(status.st_size),
         "sha256": _file_sha256(resolved),
     }
 
@@ -1881,6 +2049,10 @@ def _phase_evidence_payload(
         (phase_root / "task-outcomes").glob("*.task.json"),
         key=lambda path: path.name,
     )
+    origin_assignment_paths = sorted(
+        (phase_root / "task-assignments").glob("*.assignment.json"),
+        key=lambda path: path.name,
+    )
     execution_paths = sorted(
         (phase_root / "executions").glob("*.json"),
         key=lambda path: path.name,
@@ -1888,18 +2060,25 @@ def _phase_evidence_payload(
     if (
         len(artifact_paths) != len(manifest.tasks)
         or len(checkpoint_paths) != len(manifest.tasks)
+        or len(origin_assignment_paths) < len(manifest.tasks)
         or not execution_paths
         or {path.name for path in phase_root.iterdir()}
         != {
             "task-manifest.json",
             "executions",
             "task-artifacts",
+            "task-assignments",
             "task-outcomes",
         }
         or {path.name for path in (phase_root / "task-artifacts").iterdir()}
         != {path.name for path in artifact_paths}
         or {path.name for path in (phase_root / "task-outcomes").iterdir()}
         != {path.name for path in checkpoint_paths}
+        or {
+            path.name
+            for path in (phase_root / "task-assignments").iterdir()
+        }
+        != {path.name for path in origin_assignment_paths}
         or {path.name for path in (phase_root / "executions").iterdir()}
         != {path.name for path in execution_paths}
     ):
@@ -1918,10 +2097,42 @@ def _phase_evidence_payload(
         )[0]
         for path in execution_paths
     ]
+    durable_origins: dict[str, Mapping[str, Any]] = {}
+    for assignment in report.assignments:
+        relative_path = assignment.origin_assignment_relative_path
+        expected_sha256 = assignment.origin_assignment_sha256
+        if relative_path is None or expected_sha256 is None:
+            raise V3SampleMPIArtifactError(
+                f"{phase} task lacks durable pre-work origin."
+            )
+        path = phase_root / "task-assignments" / relative_path
+        if (
+            path not in origin_assignment_paths
+            or _file_sha256(path) != expected_sha256
+        ):
+            raise V3SampleMPIArtifactError(
+                f"{phase} task origin assignment changed."
+            )
+        origin = mpi_tasks.load_task_origin_assignment(
+            path,
+            manifest=manifest,
+            expected_task=assignment.task_id,
+        )
+        durable_origins[assignment.task_id] = {
+            "task_id": assignment.task_id,
+            "execution_id": origin.execution_id,
+            "mode": origin.mode,
+            "rank": origin.rank,
+            "communicator_size": origin.communicator_size,
+            "hostname": origin.hostname,
+            "relative_path": path.name,
+            "sha256": expected_sha256,
+        }
     origin_lineage = mpi_tasks.task_execution_mpi_origin_lineage_evidence(
         report,
         execution_history,
         require_mpi_origin=campaign.require_authenticated_source,
+        durable_origin_assignments=durable_origins,
     )
     origin_execution_ids = (
         {
@@ -1984,6 +2195,14 @@ def _phase_evidence_payload(
                     role=f"{phase}.task_checkpoint",
                 )
                 for path in checkpoint_paths
+            ],
+            "task_origin_assignments": [
+                _evidence_file_record(
+                    root,
+                    path,
+                    role=f"{phase}.task_origin_assignment",
+                )
+                for path in origin_assignment_paths
             ],
         },
     }
@@ -2111,6 +2330,7 @@ def _publish_orchestration_evidence(
         f"{scientific_manifest.path.name}{_ORCHESTRATION_SUFFIX}."
         f"{payload_sha256}.json"
     )
+    _cleanup_exact_output_temps(target)
     mpi_tasks._publish_immutable(  # noqa: SLF001
         target,
         _canonical_bytes(document),
@@ -2133,7 +2353,7 @@ class V3SampleMPIResult:
     orchestration_payload_sha256: str
 
 
-def run_v3_sample_manifest_mpi(
+def _run_v3_sample_manifest_mpi_under_lease(
     campaign: V3SampleMPICampaign,
     *,
     run_directory: str | Path,
@@ -2182,27 +2402,75 @@ def run_v3_sample_manifest_mpi(
         artifact_validator=_make_validator(
             campaign, phase=_PHASE_MAXIMUM
         ),
+        persist_origin_lineage=True,
     )
     _collective_reference_identity_check(
         campaign,
         communicator,
         full_hash_on_root=False,
     )
-    maximum_payload: dict[str, Any] | None = None
+    maximum_outcome: dict[str, Any] | None = None
     if rank == 0:
-        maxima = _phase_artifacts(
-            campaign,
-            maximum_manifest,
-            root / "phase-maximum",
-            phase=_PHASE_MAXIMUM,
-        )
-        maximum_payload = _block_payload(_merge_maxima(maxima))
+        try:
+            maxima = _phase_artifacts(
+                campaign,
+                maximum_manifest,
+                root / "phase-maximum",
+                phase=_PHASE_MAXIMUM,
+            )
+            maximum_outcome = {
+                "ok": True,
+                "payload": _block_payload(_merge_maxima(maxima)),
+                "error_type": None,
+                "error_message": None,
+            }
+        except Exception as exc:
+            maximum_outcome = {
+                "ok": False,
+                "payload": None,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
     if int(communicator.Get_size()) > 1:
-        maximum_payload = communicator.bcast(maximum_payload, root=0)
-    if not isinstance(maximum_payload, dict):
+        maximum_outcome = communicator.bcast(maximum_outcome, root=0)
+    outcome_keys = {
+        "ok",
+        "payload",
+        "error_type",
+        "error_message",
+    }
+    if (
+        not isinstance(maximum_outcome, dict)
+        or set(maximum_outcome) != outcome_keys
+        or not isinstance(maximum_outcome["ok"], bool)
+    ):
         raise V3SampleMPIMergeError(
-            "rank zero did not broadcast a global maximum."
+            "rank zero broadcast an invalid maximum-phase merge outcome."
         )
+    if maximum_outcome["ok"] is not True:
+        if (
+            maximum_outcome["payload"] is not None
+            or not isinstance(maximum_outcome["error_type"], str)
+            or not isinstance(maximum_outcome["error_message"], str)
+        ):
+            raise V3SampleMPIMergeError(
+                "rank zero broadcast an invalid maximum-phase failure "
+                "outcome."
+            )
+        raise V3SampleMPIMergeError(
+            "rank-zero maximum-phase artifact/merge failed: "
+            f"{maximum_outcome['error_type']}: "
+            f"{maximum_outcome['error_message']}"
+        )
+    if (
+        not isinstance(maximum_outcome["payload"], dict)
+        or maximum_outcome["error_type"] is not None
+        or maximum_outcome["error_message"] is not None
+    ):
+        raise V3SampleMPIMergeError(
+            "rank zero broadcast an invalid maximum-phase success outcome."
+        )
+    maximum_payload = maximum_outcome["payload"]
     global_maximum = _block_from_payload(maximum_payload)
 
     reservoir_manifest = campaign.task_manifest(
@@ -2225,6 +2493,7 @@ def run_v3_sample_manifest_mpi(
             phase=_PHASE_RESERVOIRS,
             global_maximum_block=global_maximum,
         ),
+        persist_origin_lineage=True,
     )
     _collective_reference_identity_check(
         campaign,
@@ -2250,21 +2519,33 @@ def run_v3_sample_manifest_mpi(
         global_maximum_block=global_maximum,
     )
     payload = _scientific_payload(campaign, merged)
+    mpi_tasks._ensure_owned_directory(  # noqa: SLF001
+        target.parent,
+        name="V3 output parent",
+        error_type=V3SampleMPIMergeError,
+    )
     target = _resolve_nonsymlink_path(
         target,
         name="V3 scientific manifest output",
         must_exist=target.exists(),
         expected_kind="file",
     )
-    if target.exists():
-        existing = json.loads(target.read_text(encoding="utf-8"))
-        if existing != payload:
-            raise V3SampleMPIMergeError(
-                "existing final manifest differs from this exact campaign."
-            )
-        manifest = read_v3_sample_manifest(target)
-    else:
-        manifest = write_v3_sample_manifest(target, payload)
+    scientific_bytes = (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    _cleanup_v3_output_family_temps(target)
+    mpi_tasks._publish_immutable(  # noqa: SLF001
+        target,
+        scientific_bytes,
+        conflict_type=V3SampleMPIMergeError,
+    )
+    manifest = read_v3_sample_manifest(target)
     (
         orchestration_path,
         orchestration_file_sha256,
@@ -2314,6 +2595,149 @@ def run_v3_sample_manifest_mpi(
         orchestration_file_sha256=orchestration_file_sha256,
         orchestration_payload_sha256=orchestration_payload_sha256,
     )
+
+
+def run_v3_sample_manifest_mpi(
+    campaign: V3SampleMPICampaign,
+    *,
+    run_directory: str | Path,
+    output_path: str | Path,
+    comm: Any | None = None,
+    require_mpi: bool = False,
+) -> V3SampleMPIResult | None:
+    """Run one V3 campaign under a collective whole-campaign lease."""
+
+    if not isinstance(campaign, V3SampleMPICampaign):
+        raise TypeError("campaign must be a V3SampleMPICampaign.")
+    communicator = mpi_tasks._resolve_communicator(  # noqa: SLF001
+        comm,
+        require_mpi=require_mpi,
+    )
+    rank = int(communicator.Get_rank())
+    size = int(communicator.Get_size())
+    root: Path | None = None
+    target: Path | None = None
+    lease: Any | None = None
+    startup_error: Exception | None = None
+    if rank == 0:
+        try:
+            root = mpi_tasks._ensure_owned_directory(  # noqa: SLF001
+                run_directory,
+                name="V3 MPI run directory",
+                error_type=V3SampleMPICampaignError,
+            )
+            target = _resolve_nonsymlink_path(
+                output_path,
+                name="V3 scientific manifest output",
+                must_exist=False,
+                expected_kind="file",
+            )
+            try:
+                target.relative_to(root)
+            except ValueError:
+                pass
+            else:
+                raise V3SampleMPICampaignError(
+                    "V3 scientific output must lie outside the owned run "
+                    "directory."
+                )
+            lease = mpi_tasks._acquire_execution_lease(root)  # noqa: SLF001
+        except Exception as exc:
+            startup_error = exc
+    startup = {
+        "ok": startup_error is None,
+        "root": None if root is None else os.fspath(root),
+        "target": None if target is None else os.fspath(target),
+        "error_type": (
+            None if startup_error is None else type(startup_error).__name__
+        ),
+        "error_message": (
+            None if startup_error is None else str(startup_error)
+        ),
+    }
+    if size > 1:
+        startup = communicator.bcast(
+            startup if rank == 0 else None,
+            root=0,
+        )
+    if not startup["ok"]:
+        if rank == 0 and startup_error is not None:
+            raise startup_error
+        raise V3SampleMPICampaignError(
+            "rank-zero V3 startup failed: "
+            f"{startup['error_type']}: {startup['error_message']}"
+        )
+    root = Path(str(startup["root"]))
+    target = Path(str(startup["target"]))
+
+    result: V3SampleMPIResult | None = None
+    body_error: BaseException | None = None
+    try:
+        result = _run_v3_sample_manifest_mpi_under_lease(
+            campaign,
+            run_directory=root,
+            output_path=target,
+            comm=communicator,
+            require_mpi=require_mpi,
+        )
+        if rank == 0:
+            _validate_v3_run_root_inventory(root)
+    except BaseException as exc:
+        body_error = exc
+
+    release_error: Exception | None = None
+    if rank == 0:
+        assert lease is not None
+        try:
+            mpi_tasks._release_execution_lease(lease)  # noqa: SLF001
+        except Exception as exc:
+            release_error = exc
+    released = {
+        "ok": release_error is None,
+        "error_type": (
+            None if release_error is None else type(release_error).__name__
+        ),
+        "error_message": (
+            None if release_error is None else str(release_error)
+        ),
+    }
+    if size > 1:
+        released = communicator.bcast(
+            released if rank == 0 else None,
+            root=0,
+        )
+    if not released["ok"]:
+        if rank == 0 and release_error is not None:
+            raise release_error
+        raise V3SampleMPICampaignError(
+            "rank-zero V3 lease release failed: "
+            f"{released['error_type']}: {released['error_message']}"
+        )
+
+    terminal = {
+        "ok": body_error is None,
+        "error_type": (
+            None if body_error is None else type(body_error).__name__
+        ),
+        "error_message": None if body_error is None else str(body_error),
+    }
+    if size > 1:
+        terminal = communicator.bcast(
+            terminal if rank == 0 else None,
+            root=0,
+        )
+    if not terminal["ok"]:
+        if terminal["error_type"] == V3SampleMPIMergeError.__name__:
+            raise V3SampleMPIMergeError(str(terminal["error_message"]))
+        if rank == 0 and body_error is not None:
+            raise body_error
+        raise V3SampleMPICampaignError(
+            "rank-zero V3 execution failed: "
+            f"{terminal['error_type']}: {terminal['error_message']}"
+        )
+    if body_error is not None:
+        raise body_error
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -2451,6 +2875,7 @@ def _validate_phase_file_inventory(
         "task-manifest.json",
         "executions",
         "task-artifacts",
+        "task-assignments",
         "task-outcomes",
     }:
         raise V3SampleMPIArtifactError(
@@ -2462,6 +2887,7 @@ def _validate_phase_file_inventory(
         "executions",
         "task_artifacts",
         "task_checkpoints",
+        "task_origin_assignments",
     }:
         raise V3SampleMPIArtifactError(
             f"{phase_name} file inventory schema is invalid."
@@ -2480,6 +2906,11 @@ def _validate_phase_file_inventory(
             "task_checkpoint",
             "task-outcomes",
             ".task.json",
+        ),
+        "task_origin_assignments": (
+            "task_origin_assignment",
+            "task-assignments",
+            ".assignment.json",
         ),
     }
     for key, (role, subdirectory, suffix) in specifications.items():
@@ -2529,6 +2960,7 @@ def _execution_payload(
     manifest: TaskManifest,
     artifact_records: Mapping[str, str],
     checkpoint_records: Mapping[str, str],
+    origin_assignment_records: Mapping[str, str],
 ) -> tuple[dict[str, Any], str]:
     payload, digest = _strict_envelope_payload(
         path,
@@ -2606,6 +3038,9 @@ def _execution_payload(
         "orphan_artifact_adopted",
         "cpu_affinity_topology",
         "origin_communicator_size",
+        "origin_execution_id",
+        "origin_assignment_relative_path",
+        "origin_assignment_sha256",
     }
     if (
         not isinstance(assignments, list)
@@ -2673,6 +3108,31 @@ def _execution_payload(
             or assignment["artifact_sha256"]
             != artifact_records.get(
                 assignment["artifact_relative_path"]
+            )
+            or not isinstance(
+                assignment["origin_execution_id"], str
+            )
+            or not assignment["origin_execution_id"]
+            or "/" in assignment["origin_execution_id"]
+            or "\\" in assignment["origin_execution_id"]
+            or not isinstance(
+                assignment["origin_assignment_relative_path"], str
+            )
+            or "/" in assignment["origin_assignment_relative_path"]
+            or "\\" in assignment["origin_assignment_relative_path"]
+            or not assignment[
+                "origin_assignment_relative_path"
+            ].endswith(".assignment.json")
+            or not isinstance(
+                assignment["origin_assignment_sha256"], str
+            )
+            or _SHA256_PATTERN.fullmatch(
+                assignment["origin_assignment_sha256"]
+            )
+            is None
+            or assignment["origin_assignment_sha256"]
+            != origin_assignment_records.get(
+                assignment["origin_assignment_relative_path"]
             )
         ):
             raise V3SampleMPIArtifactError(
@@ -3285,6 +3745,17 @@ def validate_v3_mpi_orchestration_evidence(
             path.name: _file_sha256(path)
             for path in inventory["task_checkpoints"]
         }
+        origin_assignment_records = {
+            path.name: _file_sha256(path)
+            for path in inventory["task_origin_assignments"]
+        }
+        loaded_origin_assignments = {
+            path.name: mpi_tasks.load_task_origin_assignment(
+                path,
+                manifest=task_manifest,
+            )
+            for path in inventory["task_origin_assignments"]
+        }
         histories: list[tuple[Path, dict[str, Any], str]] = []
         for path in inventory["executions"]:
             execution, execution_sha = _execution_payload(
@@ -3292,6 +3763,7 @@ def validate_v3_mpi_orchestration_evidence(
                 manifest=task_manifest,
                 artifact_records=artifact_records,
                 checkpoint_records=checkpoint_records,
+                origin_assignment_records=origin_assignment_records,
             )
             if path.name != f"{execution['execution_id']}.json":
                 raise V3SampleMPIArtifactError(
@@ -3321,11 +3793,32 @@ def validate_v3_mpi_orchestration_evidence(
                 "or mismatched."
             )
         try:
+            durable_origins = {}
+            for assignment in selected[0][1]["assignments"]:
+                relative_path = assignment[
+                    "origin_assignment_relative_path"
+                ]
+                origin = loaded_origin_assignments[relative_path]
+                if origin.task_id != assignment["task_id"]:
+                    raise TaskManifestError(
+                        "durable origin assignment names another task."
+                    )
+                durable_origins[assignment["task_id"]] = {
+                    "task_id": assignment["task_id"],
+                    "execution_id": origin.execution_id,
+                    "mode": origin.mode,
+                    "rank": origin.rank,
+                    "communicator_size": origin.communicator_size,
+                    "hostname": origin.hostname,
+                    "relative_path": relative_path,
+                    "sha256": origin_assignment_records[relative_path],
+                }
             origin_lineage = (
                 mpi_tasks.task_execution_mpi_origin_lineage_evidence(
                     selected[0][1],
                     [value[1] for value in histories],
                     require_mpi_origin=require_mpi,
+                    durable_origin_assignments=durable_origins,
                 )
             )
         except TaskManifestError as exc:
@@ -3384,6 +3877,7 @@ def validate_v3_mpi_orchestration_evidence(
             "histories": histories,
             "physical_cores": physical_cores,
             "origin_lineage": origin_lineage,
+            "durable_origins": durable_origins,
         }
 
     def validate_checkpoint_origins(
@@ -3413,6 +3907,41 @@ def validate_v3_mpi_orchestration_evidence(
                     f"{phase_name} checkpoint lacks nonorphan worker-MPI "
                     "origin."
                 )
+            try:
+                durable = (
+                    mpi_tasks.task_checkpoint_origin_assignment_evidence(
+                        checkpoint,
+                        manifest=phase_state[phase_name]["manifest"],
+                        assignment_directory=(
+                            root
+                            / (
+                                "phase-maximum"
+                                if phase_name == _PHASE_MAXIMUM
+                                else "phase-reservoirs"
+                            )
+                            / "task-assignments"
+                        ),
+                    )
+                )
+            except (
+                mpi_tasks.TaskCheckpointError,
+                TaskManifestError,
+            ) as exc:
+                raise V3SampleMPIArtifactError(
+                    f"{phase_name} checkpoint origin assignment is invalid."
+                ) from exc
+            if (
+                mpi_tasks._normalize_json(durable)  # noqa: SLF001
+                != mpi_tasks._normalize_json(  # noqa: SLF001
+                    phase_state[phase_name]["durable_origins"][
+                        checkpoint.task_id
+                    ]
+                )
+            ):
+                raise V3SampleMPIArtifactError(
+                    f"{phase_name} checkpoint origin assignment differs "
+                    "from selected evidence."
+                )
         for _, history, _ in histories:
             for assignment in history["assignments"]:
                 checkpoint = by_task[assignment["task_id"]]
@@ -3435,6 +3964,14 @@ def validate_v3_mpi_orchestration_evidence(
                     != mpi_tasks._normalize_json(  # noqa: SLF001
                         thread_cap.get("cpu_affinity_topology")
                     )
+                    or assignment["origin_execution_id"]
+                    != execution.get("origin_execution_id")
+                    or assignment["origin_assignment_relative_path"]
+                    != execution.get(
+                        "origin_assignment_relative_path"
+                    )
+                    or assignment["origin_assignment_sha256"]
+                    != execution.get("origin_assignment_sha256")
                 ):
                     raise V3SampleMPIArtifactError(
                         f"{phase_name} execution origin fields conflict with "

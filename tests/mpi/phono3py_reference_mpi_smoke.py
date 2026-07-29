@@ -64,10 +64,10 @@ class _FakePhono3pyRuntime:
         return _runtime_metadata(point, point, config)
 
 
-def _prepare(root: Path, *, phase: str) -> driver.PreparedCampaign:
+def _prepare(root: Path) -> driver.PreparedCampaign:
     run_dir = root / "run"
     force_dir = root / "force"
-    output_dir = root / f"output-{phase}"
+    output_dir = root / "output"
     rank = MPI.COMM_WORLD.Get_rank()
     if rank == 0:
         driver._initialize_run_directory(
@@ -98,7 +98,7 @@ def main() -> int:
         return 2
     root = Path(sys.argv[1]).resolve()
     phase = sys.argv[2]
-    campaign = _prepare(root, phase=phase)
+    campaign = _prepare(root)
     output = driver.execute_campaign(
         campaign,
         comm=MPI.COMM_WORLD,

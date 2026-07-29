@@ -8,7 +8,6 @@ from types import ModuleType
 
 import pytest
 
-
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 _MPI_CONFIG_FIELDS = (
     ("qualification_report", "qualification_report_path"),
@@ -96,6 +95,12 @@ def _release_paths(tmp_path: Path) -> dict[str, Path]:
         "external_oracle_report": tmp_path / "external-oracle.json",
         "equality_3x3_summary": tmp_path / "equality-3x3.json",
         "equality_5x5_summary": tmp_path / "equality-5x5.json",
+        "v3_3x3_manifest": tmp_path / "v3-3x3.json",
+        "v3_3x3_orchestration": tmp_path / "v3-3x3.mpi.json",
+        "v3_3x3_run_directory": tmp_path / "v3-3x3-run",
+        "v3_5x5_manifest": tmp_path / "v3-5x5.json",
+        "v3_5x5_orchestration": tmp_path / "v3-5x5.mpi.json",
+        "v3_5x5_run_directory": tmp_path / "v3-5x5-run",
         "repository": tmp_path / "repository",
         "output": tmp_path / "release-report.json",
     }
@@ -108,6 +113,12 @@ def _release_arguments(paths: dict[str, Path]) -> list[str]:
             "external_oracle_report",
             "equality_3x3_summary",
             "equality_5x5_summary",
+            "v3_3x3_manifest",
+            "v3_3x3_orchestration",
+            "v3_3x3_run_directory",
+            "v3_5x5_manifest",
+            "v3_5x5_orchestration",
+            "v3_5x5_run_directory",
             "repository",
             "output",
         )
@@ -252,6 +263,12 @@ def test_release_main_constructs_config_and_prints_certification(
             "external_oracle_report",
             "equality_3x3_summary",
             "equality_5x5_summary",
+            "v3_3x3_manifest",
+            "v3_3x3_orchestration",
+            "v3_3x3_run_directory",
+            "v3_5x5_manifest",
+            "v3_5x5_orchestration",
+            "v3_5x5_run_directory",
             "repository",
             "output",
         )
@@ -342,9 +359,6 @@ def test_validation_exception_publishes_immutable_error_report(
     second_streams = capsys.readouterr()
     publication_failure = json.loads(second_streams.err)
     assert publication_failure["status"] == "error"
-    assert (
-        publication_failure["error"]
-        == f"{kind} validation failed"
-    )
+    assert publication_failure["error"] == f"{kind} validation failed"
     assert publication_failure["report_publication_error"]
     assert paths["output"].read_bytes() == published_bytes

@@ -184,6 +184,36 @@ def test_atomic_json_publication_never_overwrites(tmp_path: Path) -> None:
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_bounded_reference_accepts_full_5x5x5_selection() -> None:
+    reference = SimpleNamespace(
+        mesh=(5, 5, 5),
+        grid_points_grg=np.arange(5**3, dtype=np.int64),
+        band_indices=np.arange(6, dtype=np.int64),
+        temperatures_k=np.array([300.0]),
+        make_r0_average=True,
+        fc2_random_qpoints=np.zeros((1, 3), dtype=float),
+    )
+
+    driver._validate_bounded_reference(reference)
+
+
+def test_bounded_reference_rejects_more_than_full_5x5x5_selection() -> None:
+    reference = SimpleNamespace(
+        mesh=(6, 6, 6),
+        grid_points_grg=np.arange(5**3 + 1, dtype=np.int64),
+        band_indices=np.arange(6, dtype=np.int64),
+        temperatures_k=np.array([300.0]),
+        make_r0_average=True,
+        fc2_random_qpoints=np.zeros((1, 3), dtype=float),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"target grid points=126.*limit of 125",
+    ):
+        driver._validate_bounded_reference(reference)
+
+
 def test_checksum_gate_verifies_unconsumed_manifest_entries(
     tmp_path: Path,
 ) -> None:
@@ -662,6 +692,7 @@ def test_bounded_driver_uses_reference_selectors_r0_average_and_strict_gate(
     written = json.loads(output.read_text(encoding="utf-8"))
     assert written["execution"]["internal_q_parallelism"] == "none"
     assert written["execution"]["fitted_prefactors"] is False
+    assert written["bounds"]["maximum_target_grid_points"] == 5**3
     assert written["interaction_sample_coverage"][
         "representative_nonzero_block_present"
     ]

@@ -12,11 +12,12 @@ kernels, independently re-merges target-q artifacts, and re-evaluates the
 substantial scientific calculation and must run in the pinned release
 environment.
 
-The three reports must identify the same clean source revision, installed
-NEGFPy 0.2.0 payload, environment lock, IFCs, crystal mapping, and physical
-controls.  Every referenced task, execution, merge, comparison, HDF5,
-qualification, and target-generation artifact is re-hashed before and after
-aggregation.  Only this final layer may set ``release_certified=true``.
+The three reports and explicit per-mesh V3 MPI evidence must identify the same
+clean source revision, installed NEGFPy 0.2.0 payload, environment lock, IFCs,
+crystal mapping, and physical controls.  Every referenced task, execution,
+merge, comparison, HDF5, qualification, and target-generation artifact is
+re-hashed before and after aggregation.  Only this final layer may set
+``release_certified=true``.
 """
 
 from __future__ import annotations
@@ -25,42 +26,43 @@ import copy
 import hashlib
 import os
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
+from ._bulk_result_archive import (
+    BulkSerialResultArchiveError,
+    read_bulk_serial_result_archive,
+)
+from ._bulk_target_q_evidence import (
+    BulkTargetQEvidenceError,
+    verify_bulk_target_q_release_evidence,
+)
 from ._bulk_target_q_mpi import (
     BulkTargetQControls,
     build_bulk_target_q_campaign,
     bulk_three_phonon_problem_sha256,
     compare_bulk_target_q_with_serial,
 )
-from ._bulk_target_q_evidence import (
-    BulkTargetQEvidenceError,
-    verify_bulk_target_q_release_evidence,
-)
-from ._bulk_result_archive import (
-    BulkSerialResultArchiveError,
-    read_bulk_serial_result_archive,
+from ._reference_mpi_provenance import (
+    ReferenceMPIProvenanceError,
+    validate_reference_mpi_evidence,
 )
 from ._silicon_bulk_problem import (
     SiliconBulkProblemError,
     load_silicon_bulk_three_phonon_problem,
-)
-from .bulk_harmonic import PHONO3PY_4_4_FREQUENCY_FACTOR_TO_THZ
-from .bulk_three_phonon import compute_three_phonon_linewidths
-from ._reference_mpi_provenance import (
-    ReferenceMPIProvenanceError,
-    validate_reference_mpi_evidence,
 )
 from ._v3_sample_manifest_mpi import (
     V3SampleMPIArtifactError,
     current_v3_sampling_source_identity,
     validate_v3_mpi_orchestration_evidence,
 )
+from .bulk_harmonic import PHONO3PY_4_4_FREQUENCY_FACTOR_TO_THZ
+from .bulk_three_phonon import compute_three_phonon_linewidths
 from .phono3py_reference import read_phono3py_silicon_reference
 from .silicon_mpi_oracle_validation import (
     SILICON_MPI_ORACLE_REPORT_SCHEMA,
@@ -68,8 +70,8 @@ from .silicon_mpi_oracle_validation import (
     SILICON_TARGET_Q_MERGE_SCHEMA,
     SiliconMPIOracleValidationConfig,
     SiliconMPIOracleValidationError,
-    _evaluate_silicon_mpi_oracle_validation,
     _canonical_sha256,
+    _evaluate_silicon_mpi_oracle_validation,
     _mapping,
     _read_json,
     _regular_file,
@@ -80,15 +82,14 @@ from .silicon_mpi_oracle_validation import (
     _verify_report_digest,
 )
 from .silicon_oracle_validation import (
-    SILICON_ORACLE_REPORT_SCHEMA,
     PINNED_SILICON_SOURCE_COMMIT,
+    SILICON_ORACLE_REPORT_SCHEMA,
     _code_identity,
     _repository_identity,
     _runtime_identity,
     write_json_atomic_exclusive,
 )
 from .translational_fc3 import PHONO3PY_4_4_SYMPREC
-
 
 SILICON_RELEASE_REPORT_SCHEMA = "negfpy.silicon_0_2_0_release_evidence.v1"
 SILICON_RELEASE_VERSION = "0.2.0"
@@ -135,6 +136,10 @@ _SHARED_TARGET_ROLE_MAP = {
     "fc3_full_hdf5": "target_bundle_fc3.full.hdf5",
     "input_manifest": "target_bundle_input-manifest.normalized.json",
     "phono3py_yaml": "target_phono3py_yaml",
+}
+_REFERENCE_MPI_TARGET_ROLES = {
+    "orchestration": "target_bundle_reference-mpi-orchestration.json",
+    "evidence_archive": "target_bundle_reference-mpi-evidence.tar",
 }
 _EXTERNAL_DYNAMIC_REPORT_FIELDS = frozenset(
     {
@@ -273,9 +278,7 @@ def _revalidate_external_science(
     def record_path(
         values: Mapping[str, Any], role: str, *, context: str
     ) -> Path:
-        record = _mapping(
-            values.get(role), name=f"{context}.{role}"
-        )
+        record = _mapping(values.get(role), name=f"{context}.{role}")
         return Path(str(record.get("path")))
 
     probe = release_config.external_oracle_report_path.with_name(
@@ -416,6 +419,12 @@ class SiliconReleaseValidationConfig:
     external_oracle_report_path: Path
     equality_3x3_summary_path: Path
     equality_5x5_summary_path: Path
+    v3_3x3_manifest_path: Path
+    v3_3x3_orchestration_path: Path
+    v3_3x3_run_directory_path: Path
+    v3_5x5_manifest_path: Path
+    v3_5x5_orchestration_path: Path
+    v3_5x5_run_directory_path: Path
     repository_path: Path
     output_path: Path
 
@@ -424,20 +433,46 @@ class SiliconReleaseValidationConfig:
             "external_oracle_report_path",
             "equality_3x3_summary_path",
             "equality_5x5_summary_path",
+            "v3_3x3_manifest_path",
+            "v3_3x3_orchestration_path",
+            "v3_5x5_manifest_path",
+            "v3_5x5_orchestration_path",
         ):
             object.__setattr__(
                 self,
                 name,
                 _regular_file(getattr(self, name), name=name),
             )
-        if len(
-            {
-                self.external_oracle_report_path,
-                self.equality_3x3_summary_path,
-                self.equality_5x5_summary_path,
-            }
-        ) != 3:
-            raise ValueError("The three release reports must be distinct.")
+        if (
+            len(
+                {
+                    self.external_oracle_report_path,
+                    self.equality_3x3_summary_path,
+                    self.equality_5x5_summary_path,
+                    self.v3_3x3_manifest_path,
+                    self.v3_3x3_orchestration_path,
+                    self.v3_5x5_manifest_path,
+                    self.v3_5x5_orchestration_path,
+                }
+            )
+            != 7
+        ):
+            raise ValueError(
+                "Release reports and per-mesh V3 evidence files must be distinct."
+            )
+        for name in (
+            "v3_3x3_run_directory_path",
+            "v3_5x5_run_directory_path",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _directory(getattr(self, name), name=name),
+            )
+        if self.v3_3x3_run_directory_path == self.v3_5x5_run_directory_path:
+            raise ValueError(
+                "The 3x3x3 and 5x5x5 V3 run directories must be distinct."
+            )
         object.__setattr__(
             self,
             "repository_path",
@@ -567,18 +602,14 @@ def _require_release_runtime(
     imported_code: Mapping[str, Any],
 ) -> None:
     packages = _mapping(runtime.get("packages"), name="runtime.packages")
-    record = _mapping(
-        imported_code.get("record"), name="imported_code.record"
-    )
+    record = _mapping(imported_code.get("record"), name="imported_code.record")
     if (
         repository.get("clean") is not True
         or repository.get("status_sha256") != _EMPTY_STATUS_SHA256
         or imported_code.get("passed") is not True
         or packages.get("negfpy") != SILICON_RELEASE_VERSION
-        or record.get("installed_package_version")
-        != SILICON_RELEASE_VERSION
-        or record.get("declared_package_version")
-        != SILICON_RELEASE_VERSION
+        or record.get("installed_package_version") != SILICON_RELEASE_VERSION
+        or record.get("declared_package_version") != SILICON_RELEASE_VERSION
         or record.get("package_version") != SILICON_RELEASE_VERSION
         or record.get("package_version_consistent") is not True
     ):
@@ -673,9 +704,7 @@ def _track_assignment_files(
             f"{name}.assignments must be an array."
         )
     for position, raw in enumerate(assignments):
-        assignment = _mapping(
-            raw, name=f"{name}.assignments[{position}]"
-        )
+        assignment = _mapping(raw, name=f"{name}.assignments[{position}]")
         checkpoint = _safe_relative_path(
             assignment.get("checkpoint_relative_path"),
             name=f"{name}.checkpoint_relative_path",
@@ -771,15 +800,9 @@ def _require_qualification_target_match(
     for qualification_role, target_role in _SHARED_TARGET_ROLE_MAP.items():
         qualified = qualification_inputs.get(qualification_role)
         target = target_records.get(target_role)
-        qualified_sha = (
-            None if qualified is None else qualified.get("sha256")
-        )
+        qualified_sha = None if qualified is None else qualified.get("sha256")
         target_sha = None if target is None else target.get("sha256")
-        if (
-            qualified is None
-            or target is None
-            or qualified_sha != target_sha
-        ):
+        if qualified is None or target is None or qualified_sha != target_sha:
             mismatches[qualification_role] = {
                 "qualification_sha256": qualified_sha,
                 "target_role": target_role,
@@ -789,6 +812,273 @@ def _require_qualification_target_match(
         raise SiliconReleaseValidationError(
             f"{name} serial qualification and target IFC/YAML/manifest/"
             f"environment identities differ: {mismatches}."
+        )
+
+
+def _validate_equality_reference_mpi(
+    *,
+    expected_mesh: tuple[int, int, int],
+    target_records: Mapping[str, Mapping[str, Any]],
+    reference: Any,
+) -> dict[str, Any]:
+    """Independently authenticate one equality mesh's reference-MPI bundle."""
+
+    if tuple(reference.mesh) != expected_mesh:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} reference-MPI evidence has the wrong mesh."
+        )
+    missing = sorted(
+        role
+        for role in _REFERENCE_MPI_TARGET_ROLES.values()
+        if role not in target_records
+    )
+    if missing:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} target bundle lacks mandatory reference-MPI "
+            f"evidence: {missing}."
+        )
+    orchestration_record = dict(
+        target_records[_REFERENCE_MPI_TARGET_ROLES["orchestration"]]
+    )
+    archive_record = dict(
+        target_records[_REFERENCE_MPI_TARGET_ROLES["evidence_archive"]]
+    )
+    orchestration_path = Path(str(orchestration_record["path"]))
+    orchestration_document = _read_json(
+        orchestration_path,
+        name=f"{expected_mesh} reference MPI orchestration",
+    )
+    try:
+        validated = validate_reference_mpi_evidence(
+            orchestration_path.parent,
+            orchestration_document,
+            expected_mesh=reference.mesh,
+            expected_grid_points=reference.grid_points_grg.tolist(),
+            expected_band_indices=reference.band_indices.tolist(),
+            expected_n_qpoints=reference.n_qpoints,
+            expected_n_bands=reference.n_bands,
+            require_mpi=True,
+        )
+    except ReferenceMPIProvenanceError as exc:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} reference-MPI evidence is invalid: {exc}"
+        ) from exc
+    validated_archive = _mapping(
+        validated.get("evidence_archive"),
+        name=f"{expected_mesh} reference MPI evidence archive",
+    )
+    merged_reference = _mapping(
+        validated.get("merged_reference"),
+        name=f"{expected_mesh} reference MPI merged reference",
+    )
+    reference_record = target_records[
+        "target_bundle_si-phono3py-reference.hdf5"
+    ]
+    if (
+        Path(str(validated_archive.get("path"))).resolve()
+        != Path(str(archive_record["path"]))
+        or validated_archive.get("sha256") != archive_record.get("sha256")
+        or validated_archive.get("size_bytes")
+        != archive_record.get("size_bytes")
+        or merged_reference.get("sha256") != reference_record.get("sha256")
+        or merged_reference.get("size_bytes")
+        != reference_record.get("size_bytes")
+        or validated.get("full_q_selection") is not True
+        or validated.get("full_band_selection") is not True
+        or validated.get("floating_point_mpi_reductions") is not False
+    ):
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} reference-MPI evidence differs from the "
+            "checksummed target bundle."
+        )
+    return {
+        "campaign_sha256": validated["campaign_sha256"],
+        "orchestration": orchestration_record,
+        "evidence_archive": archive_record,
+        "evidence_members": validated["evidence_members"],
+        "task_count": validated["task_count"],
+        "execution_count": validated["execution_count"],
+        "execution_ids": validated["execution_ids"],
+        "restart": validated["restart"],
+        "worker_bindings_by_execution": validated[
+            "worker_bindings_by_execution"
+        ],
+        "bundle_identity": validated["bundle_identity"],
+        "merged_reference": validated["merged_reference"],
+        "canonical_merge": validated["canonical_merge"],
+        "full_q_selection": True,
+        "full_band_selection": True,
+        "floating_point_mpi_reductions": False,
+    }
+
+
+def _v3_mpi_facts(value: Any) -> dict[str, Any]:
+    return {
+        "orchestration_file_sha256": value.file_sha256,
+        "payload_sha256": value.payload_sha256,
+        "campaign_sha256": value.campaign_sha256,
+        "source_identity_sha256": value.source_identity_sha256,
+        "source_authenticated": value.source_authenticated,
+        "source_revision": value.source_revision,
+        "source_tree_sha256": value.source_tree_sha256,
+        "environment_sha256": value.environment_sha256,
+        "mesh": list(value.mesh),
+        "target_grid_points": list(value.target_grid_points),
+        "target_bands": list(value.target_bands),
+        "selected_execution_ids": list(value.selected_execution_ids),
+        "selected_communicator_sizes": list(value.selected_communicator_sizes),
+        "selected_modes": list(value.selected_modes),
+        "restart_resume_recorded": value.restart_resume_recorded,
+        "physical_core_binding_passed": value.physical_core_binding_passed,
+        "mpi_origin_lineage_passed": value.mpi_origin_lineage_passed,
+    }
+
+
+def _validate_equality_v3_mpi(
+    *,
+    expected_mesh: tuple[int, int, int],
+    manifest_path: Path,
+    orchestration_path: Path,
+    run_directory: Path,
+    qualification_inputs: Mapping[str, Mapping[str, Any]],
+    reference: Any,
+    tracker: _EvidenceTracker,
+    repository: Mapping[str, Any],
+    imported_code: Mapping[str, Any],
+    environment_sha256: str,
+    source_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate explicit V3-MPI evidence for one equality mesh."""
+
+    qualified_manifest = qualification_inputs.get("interaction_samples")
+    if qualified_manifest is None:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} serial qualification lacks interaction_samples."
+        )
+    qualified_path = Path(str(qualified_manifest["path"]))
+    if manifest_path != qualified_path:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} explicit V3 manifest is not the exact manifest "
+            "used by the serial qualification."
+        )
+    manifest_record = tracker.path_sha256(
+        manifest_path,
+        qualified_manifest.get("sha256"),
+        name=f"{expected_mesh} V3 scientific manifest",
+    )
+    identity_fields = (
+        "path",
+        "sha256",
+        "size_bytes",
+        "device",
+        "inode",
+        "mtime_ns",
+    )
+    if any(
+        manifest_record[field] != qualified_manifest.get(field)
+        for field in identity_fields
+    ):
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} explicit V3 manifest identity differs from the "
+            "serial qualification."
+        )
+    orchestration_record = tracker.snapshot_path(
+        orchestration_path,
+        name=f"{expected_mesh} V3 MPI orchestration",
+    )
+    try:
+        validated = validate_v3_mpi_orchestration_evidence(
+            manifest_path,
+            orchestration_path,
+            run_directory,
+            require_authenticated_source=True,
+            require_mpi=True,
+            expected_source_revision=str(repository["head_commit"]),
+            expected_source_tree_sha256=str(
+                imported_code["record"]["source_tree_sha256"]
+            ),
+            expected_environment_sha256=environment_sha256,
+            expected_source_identity=source_identity,
+            expected_mesh=reference.mesh,
+            expected_target_grid_points=reference.grid_points_grg,
+            expected_target_bands=reference.band_indices,
+        )
+    except V3SampleMPIArtifactError as exc:
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} V3 MPI evidence is invalid: {exc}"
+        ) from exc
+    facts = _v3_mpi_facts(validated)
+    if (
+        validated.path != orchestration_path
+        or facts["orchestration_file_sha256"] != orchestration_record["sha256"]
+        or facts["source_authenticated"] is not True
+        or facts["source_revision"] != repository["head_commit"]
+        or facts["source_tree_sha256"]
+        != imported_code["record"]["source_tree_sha256"]
+        or facts["environment_sha256"] != environment_sha256
+        or facts["mesh"] != list(expected_mesh)
+        or facts["target_grid_points"] != reference.grid_points_grg.tolist()
+        or facts["target_bands"] != reference.band_indices.tolist()
+        or any(mode != "mpi" for mode in facts["selected_modes"])
+        or facts["physical_core_binding_passed"] is not True
+        or facts["mpi_origin_lineage_passed"] is not True
+    ):
+        raise SiliconReleaseValidationError(
+            f"{expected_mesh} V3 MPI evidence differs from the explicit release inputs."
+        )
+    return {
+        "scientific_manifest": manifest_record,
+        "orchestration": orchestration_record,
+        "run_directory": str(run_directory),
+        **facts,
+        "floating_point_mpi_reductions": False,
+        "canonical_merge_revalidated": True,
+    }
+
+
+def _recheck_equality_v3_mpi(
+    evidence: Mapping[str, Any],
+    *,
+    source_identity: Mapping[str, Any],
+) -> None:
+    """Repeat the strict V3 evidence validation at the publication barrier."""
+
+    try:
+        validated = validate_v3_mpi_orchestration_evidence(
+            Path(
+                str(
+                    _mapping(
+                        evidence["scientific_manifest"], name="V3 manifest"
+                    )["path"]
+                )
+            ),
+            Path(
+                str(
+                    _mapping(
+                        evidence["orchestration"], name="V3 orchestration"
+                    )["path"]
+                )
+            ),
+            Path(str(evidence["run_directory"])),
+            require_authenticated_source=True,
+            require_mpi=True,
+            expected_source_revision=str(evidence["source_revision"]),
+            expected_source_tree_sha256=str(evidence["source_tree_sha256"]),
+            expected_environment_sha256=str(evidence["environment_sha256"]),
+            expected_source_identity=source_identity,
+            expected_mesh=evidence["mesh"],
+            expected_target_grid_points=evidence["target_grid_points"],
+            expected_target_bands=evidence["target_bands"],
+        )
+    except V3SampleMPIArtifactError as exc:
+        raise SiliconReleaseValidationError(
+            f"Equality V3 MPI evidence failed its final recheck: {exc}"
+        ) from exc
+    if _v3_mpi_facts(validated) != {
+        key: evidence[key] for key in _v3_mpi_facts(validated)
+    }:
+        raise SiliconReleaseValidationError(
+            "Equality V3 MPI evidence changed during final aggregation."
         )
 
 
@@ -826,13 +1116,9 @@ def _validate_external_report(
         or not gates
         or any(value is not True for value in gates.values())
         or release_gates.get("external_reference_certification") is not True
-        or release_gates.get(
-            "fresh_3x3_full_field_serial_mpi_equality"
-        )
+        or release_gates.get("fresh_3x3_full_field_serial_mpi_equality")
         is not False
-        or release_gates.get(
-            "fresh_5x5_full_field_serial_mpi_equality"
-        )
+        or release_gates.get("fresh_5x5_full_field_serial_mpi_equality")
         is not False
         or release_gates.get("release_aggregator_complete") is not False
     ):
@@ -848,9 +1134,7 @@ def _validate_external_report(
         runtime=runtime,
         name="external MPI oracle",
     )
-    execution = _mapping(
-        report.get("execution"), name="external execution"
-    )
+    execution = _mapping(report.get("execution"), name="external execution")
     if (
         execution.get("monolithic_negfpy_recomputation") is not False
         or execution.get("fresh_mpi_equality_claimed") is not False
@@ -908,9 +1192,7 @@ def _validate_external_report(
         Path(str(campaign_records["task_manifest"]["path"])),
         name="external task manifest",
     )
-    _verify_envelope(
-        task_document, name="external task manifest"
-    )
+    _verify_envelope(task_document, name="external task manifest")
     execution_document = _read_json(
         Path(str(campaign_records["execution_manifest"]["path"])),
         name="external execution manifest",
@@ -928,15 +1210,11 @@ def _validate_external_report(
     if (
         task_document["payload_sha256"]
         != campaign.get("campaign_manifest_sha256")
-        or campaign_records["task_manifest"].get(
-            "campaign_manifest_sha256"
-        )
+        or campaign_records["task_manifest"].get("campaign_manifest_sha256")
         != campaign.get("campaign_manifest_sha256")
         or execution_payload.get("manifest_sha256")
         != campaign.get("campaign_manifest_sha256")
-        or campaign_records["execution_manifest"].get(
-            "execution_sha256"
-        )
+        or campaign_records["execution_manifest"].get("execution_sha256")
         != execution_document["payload_sha256"]
         or merge_payload.get("campaign_manifest_sha256")
         != campaign.get("campaign_manifest_sha256")
@@ -952,9 +1230,7 @@ def _validate_external_report(
         )
     _track_assignment_files(
         execution_payload,
-        run_root=Path(
-            str(campaign_records["task_manifest"]["path"])
-        ).parent,
+        run_root=Path(str(campaign_records["task_manifest"]["path"])).parent,
         tracker=tracker,
         name="external execution",
     )
@@ -1002,14 +1278,12 @@ def _validate_external_report(
             expected_source_tree_sha256=imported_code["record"][
                 "source_tree_sha256"
             ],
-            expected_environment_sha256=target_inputs[
-                "environment_lock"
-            ]["sha256"],
+            expected_environment_sha256=target_inputs["environment_lock"][
+                "sha256"
+            ],
             expected_source_identity=current_v3_source_identity,
             expected_mesh=reference_for_v3.mesh,
-            expected_target_grid_points=(
-                reference_for_v3.grid_points_grg
-            ),
+            expected_target_grid_points=(reference_for_v3.grid_points_grg),
             expected_target_bands=reference_for_v3.band_indices,
         )
     except V3SampleMPIArtifactError as exc:
@@ -1017,16 +1291,13 @@ def _validate_external_report(
             f"External V3 MPI orchestration is invalid: {exc}"
         ) from exc
     if (
-        v3_mpi.get("payload_sha256")
-        != validated_v3_mpi.payload_sha256
-        or v3_mpi.get("campaign_sha256")
-        != validated_v3_mpi.campaign_sha256
+        v3_mpi.get("payload_sha256") != validated_v3_mpi.payload_sha256
+        or v3_mpi.get("campaign_sha256") != validated_v3_mpi.campaign_sha256
         or v3_mpi.get("source_identity_sha256")
         != validated_v3_mpi.source_identity_sha256
         or v3_mpi.get("source_authenticated")
         is not validated_v3_mpi.source_authenticated
-        or v3_mpi.get("source_revision")
-        != validated_v3_mpi.source_revision
+        or v3_mpi.get("source_revision") != validated_v3_mpi.source_revision
         or v3_mpi.get("source_tree_sha256")
         != validated_v3_mpi.source_tree_sha256
         or v3_mpi.get("environment_sha256")
@@ -1034,8 +1305,7 @@ def _validate_external_report(
         or v3_mpi.get("mesh") != list(validated_v3_mpi.mesh)
         or v3_mpi.get("target_grid_points")
         != list(validated_v3_mpi.target_grid_points)
-        or v3_mpi.get("target_bands")
-        != list(validated_v3_mpi.target_bands)
+        or v3_mpi.get("target_bands") != list(validated_v3_mpi.target_bands)
         or v3_mpi.get("selected_execution_ids")
         != list(validated_v3_mpi.selected_execution_ids)
         or v3_mpi.get("selected_communicator_sizes")
@@ -1054,8 +1324,7 @@ def _validate_external_report(
         or v3_mpi.get("canonical_merge_revalidated") is not True
     ):
         raise SiliconReleaseValidationError(
-            "External V3 MPI report differs from the revalidated task "
-            "evidence."
+            "External V3 MPI report differs from the revalidated task evidence."
         )
     generation = _mapping(
         target_reference.get("generation_environment"),
@@ -1066,9 +1335,7 @@ def _validate_external_report(
         name="external generation_environment.records",
     )
     for stage, raw in generation_records.items():
-        record = _mapping(
-            raw, name=f"external generation record {stage}"
-        )
+        record = _mapping(raw, name=f"external generation record {stage}")
         tracker.path_sha256(
             record.get("path"),
             record.get("sha256"),
@@ -1107,13 +1374,11 @@ def _validate_external_report(
         archive_report.get("sha256"),
         name="external reference MPI evidence archive",
     )
-    if (
-        orchestration_record["size_bytes"]
-        != _mapping(
-            reference_mpi.get("orchestration"),
-            name="external reference MPI orchestration",
-        ).get("size_bytes")
-        or archive_record["size_bytes"] != archive_report.get("size_bytes")
+    if orchestration_record["size_bytes"] != _mapping(
+        reference_mpi.get("orchestration"),
+        name="external reference MPI orchestration",
+    ).get("size_bytes") or archive_record["size_bytes"] != archive_report.get(
+        "size_bytes"
     ):
         raise SiliconReleaseValidationError(
             "External reference-MPI file size evidence is inconsistent."
@@ -1149,8 +1414,7 @@ def _validate_external_report(
         != validated_reference_mpi["execution_count"]
         or reference_mpi.get("execution_ids")
         != validated_reference_mpi["execution_ids"]
-        or reference_mpi.get("restart")
-        != validated_reference_mpi["restart"]
+        or reference_mpi.get("restart") != validated_reference_mpi["restart"]
         or reference_mpi.get("worker_bindings_by_execution")
         != validated_reference_mpi["worker_bindings_by_execution"]
         or reference_mpi.get("bundle_identity")
@@ -1184,9 +1448,7 @@ def _validate_external_report(
         "cutoff_frequency_thz": float(
             target_reference["cutoff_frequency_thz"]
         ),
-        "campaign_manifest_sha256": campaign[
-            "campaign_manifest_sha256"
-        ],
+        "campaign_manifest_sha256": campaign["campaign_manifest_sha256"],
         "comparison": report["comparison"],
         "independent_scientific_revalidation": scientific_revalidation,
         "v3_mpi_sampling": {
@@ -1198,20 +1460,12 @@ def _validate_external_report(
             "source_identity_sha256": (
                 validated_v3_mpi.source_identity_sha256
             ),
-            "source_authenticated": (
-                validated_v3_mpi.source_authenticated
-            ),
+            "source_authenticated": (validated_v3_mpi.source_authenticated),
             "source_revision": validated_v3_mpi.source_revision,
-            "source_tree_sha256": (
-                validated_v3_mpi.source_tree_sha256
-            ),
-            "environment_sha256": (
-                validated_v3_mpi.environment_sha256
-            ),
+            "source_tree_sha256": (validated_v3_mpi.source_tree_sha256),
+            "environment_sha256": (validated_v3_mpi.environment_sha256),
             "mesh": list(validated_v3_mpi.mesh),
-            "target_grid_points": list(
-                validated_v3_mpi.target_grid_points
-            ),
+            "target_grid_points": list(validated_v3_mpi.target_grid_points),
             "target_bands": list(validated_v3_mpi.target_bands),
             "selected_execution_ids": list(
                 validated_v3_mpi.selected_execution_ids
@@ -1259,9 +1513,7 @@ def _validate_comparison_report(
     *,
     merged_artifact_sha256: str,
 ) -> dict[str, Any]:
-    report = dict(
-        _verify_report_digest(value, name="monolithic comparison")
-    )
+    report = dict(_verify_report_digest(value, name="monolithic comparison"))
     exact = _mapping(
         report.get("exact_field_passed"),
         name="comparison.exact_field_passed",
@@ -1289,8 +1541,7 @@ def _validate_comparison_report(
         or set(numerical) != _CANONICAL_NUMERICAL_COMPARISON_FIELDS
         or any(value is not True for value in numerical.values())
         or report.get("errors") != []
-        or report.get("merged_artifact_sha256")
-        != merged_artifact_sha256
+        or report.get("merged_artifact_sha256") != merged_artifact_sha256
         or set(absolute) != set(numerical)
         or set(relative) != set(numerical)
     ):
@@ -1322,6 +1573,10 @@ def _validate_equality_summary(
     path: Path,
     *,
     expected_mesh: tuple[int, int, int],
+    v3_manifest_path: Path,
+    v3_orchestration_path: Path,
+    v3_run_directory: Path,
+    v3_source_identity: Mapping[str, Any],
     tracker: _EvidenceTracker,
     repository: Mapping[str, Any],
     imported_code: Mapping[str, Any],
@@ -1488,8 +1743,7 @@ def _validate_equality_summary(
         != campaign.campaign_manifest_sha256
         or controls.controls_sha256 != summary.get("controls_sha256")
         or controls.problem_sha256 != summary.get("problem_sha256")
-        or task_payload.get("source_revision")
-        != repository.get("head_commit")
+        or task_payload.get("source_revision") != repository.get("head_commit")
         or task_payload.get("source_tree_sha256")
         != imported_code.get("record", {}).get("source_tree_sha256")
         or task_payload.get("environment_sha256")
@@ -1507,10 +1761,7 @@ def _validate_equality_summary(
             f"qualification_{role}": record["sha256"]
             for role, record in qualification_inputs.items()
         },
-        **{
-            role: record["sha256"]
-            for role, record in target_records.items()
-        },
+        **{role: record["sha256"] for role, record in target_records.items()},
     }
     if dict(controls.input_hashes) != dict(
         sorted(expected_input_hashes.items())
@@ -1583,16 +1834,13 @@ def _validate_equality_summary(
         merge_document != summary.get("merge")
         or merge.get("schema") != SILICON_TARGET_Q_MERGE_SCHEMA
         or merge.get("schema_version") != 1
-        or merge_record.get("report_sha256")
-        != merge.get("report_sha256")
+        or merge_record.get("report_sha256") != merge.get("report_sha256")
         or merge.get("campaign_manifest_sha256")
         != campaign.campaign_manifest_sha256
-        or merge.get("merged_artifact_sha256")
-        != merged_record["sha256"]
+        or merge.get("merged_artifact_sha256") != merged_record["sha256"]
         or Path(str(merge.get("merged_artifact_path"))).resolve()
         != Path(str(merged_record["path"]))
-        or list(merge.get("task_ids", ()))
-        != list(campaign.canonical_task_ids)
+        or list(merge.get("task_ids", ())) != list(campaign.canonical_task_ids)
     ):
         raise SiliconReleaseValidationError(
             f"{expected_mesh} merge evidence is inconsistent."
@@ -1636,10 +1884,10 @@ def _validate_equality_summary(
         comparison_document,
         merged_artifact_sha256=merged_record["sha256"],
     )
-    if (
-        comparison_document != summary.get("monolithic_comparison")
-        or comparison_record.get("report_sha256")
-        != comparison.get("report_sha256")
+    if comparison_document != summary.get(
+        "monolithic_comparison"
+    ) or comparison_record.get("report_sha256") != comparison.get(
+        "report_sha256"
     ):
         raise SiliconReleaseValidationError(
             f"{expected_mesh} comparison file differs from summary evidence."
@@ -1688,8 +1936,7 @@ def _validate_equality_summary(
             )
         )
         or dict(serial_archive.provenance) != expected_serial_provenance
-        or serial_archive.result_sha256
-        != comparison["serial_result_sha256"]
+        or serial_archive.result_sha256 != comparison["serial_result_sha256"]
     ):
         raise SiliconReleaseValidationError(
             f"{expected_mesh} serial archive identity/provenance differs "
@@ -1717,8 +1964,7 @@ def _validate_equality_summary(
         != tuple(range(reference.n_bands))
         or tuple(float(value) for value in controls.temperatures)
         != tuple(float(value) for value in reference.temperatures_k)
-        or list(reference.temperatures_k)
-        != external["temperatures_k"]
+        or list(reference.temperatures_k) != external["temperatures_k"]
         or float(reference.sigmas_thz[0]) != external["sigma_thz"]
         or float(reference.cutoff_frequency_thz)
         != external["cutoff_frequency_thz"]
@@ -1727,6 +1973,26 @@ def _validate_equality_summary(
             f"{expected_mesh} reference/full controls differ from release "
             "requirements or the 11x11x11 oracle."
         )
+    reference_mpi_generation = _validate_equality_reference_mpi(
+        expected_mesh=expected_mesh,
+        target_records=target_records,
+        reference=reference,
+    )
+    v3_mpi_sampling = _validate_equality_v3_mpi(
+        expected_mesh=expected_mesh,
+        manifest_path=v3_manifest_path,
+        orchestration_path=v3_orchestration_path,
+        run_directory=v3_run_directory,
+        qualification_inputs=qualification_inputs,
+        reference=reference,
+        tracker=tracker,
+        repository=repository,
+        imported_code=imported_code,
+        environment_sha256=external["target_inputs"]["environment_lock"][
+            "sha256"
+        ],
+        source_identity=v3_source_identity,
+    )
     qualification_controls = _mapping(
         qualification_report.get("controls"),
         name=f"{expected_mesh} qualification controls",
@@ -1737,9 +2003,7 @@ def _validate_equality_summary(
     )
     asr_atol = float(qualification_controls.get("asr_atol", np.nan))
     asr_rtol = float(qualification_controls.get("asr_rtol", np.nan))
-    degeneracy = float(
-        sample_manifest.get("degeneracy_tolerance_thz", np.nan)
-    )
+    degeneracy = float(sample_manifest.get("degeneracy_tolerance_thz", np.nan))
     if (
         asr_atol != 1.0e-10
         or asr_rtol != 1.0e-8
@@ -1747,26 +2011,25 @@ def _validate_equality_summary(
         or degeneracy <= 0.0
     ):
         raise SiliconReleaseValidationError(
-            f"{expected_mesh} qualification lacks the fixed serial problem "
-            "controls."
+            f"{expected_mesh} qualification lacks the fixed serial problem controls."
         )
     problem_metadata = {
         "validation_driver": SILICON_ORACLE_REPORT_SCHEMA,
         "reference_sha256": target_records[
             "target_bundle_si-phono3py-reference.hdf5"
         ]["sha256"],
-        "fc2_compact_sha256": target_records[
-            "target_bundle_fc2.compact.hdf5"
-        ]["sha256"],
-        "fc2_full_sha256": target_records[
-            "target_bundle_fc2.full.hdf5"
-        ]["sha256"],
-        "fc3_compact_sha256": target_records[
-            "target_bundle_fc3.compact.hdf5"
-        ]["sha256"],
-        "fc3_full_sha256": target_records[
-            "target_bundle_fc3.full.hdf5"
-        ]["sha256"],
+        "fc2_compact_sha256": target_records["target_bundle_fc2.compact.hdf5"][
+            "sha256"
+        ],
+        "fc2_full_sha256": target_records["target_bundle_fc2.full.hdf5"][
+            "sha256"
+        ],
+        "fc3_compact_sha256": target_records["target_bundle_fc3.compact.hdf5"][
+            "sha256"
+        ],
+        "fc3_full_sha256": target_records["target_bundle_fc3.full.hdf5"][
+            "sha256"
+        ],
         "source_commit": PINNED_SILICON_SOURCE_COMMIT,
         "no_fitted_prefactors": True,
         "internal_q_parallelism": "none",
@@ -1784,12 +2047,8 @@ def _validate_equality_summary(
             ),
             mesh=expected_mesh,
             sigma_thz=float(reference.sigmas_thz[0]),
-            cutoff_frequency_thz=float(
-                reference.cutoff_frequency_thz
-            ),
-            frequency_factor_to_thz=(
-                PHONO3PY_4_4_FREQUENCY_FACTOR_TO_THZ
-            ),
+            cutoff_frequency_thz=float(reference.cutoff_frequency_thz),
+            frequency_factor_to_thz=(PHONO3PY_4_4_FREQUENCY_FACTOR_TO_THZ),
             degenerate_tolerance_thz=degeneracy,
             make_r0_average=True,
             symprec=PHONO3PY_4_4_SYMPREC,
@@ -1801,8 +2060,7 @@ def _validate_equality_summary(
         )
     except (OSError, TypeError, ValueError, SiliconBulkProblemError) as exc:
         raise SiliconReleaseValidationError(
-            f"{expected_mesh} independent serial problem reconstruction "
-            "failed."
+            f"{expected_mesh} independent serial problem reconstruction failed."
         ) from exc
     if bulk_three_phonon_problem_sha256(serial_problem) != (
         controls.problem_sha256
@@ -1851,6 +2109,8 @@ def _validate_equality_summary(
         "independent_task_remerge": target_q_release_evidence,
         "independent_serial_comparison_repeated": True,
         "independent_serial_kernel_recomputed": True,
+        "reference_mpi_generation": reference_mpi_generation,
+        "v3_mpi_sampling": v3_mpi_sampling,
         "qualification_report_sha256": qualification_record["sha256"],
         "qualification_source_commit": qualification_report[
             "source_repository"
@@ -1885,6 +2145,10 @@ def run_silicon_release_validation(
     _require_release_runtime(
         repository_before, runtime_before, imported_before
     )
+    v3_source_identity_before = current_v3_sampling_source_identity(
+        config.repository_path,
+        require_clean=True,
+    )
 
     external = _validate_external_report(
         config,
@@ -1896,6 +2160,10 @@ def run_silicon_release_validation(
     equality_3x3 = _validate_equality_summary(
         config.equality_3x3_summary_path,
         expected_mesh=(3, 3, 3),
+        v3_manifest_path=config.v3_3x3_manifest_path,
+        v3_orchestration_path=config.v3_3x3_orchestration_path,
+        v3_run_directory=config.v3_3x3_run_directory_path,
+        v3_source_identity=v3_source_identity_before,
         tracker=tracker,
         repository=repository_before,
         imported_code=imported_before,
@@ -1905,6 +2173,10 @@ def run_silicon_release_validation(
     equality_5x5 = _validate_equality_summary(
         config.equality_5x5_summary_path,
         expected_mesh=(5, 5, 5),
+        v3_manifest_path=config.v3_5x5_manifest_path,
+        v3_orchestration_path=config.v3_5x5_orchestration_path,
+        v3_run_directory=config.v3_5x5_run_directory_path,
+        v3_source_identity=v3_source_identity_before,
         tracker=tracker,
         repository=repository_before,
         imported_code=imported_before,
@@ -1913,6 +2185,20 @@ def run_silicon_release_validation(
     )
 
     tracker.recheck()
+    _recheck_equality_v3_mpi(
+        _mapping(
+            equality_3x3.get("v3_mpi_sampling"),
+            name="3x3x3 V3 MPI sampling",
+        ),
+        source_identity=v3_source_identity_before,
+    )
+    _recheck_equality_v3_mpi(
+        _mapping(
+            equality_5x5.get("v3_mpi_sampling"),
+            name="5x5x5 V3 MPI sampling",
+        ),
+        source_identity=v3_source_identity_before,
+    )
     v3_mpi = external["v3_mpi_sampling"]
     try:
         v3_mpi_after = validate_v3_mpi_orchestration_evidence(
@@ -1939,8 +2225,7 @@ def run_silicon_release_validation(
             f"V3 MPI evidence failed its final release recheck: {exc}"
         ) from exc
     if (
-        v3_mpi_after.file_sha256
-        != v3_mpi["orchestration"]["sha256"]
+        v3_mpi_after.file_sha256 != v3_mpi["orchestration"]["sha256"]
         or v3_mpi_after.payload_sha256 != v3_mpi["payload_sha256"]
         or v3_mpi_after.campaign_sha256 != v3_mpi["campaign_sha256"]
         or v3_mpi_after.source_identity_sha256
@@ -1948,15 +2233,12 @@ def run_silicon_release_validation(
         or v3_mpi_after.source_authenticated
         is not v3_mpi["source_authenticated"]
         or v3_mpi_after.source_revision != v3_mpi["source_revision"]
-        or v3_mpi_after.source_tree_sha256
-        != v3_mpi["source_tree_sha256"]
-        or v3_mpi_after.environment_sha256
-        != v3_mpi["environment_sha256"]
+        or v3_mpi_after.source_tree_sha256 != v3_mpi["source_tree_sha256"]
+        or v3_mpi_after.environment_sha256 != v3_mpi["environment_sha256"]
         or list(v3_mpi_after.mesh) != v3_mpi["mesh"]
         or list(v3_mpi_after.target_grid_points)
         != v3_mpi["target_grid_points"]
-        or list(v3_mpi_after.target_bands)
-        != v3_mpi["target_bands"]
+        or list(v3_mpi_after.target_bands) != v3_mpi["target_bands"]
         or list(v3_mpi_after.selected_execution_ids)
         != v3_mpi["selected_execution_ids"]
         or list(v3_mpi_after.selected_communicator_sizes)
@@ -1977,10 +2259,15 @@ def run_silicon_release_validation(
     )
     runtime_after = _runtime_identity()
     imported_after = _code_identity(repository_after, runtime_after)
+    v3_source_identity_after = current_v3_sampling_source_identity(
+        config.repository_path,
+        require_clean=True,
+    )
     if (
         repository_after != repository_before
         or runtime_after != runtime_before
         or imported_after != imported_before
+        or v3_source_identity_after != v3_source_identity_before
     ):
         raise SiliconReleaseValidationError(
             "Source, imported code, or runtime changed during aggregation."
@@ -2000,6 +2287,10 @@ def run_silicon_release_validation(
             "external_science_independently_recomputed": True,
             "reference_mpi_tasks_executions_and_restart_authenticated": True,
             "v3_mpi_tasks_executions_and_restart_authenticated": True,
+            "reference_mpi_3x3_generation_authenticated": True,
+            "reference_mpi_5x5_generation_authenticated": True,
+            "v3_mpi_3x3_sampling_authenticated": True,
+            "v3_mpi_5x5_sampling_authenticated": True,
             "fresh_3x3_full_field_serial_mpi_equality": True,
             "fresh_5x5_full_field_serial_mpi_equality": True,
             "target_task_bytes_independently_remerged": True,

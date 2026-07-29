@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import importlib
 import json
@@ -24,6 +25,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import stat
 import time
 from types import MappingProxyType
 from typing import Any, Literal
@@ -35,6 +37,7 @@ from threadpoolctl import threadpool_info, threadpool_limits
 _MANIFEST_SCHEMA = "negfpy_task_manifest"
 _CHECKPOINT_SCHEMA = "negfpy_task_checkpoint"
 _EXECUTION_SCHEMA = "negfpy_mpi_execution_manifest"
+_ORIGIN_ASSIGNMENT_SCHEMA = "negfpy_task_origin_assignment"
 _SCHEMA_VERSION = 1
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SUFFIX_PATTERN = re.compile(r"^\.[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -46,10 +49,19 @@ _THREAD_ENVIRONMENT = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 )
 _TASK_TAG = 4101
 _RESULT_TAG = 4102
 _STOP_TAG = 4103
+_PRIVATE_TEMP_PATTERN = re.compile(
+    r"^\.(?P<target>.+)\.(?P<nonce>[0-9a-f]{32})\.tmp$"
+)
+_EXECUTION_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+)
+_EXECUTION_LEASE_NAME = ".negfpy-execution.lease"
 
 ArtifactValidator = Callable[[Path, "TaskSpec"], Mapping[str, Any] | None]
 TaskWorker = Callable[["TaskSpec", "TaskContext"], "TaskResult"]
@@ -126,6 +138,175 @@ def _validate_identifier(value: Any, *, name: str) -> str:
     return value
 
 
+def _validate_execution_id(value: Any, *, name: str = "execution_id") -> str:
+    """Validate the one filename-safe execution-ID grammar."""
+
+    if (
+        not isinstance(value, str)
+        or _EXECUTION_ID_PATTERN.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"{name} must match {_EXECUTION_ID_PATTERN.pattern!r}."
+        )
+    return value
+
+
+def _absolute_lexical_path(value: str | Path, *, name: str) -> Path:
+    raw = Path(value).expanduser()
+    if "\x00" in os.fspath(raw) or ".." in raw.parts:
+        raise TaskManifestError(
+            f"{name} must be a canonical non-symlink path."
+        )
+    lexical = raw if raw.is_absolute() else Path.cwd() / raw
+    return Path(os.path.abspath(os.fspath(lexical)))
+
+
+def _resolve_nonsymlink_path(
+    value: str | Path,
+    *,
+    name: str,
+    must_exist: bool,
+    expected_kind: Literal["file", "directory"],
+    error_type: type[TaskMPIError] = TaskManifestError,
+) -> Path:
+    """Inspect every existing path component without following symlinks."""
+
+    try:
+        lexical = _absolute_lexical_path(value, name=name)
+    except TaskManifestError as exc:
+        raise error_type(str(exc)) from exc
+    cursor = Path(lexical.anchor)
+    missing = False
+    for part in lexical.parts[1:]:
+        cursor = cursor / part
+        if missing:
+            continue
+        try:
+            status = cursor.lstat()
+        except FileNotFoundError:
+            missing = True
+            continue
+        except OSError as exc:
+            raise error_type(f"cannot inspect {name}: {cursor}") from exc
+        if stat.S_ISLNK(status.st_mode):
+            raise error_type(f"{name} may not traverse a symlink: {cursor}")
+    if must_exist and missing:
+        raise error_type(f"{name} does not exist: {lexical}")
+    if not missing:
+        try:
+            status = lexical.lstat()
+        except OSError as exc:
+            raise error_type(f"cannot inspect {name}: {lexical}") from exc
+        if (
+            expected_kind == "file"
+            and not stat.S_ISREG(status.st_mode)
+        ):
+            raise error_type(f"{name} must be a regular file: {lexical}")
+        if (
+            expected_kind == "directory"
+            and not stat.S_ISDIR(status.st_mode)
+        ):
+            raise error_type(f"{name} must be a directory: {lexical}")
+    return lexical
+
+
+def _ensure_owned_directory(
+    value: str | Path,
+    *,
+    name: str,
+    error_type: type[TaskMPIError] = TaskManifestError,
+) -> Path:
+    """Create a private directory without traversing a symlink component."""
+
+    try:
+        lexical = _absolute_lexical_path(value, name=name)
+    except TaskManifestError as exc:
+        raise error_type(str(exc)) from exc
+    cursor = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        cursor = cursor / part
+        try:
+            status = cursor.lstat()
+        except FileNotFoundError:
+            try:
+                cursor.mkdir()
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise error_type(
+                    f"cannot create {name}: {cursor}"
+                ) from exc
+            try:
+                status = cursor.lstat()
+            except OSError as exc:
+                raise error_type(
+                    f"cannot verify newly created {name}: {cursor}"
+                ) from exc
+        except OSError as exc:
+            raise error_type(f"cannot inspect {name}: {cursor}") from exc
+        if stat.S_ISLNK(status.st_mode):
+            raise error_type(f"{name} may not traverse a symlink: {cursor}")
+        if not stat.S_ISDIR(status.st_mode):
+            raise error_type(
+                f"{name} component is not a directory: {cursor}"
+            )
+    return lexical
+
+
+def _open_single_link_regular(
+    path: Path,
+    *,
+    name: str,
+    error_type: type[TaskMPIError],
+) -> int:
+    """Open a trusted file and bind its pathname to one regular inode."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise error_type(
+            f"{name} must be a readable non-symlink regular file: {path}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or (opened.st_dev, opened.st_ino)
+            != (named.st_dev, named.st_ino)
+        ):
+            raise error_type(
+                f"{name} must be a single-link regular file: {path}"
+            )
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _read_single_link_bytes(
+    path: Path,
+    *,
+    name: str,
+    error_type: type[TaskMPIError],
+) -> bytes:
+    descriptor = _open_single_link_regular(
+        path,
+        name=name,
+        error_type=error_type,
+    )
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            return stream.read()
+    except OSError as exc:
+        raise error_type(f"cannot read {name}: {path}") from exc
+
+
 def _normalize_json(value: Any, *, path: str = "$") -> Any:
     if value is None or isinstance(value, (str, bool)):
         return value
@@ -182,11 +363,23 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _file_sha256(path: Path) -> str:
+def _file_sha256(
+    path: Path,
+    *,
+    error_type: type[TaskMPIError] = TaskCheckpointCorruptionError,
+) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
+    descriptor = _open_single_link_regular(
+        path,
+        name="trusted input",
+        error_type=error_type,
+    )
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise error_type(f"cannot hash trusted input: {path}") from exc
     return digest.hexdigest()
 
 
@@ -222,9 +415,15 @@ def _read_envelope(
     error_type: type[TaskMPIError],
 ) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
+        raw = _read_single_link_bytes(
+            path,
+            name="strict-JSON record",
+            error_type=error_type,
+        )
         text = raw.decode("ascii")
         document = json.loads(text)
+    except error_type:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise error_type(f"invalid or truncated strict-JSON record: {path}") from exc
     if not isinstance(document, dict):
@@ -265,12 +464,30 @@ def _publish_immutable(
 ) -> Path:
     """Publish bytes atomically without ever replacing an existing record."""
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        try:
-            existing = target.read_bytes()
-        except OSError as exc:
-            raise conflict_type(f"cannot read existing record: {target}") from exc
+    target = _resolve_nonsymlink_path(
+        target,
+        name="immutable record",
+        must_exist=False,
+        expected_kind="file",
+        error_type=conflict_type,
+    )
+    _ensure_owned_directory(
+        target.parent,
+        name="immutable record parent",
+        error_type=conflict_type,
+    )
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise conflict_type(f"cannot inspect existing record: {target}") from exc
+    else:
+        existing = _read_single_link_bytes(
+            target,
+            name="existing immutable record",
+            error_type=conflict_type,
+        )
         if existing == payload:
             return target
         raise conflict_type(f"refusing to overwrite a different record: {target}")
@@ -284,7 +501,11 @@ def _publish_immutable(
         try:
             os.link(temporary, target)
         except FileExistsError:
-            existing = target.read_bytes()
+            existing = _read_single_link_bytes(
+                target,
+                name="concurrently published immutable record",
+                error_type=conflict_type,
+            )
             if existing != payload:
                 raise conflict_type(
                     f"a different record was concurrently published: {target}"
@@ -295,7 +516,136 @@ def _publish_immutable(
             temporary.unlink()
         except FileNotFoundError:
             pass
+    _read_single_link_bytes(
+        target,
+        name="published immutable record",
+        error_type=conflict_type,
+    )
     return target
+
+
+def _cleanup_interrupted_publications(
+    directory: Path,
+    *,
+    allowed_target: Callable[[str], bool],
+    allowed_private_entries: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Remove only exact private temp files left by interrupted publication."""
+
+    directory = _resolve_nonsymlink_path(
+        directory,
+        name="publication directory",
+        must_exist=True,
+        expected_kind="directory",
+    )
+    removed: list[str] = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        if not path.name.startswith("."):
+            continue
+        if path.name in allowed_private_entries:
+            continue
+        match = _PRIVATE_TEMP_PATTERN.fullmatch(path.name)
+        try:
+            status = path.lstat()
+        except OSError as exc:
+            raise TaskManifestError(
+                f"cannot inspect interrupted-publication residue: {path}"
+            ) from exc
+        if (
+            match is None
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+            or not allowed_target(match.group("target"))
+        ):
+            raise TaskManifestError(
+                f"suspicious interrupted-publication residue: {path}"
+            )
+        path.unlink()
+        removed.append(path.name)
+    if removed:
+        _fsync_directory(directory)
+    return tuple(removed)
+
+
+@dataclass(frozen=True)
+class _ExecutionLease:
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+
+def _acquire_execution_lease(root: Path) -> _ExecutionLease:
+    """Acquire the OS-released exclusive lease for one task run directory."""
+
+    root = _ensure_owned_directory(root, name="task run directory")
+    path = root / _EXECUTION_LEASE_NAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise TaskExecutionError(
+            f"cannot open the task execution lease: {path}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or (opened.st_dev, opened.st_ino)
+            != (named.st_dev, named.st_ino)
+        ):
+            raise TaskExecutionError(
+                "task execution lease must be a single-link regular file."
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise TaskExecutionError(
+                f"another task execution already owns the run directory: "
+                f"{root}"
+            ) from exc
+        return _ExecutionLease(
+            path=path,
+            descriptor=descriptor,
+            device=int(opened.st_dev),
+            inode=int(opened.st_ino),
+        )
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _release_execution_lease(lease: _ExecutionLease) -> None:
+    """Remove and close a still-owned lease while its OS lock is held."""
+
+    failure: Exception | None = None
+    try:
+        named = lease.path.lstat()
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+            or (named.st_dev, named.st_ino)
+            != (lease.device, lease.inode)
+        ):
+            raise TaskExecutionError(
+                "task execution lease pathname changed while locked."
+            )
+        lease.path.unlink()
+        _fsync_directory(lease.path.parent)
+    except Exception as exc:
+        failure = exc
+    finally:
+        try:
+            fcntl.flock(lease.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(lease.descriptor)
+    if failure is not None:
+        raise failure
 
 
 @dataclass(frozen=True)
@@ -622,6 +972,87 @@ class TaskCheckpoint:
         return _envelope(self._payload())
 
 
+@dataclass(frozen=True)
+class TaskOriginAssignment:
+    """Immutable pre-work identity for one numerical task assignment."""
+
+    manifest_sha256: str
+    task_id: str
+    task_identity_sha256: str
+    execution_id: str
+    mode: Literal["serial", "mpi"]
+    rank: int
+    communicator_size: int
+    hostname: str
+    assigned_utc: str
+    thread_limit: int
+    thread_cap: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _validate_execution_id(self.execution_id)
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "schema_name": _ORIGIN_ASSIGNMENT_SCHEMA,
+            "schema_version": _SCHEMA_VERSION,
+            "manifest_sha256": self.manifest_sha256,
+            "task_id": self.task_id,
+            "task_identity_sha256": self.task_identity_sha256,
+            "execution_id": self.execution_id,
+            "mode": self.mode,
+            "rank": self.rank,
+            "communicator_size": self.communicator_size,
+            "hostname": self.hostname,
+            "assigned_utc": self.assigned_utc,
+            "thread_limit": self.thread_limit,
+            "thread_cap": _normalize_json(self.thread_cap),
+        }
+
+    @property
+    def assignment_sha256(self) -> str:
+        return _sha256_bytes(
+            _canonical_json(self._payload()).encode("ascii")
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return _envelope(self._payload())
+
+
+def task_origin_assignment_path(
+    manifest: TaskManifest,
+    task: TaskSpec | str,
+    assignment_directory: str | Path,
+    *,
+    execution_id: str,
+) -> Path:
+    """Return the canonical immutable pre-work assignment path."""
+
+    selected = manifest.task(task) if isinstance(task, str) else task
+    execution = _validate_execution_id(execution_id)
+    ordinal = manifest.ordinal(selected)
+    identity = manifest.task_identity_sha256(selected)
+    execution_digest = _sha256_bytes(execution.encode("utf-8"))
+    return Path(assignment_directory) / (
+        f"{ordinal:06d}-{identity[:16]}-"
+        f"{execution_digest[:16]}.assignment.json"
+    )
+
+
+def write_task_origin_assignment(
+    path: str | Path,
+    assignment: TaskOriginAssignment,
+) -> Path:
+    """Durably publish one immutable assignment before numerical work."""
+
+    if not isinstance(assignment, TaskOriginAssignment):
+        raise TypeError("assignment must be a TaskOriginAssignment.")
+    return _publish_immutable(
+        Path(path).expanduser(),
+        _canonical_bytes(assignment.as_dict()),
+        conflict_type=TaskCheckpointMismatchError,
+    )
+
+
 def task_checkpoint_path(
     manifest: TaskManifest,
     task: TaskSpec | str,
@@ -642,19 +1073,28 @@ def _resolve_artifact(
     if not isinstance(relative_path, str) or not relative_path:
         raise TaskCheckpointCorruptionError("artifact path must be non-empty text.")
     relative = Path(relative_path)
-    if relative.is_absolute() or ".." in relative.parts:
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or len(relative.parts) != 1
+    ):
         raise TaskCheckpointCorruptionError(
-            "artifact path must be relative and traversal-safe."
+            "artifact path must be one relative, traversal-safe filename."
         )
-    root = artifact_root.expanduser().resolve()
-    target = (root / relative).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise TaskCheckpointCorruptionError(
-            "artifact resolves outside the declared artifact root."
-        ) from exc
-    return target
+    root = _resolve_nonsymlink_path(
+        artifact_root,
+        name="artifact root",
+        must_exist=True,
+        expected_kind="directory",
+        error_type=TaskCheckpointCorruptionError,
+    )
+    return _resolve_nonsymlink_path(
+        root / relative,
+        name="task artifact",
+        must_exist=True,
+        expected_kind="file",
+        error_type=TaskCheckpointCorruptionError,
+    )
 
 
 def _validate_artifact(
@@ -662,8 +1102,12 @@ def _validate_artifact(
     task: TaskSpec,
     validator: ArtifactValidator | None,
 ) -> Mapping[str, Any]:
-    if not path.is_file():
-        raise TaskCheckpointCorruptionError(f"task artifact is missing: {path}")
+    descriptor = _open_single_link_regular(
+        path,
+        name="task artifact",
+        error_type=TaskCheckpointCorruptionError,
+    )
+    os.close(descriptor)
     if validator is None:
         return MappingProxyType({})
     try:
@@ -692,6 +1136,8 @@ def _checkpoint_from_result(
     elapsed_seconds: float,
     artifact_validator: ArtifactValidator | None,
     orphan_artifact_adopted: bool = False,
+    origin_assignment: TaskOriginAssignment | None = None,
+    origin_assignment_path: Path | None = None,
 ) -> TaskCheckpoint:
     relative_path: str | None = None
     artifact_sha256: str | None = None
@@ -717,6 +1163,51 @@ def _checkpoint_from_result(
     }
     if orphan_artifact_adopted:
         execution["orphan_artifact_adopted"] = True
+    if (origin_assignment is None) != (origin_assignment_path is None):
+        raise ValueError(
+            "origin assignment and path must be supplied together."
+        )
+    if origin_assignment is not None:
+        assert origin_assignment_path is not None
+        assignment_root = context.run_directory / "task-assignments"
+        try:
+            assignment_relative_path = (
+                origin_assignment_path.expanduser()
+                .resolve()
+                .relative_to(assignment_root.expanduser().resolve())
+                .as_posix()
+            )
+        except ValueError as exc:
+            raise TaskCheckpointMismatchError(
+                "origin assignment must be inside task-assignments."
+            ) from exc
+        if (
+            origin_assignment.manifest_sha256 != manifest.manifest_sha256
+            or origin_assignment.task_id != task.task_id
+            or origin_assignment.task_identity_sha256
+            != manifest.task_identity_sha256(task)
+            or origin_assignment.rank != context.rank
+            or origin_assignment.communicator_size
+            != context.communicator_size
+            or origin_assignment.hostname != context.hostname
+            or origin_assignment.thread_limit != context.thread_limit
+            or origin_assignment.thread_cap
+            != context.thread_cap_metadata
+        ):
+            raise TaskCheckpointMismatchError(
+                "origin assignment differs from the worker context."
+            )
+        execution.update(
+            {
+                "origin_execution_id": origin_assignment.execution_id,
+                "origin_assignment_relative_path": (
+                    assignment_relative_path
+                ),
+                "origin_assignment_sha256": _file_sha256(
+                    origin_assignment_path
+                ),
+            }
+        )
     return TaskCheckpoint(
         manifest_sha256=manifest.manifest_sha256,
         task_id=task.task_id,
@@ -756,8 +1247,19 @@ def _validate_checkpoint_execution(value: Any) -> Mapping[str, Any]:
         "thread_limit",
         "thread_cap",
     }
-    allowed = required | {"orphan_artifact_adopted"}
-    if set(value) not in (required, allowed):
+    optional_orphan = {"orphan_artifact_adopted"}
+    origin = {
+        "origin_execution_id",
+        "origin_assignment_relative_path",
+        "origin_assignment_sha256",
+    }
+    allowed_schemas = {
+        frozenset(required),
+        frozenset(required | optional_orphan),
+        frozenset(required | origin),
+        frozenset(required | optional_orphan | origin),
+    }
+    if frozenset(value) not in allowed_schemas:
         raise ValueError("checkpoint execution has an invalid key schema")
 
     def exact_integer(item: Any, *, name: str, positive: bool) -> int:
@@ -797,6 +1299,28 @@ def _validate_checkpoint_execution(value: Any) -> Mapping[str, Any]:
     ):
         raise TypeError(
             "checkpoint orphan_artifact_adopted, when present, must be true"
+        )
+    if origin.issubset(value):
+        _validate_execution_id(
+            value["origin_execution_id"],
+            name="checkpoint execution origin_execution_id",
+        )
+        relative_path = value["origin_assignment_relative_path"]
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or Path(relative_path).is_absolute()
+            or ".." in Path(relative_path).parts
+            or "/" in relative_path
+            or "\\" in relative_path
+            or not relative_path.endswith(".assignment.json")
+        ):
+            raise ValueError(
+                "checkpoint origin assignment path is invalid"
+            )
+        _validate_sha256(
+            value["origin_assignment_sha256"],
+            name="checkpoint execution origin_assignment_sha256",
         )
 
     thread_cap = value["thread_cap"]
@@ -919,6 +1443,137 @@ def _validate_checkpoint_execution(value: Any) -> Mapping[str, Any]:
     return _freeze_json(value)
 
 
+def load_task_origin_assignment(
+    path: str | Path,
+    *,
+    manifest: TaskManifest,
+    expected_task: TaskSpec | str | None = None,
+) -> TaskOriginAssignment:
+    """Load and authenticate one immutable pre-work assignment record."""
+
+    source = Path(path).expanduser()
+    payload = _read_envelope(
+        source,
+        error_type=TaskCheckpointCorruptionError,
+    )
+    try:
+        expected_keys = {
+            "schema_name",
+            "schema_version",
+            "manifest_sha256",
+            "task_id",
+            "task_identity_sha256",
+            "execution_id",
+            "mode",
+            "rank",
+            "communicator_size",
+            "hostname",
+            "assigned_utc",
+            "thread_limit",
+            "thread_cap",
+        }
+        if (
+            set(payload) != expected_keys
+            or payload["schema_name"] != _ORIGIN_ASSIGNMENT_SCHEMA
+            or payload["schema_version"] != _SCHEMA_VERSION
+            or payload["manifest_sha256"] != manifest.manifest_sha256
+        ):
+            raise TaskCheckpointCorruptionError(
+                f"unsupported task origin assignment schema: {source}"
+            )
+        task_id = _validate_identifier(payload["task_id"], name="task_id")
+        task = manifest.task(task_id)
+        if expected_task is not None:
+            selected = (
+                manifest.task(expected_task)
+                if isinstance(expected_task, str)
+                else expected_task
+            )
+            if task != selected:
+                raise TaskCheckpointMismatchError(
+                    "origin assignment belongs to another task."
+                )
+        identity = _validate_sha256(
+            payload["task_identity_sha256"],
+            name="task_identity_sha256",
+        )
+        if identity != manifest.task_identity_sha256(task):
+            raise TaskCheckpointMismatchError(
+                "origin assignment task identity is mismatched."
+            )
+        execution_id = _validate_execution_id(
+            payload["execution_id"],
+            name="execution_id",
+        )
+        mode = payload["mode"]
+        rank = payload["rank"]
+        size = payload["communicator_size"]
+        if (
+            mode not in {"serial", "mpi"}
+            or isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or rank < 0
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size <= 0
+            or rank >= size
+            or (mode == "serial" and (size != 1 or rank != 0))
+            or (mode == "mpi" and (size < 2 or rank == 0))
+        ):
+            raise ValueError(
+                "origin assignment mode, rank, and communicator disagree"
+            )
+        assigned_utc = payload["assigned_utc"]
+        if not isinstance(assigned_utc, str) or not assigned_utc:
+            raise TypeError("origin assignment timestamp is invalid")
+        execution_context = _validate_checkpoint_execution(
+            {
+                "rank": rank,
+                "communicator_size": size,
+                "hostname": payload["hostname"],
+                "elapsed_seconds": 0.0,
+                "thread_limit": payload["thread_limit"],
+                "thread_cap": payload["thread_cap"],
+            }
+        )
+        assignment = TaskOriginAssignment(
+            manifest_sha256=manifest.manifest_sha256,
+            task_id=task_id,
+            task_identity_sha256=identity,
+            execution_id=execution_id,
+            mode=mode,
+            rank=rank,
+            communicator_size=size,
+            hostname=str(execution_context["hostname"]),
+            assigned_utc=assigned_utc,
+            thread_limit=int(execution_context["thread_limit"]),
+            thread_cap=execution_context["thread_cap"],
+        )
+        if (
+            task_origin_assignment_path(
+                manifest,
+                task,
+                source.parent,
+                execution_id=execution_id,
+            ).name
+            != source.name
+        ):
+            raise TaskCheckpointMismatchError(
+                "origin assignment is not stored at its canonical path."
+            )
+        if payload != assignment._payload():  # noqa: SLF001
+            raise TaskCheckpointCorruptionError(
+                "origin assignment values changed after validation."
+            )
+    except TaskCheckpointError:
+        raise
+    except (TypeError, ValueError, KeyError) as exc:
+        raise TaskCheckpointCorruptionError(
+            f"invalid task origin assignment payload: {source}"
+        ) from exc
+    return assignment
+
+
 def load_task_checkpoint(
     path: str | Path,
     *,
@@ -1003,7 +1658,7 @@ def load_task_checkpoint(
                 artifact_record["sha256"], name="artifact.sha256"
             )
             resolved = _resolve_artifact(Path(artifact_root), artifact_path)
-            if not resolved.is_file() or _file_sha256(resolved) != artifact_sha256:
+            if _file_sha256(resolved) != artifact_sha256:
                 raise TaskCheckpointCorruptionError(
                     f"task artifact failed its SHA256 check: {resolved}"
                 )
@@ -1019,6 +1674,49 @@ def load_task_checkpoint(
         execution = _validate_checkpoint_execution(payload["execution"])
         if not isinstance(metadata, Mapping):
             raise TypeError("metadata must be a mapping")
+        if "origin_execution_id" in execution:
+            artifact_directory = _resolve_nonsymlink_path(
+                artifact_root,
+                name="artifact root",
+                must_exist=True,
+                expected_kind="directory",
+                error_type=TaskCheckpointCorruptionError,
+            )
+            assignment_root = _resolve_nonsymlink_path(
+                artifact_directory.parent / "task-assignments",
+                name="origin assignment directory",
+                must_exist=True,
+                expected_kind="directory",
+                error_type=TaskCheckpointCorruptionError,
+            )
+            assignment_path = assignment_root / str(
+                execution["origin_assignment_relative_path"]
+            )
+            if (
+                _file_sha256(assignment_path)
+                != execution["origin_assignment_sha256"]
+            ):
+                raise TaskCheckpointCorruptionError(
+                    "checkpoint origin assignment failed its SHA256 check."
+                )
+            assignment = load_task_origin_assignment(
+                assignment_path,
+                manifest=manifest,
+                expected_task=task,
+            )
+            if (
+                assignment.execution_id
+                != execution["origin_execution_id"]
+                or assignment.rank != execution["rank"]
+                or assignment.communicator_size
+                != execution["communicator_size"]
+                or assignment.hostname != execution["hostname"]
+                or assignment.thread_limit != execution["thread_limit"]
+                or assignment.thread_cap != execution["thread_cap"]
+            ):
+                raise TaskCheckpointMismatchError(
+                    "checkpoint and origin assignment execution differ."
+                )
     except TaskCheckpointError:
         raise
     except (KeyError, TypeError, ValueError) as exc:
@@ -1035,6 +1733,70 @@ def load_task_checkpoint(
         artifact_validation=stored_validation,
         metadata=metadata,
         execution=execution,
+    )
+
+
+def task_checkpoint_origin_assignment_evidence(
+    checkpoint: TaskCheckpoint,
+    *,
+    manifest: TaskManifest,
+    assignment_directory: str | Path,
+) -> Mapping[str, Any]:
+    """Authenticate the pre-work assignment bound into one checkpoint."""
+
+    if not isinstance(checkpoint, TaskCheckpoint):
+        raise TypeError("checkpoint must be a TaskCheckpoint.")
+    execution = checkpoint.execution
+    required = {
+        "origin_execution_id",
+        "origin_assignment_relative_path",
+        "origin_assignment_sha256",
+    }
+    if not required.issubset(execution):
+        raise TaskCheckpointMismatchError(
+            "task checkpoint has no durable origin assignment."
+        )
+    directory = _resolve_nonsymlink_path(
+        assignment_directory,
+        name="origin assignment directory",
+        must_exist=True,
+        expected_kind="directory",
+        error_type=TaskCheckpointCorruptionError,
+    )
+    path = directory / str(execution["origin_assignment_relative_path"])
+    if (
+        _file_sha256(path) != execution["origin_assignment_sha256"]
+    ):
+        raise TaskCheckpointCorruptionError(
+            "checkpoint origin assignment failed its SHA256 check."
+        )
+    assignment = load_task_origin_assignment(
+        path,
+        manifest=manifest,
+        expected_task=checkpoint.task_id,
+    )
+    if (
+        assignment.execution_id != execution["origin_execution_id"]
+        or assignment.rank != execution["rank"]
+        or assignment.communicator_size != execution["communicator_size"]
+        or assignment.hostname != execution["hostname"]
+        or assignment.thread_limit != execution["thread_limit"]
+        or assignment.thread_cap != execution["thread_cap"]
+    ):
+        raise TaskCheckpointMismatchError(
+            "checkpoint origin fields differ from its assignment."
+        )
+    return _freeze_json(
+        {
+            "task_id": checkpoint.task_id,
+            "execution_id": assignment.execution_id,
+            "mode": assignment.mode,
+            "rank": assignment.rank,
+            "communicator_size": assignment.communicator_size,
+            "hostname": assignment.hostname,
+            "relative_path": path.name,
+            "sha256": _file_sha256(path),
+        }
     )
 
 
@@ -1243,9 +2005,12 @@ class TaskAssignment:
         tuple[tuple[int, int, int], ...] | None
     ) = None
     origin_communicator_size: int = 1
+    origin_execution_id: str | None = None
+    origin_assignment_relative_path: str | None = None
+    origin_assignment_sha256: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "task_id": self.task_id,
             "status": self.status,
             "rank": self.rank,
@@ -1279,6 +2044,28 @@ class TaskAssignment:
             ),
             "origin_communicator_size": self.origin_communicator_size,
         }
+        origin_values = (
+            self.origin_execution_id,
+            self.origin_assignment_relative_path,
+            self.origin_assignment_sha256,
+        )
+        if any(value is not None for value in origin_values):
+            if not all(value is not None for value in origin_values):
+                raise ValueError(
+                    "task assignment origin fields must be supplied together."
+                )
+            result.update(
+                {
+                    "origin_execution_id": self.origin_execution_id,
+                    "origin_assignment_relative_path": (
+                        self.origin_assignment_relative_path
+                    ),
+                    "origin_assignment_sha256": (
+                        self.origin_assignment_sha256
+                    ),
+                }
+            )
+        return result
 
 
 def task_assignment_physical_core_evidence(
@@ -1309,16 +2096,19 @@ def task_assignment_physical_core_evidence(
     if origin_execution_ids is not None:
         normalized_origins = {}
         for task_id, execution_id in origin_execution_ids.items():
-            if (
-                not isinstance(task_id, str)
-                or not task_id
-                or not isinstance(execution_id, str)
-                or not execution_id
-            ):
+            if not isinstance(task_id, str) or not task_id:
                 raise TaskManifestError(
                     "origin_execution_ids contains an invalid identity."
                 )
-            normalized_origins[task_id] = execution_id
+            try:
+                normalized_origins[task_id] = _validate_execution_id(
+                    execution_id,
+                    name="origin execution ID",
+                )
+            except ValueError as exc:
+                raise TaskManifestError(
+                    "origin_execution_ids contains an invalid identity."
+                ) from exc
     unavailable: list[str] = []
     seen_task_ids: set[str] = set()
     one_core = True
@@ -1516,6 +2306,9 @@ class MPIExecutionReport:
     missing_task_ids: tuple[str, ...]
     infrastructure_errors: tuple[Mapping[str, Any], ...]
 
+    def __post_init__(self) -> None:
+        _validate_execution_id(self.execution_id)
+
     @property
     def complete(self) -> bool:
         return not self.missing_task_ids and not self.infrastructure_errors
@@ -1556,6 +2349,9 @@ def task_execution_mpi_origin_lineage_evidence(
     ],
     *,
     require_mpi_origin: bool = False,
+    durable_origin_assignments: (
+        Mapping[str, Mapping[str, Any]] | None
+    ) = None,
 ) -> Mapping[str, Any]:
     """Prove every selected task artifact originated in fresh worker MPI."""
 
@@ -1576,11 +2372,82 @@ def task_execution_mpi_origin_lineage_evidence(
 
     selected = payload(selected_execution)
     history = [payload(value) for value in execution_history]
+    normalized_durable: dict[str, dict[str, Any]] | None = None
+    if durable_origin_assignments is not None:
+        if not isinstance(durable_origin_assignments, Mapping):
+            raise TaskManifestError(
+                "durable_origin_assignments must be a mapping."
+            )
+        normalized_durable = {}
+        durable_keys = {
+            "task_id",
+            "execution_id",
+            "mode",
+            "rank",
+            "communicator_size",
+            "hostname",
+            "relative_path",
+            "sha256",
+        }
+        for key, raw in durable_origin_assignments.items():
+            value = _normalize_json(raw)
+            try:
+                durable_execution_id = (
+                    _validate_execution_id(
+                        value.get("execution_id")
+                        if isinstance(value, dict)
+                        else None,
+                        name="durable origin execution ID",
+                    )
+                )
+            except ValueError:
+                durable_execution_id = None
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, dict)
+                or set(value) != durable_keys
+                or value["task_id"] != key
+                or durable_execution_id is None
+                or value["mode"] not in {"serial", "mpi"}
+                or isinstance(value["rank"], bool)
+                or not isinstance(value["rank"], int)
+                or value["rank"] < 0
+                or isinstance(value["communicator_size"], bool)
+                or not isinstance(value["communicator_size"], int)
+                or value["communicator_size"] <= value["rank"]
+                or (
+                    value["mode"] == "serial"
+                    and (
+                        value["communicator_size"] != 1
+                        or value["rank"] != 0
+                    )
+                )
+                or (
+                    value["mode"] == "mpi"
+                    and (
+                        value["communicator_size"] < 2
+                        or value["rank"] == 0
+                    )
+                )
+                or not isinstance(value["hostname"], str)
+                or not value["hostname"]
+                or not isinstance(value["relative_path"], str)
+                or not value["relative_path"]
+                or "/" in value["relative_path"]
+                or "\\" in value["relative_path"]
+                or _SHA256_PATTERN.fullmatch(str(value["sha256"]))
+                is None
+            ):
+                raise TaskManifestError(
+                    "durable origin assignment evidence is invalid."
+                )
+            normalized_durable[key] = value
     selected_id = selected.get("execution_id")
     selected_assignments = selected.get("assignments")
     if (
         not isinstance(selected_id, str)
-        or not selected_id
+        or _EXECUTION_ID_PATTERN.fullmatch(selected_id) is None
         or not isinstance(selected_assignments, list)
         or selected.get("complete") is not True
     ):
@@ -1596,7 +2463,7 @@ def task_execution_mpi_origin_lineage_evidence(
         complete = execution.get("complete")
         if (
             not isinstance(execution_id, str)
-            or not execution_id
+            or _EXECUTION_ID_PATTERN.fullmatch(execution_id) is None
             or execution_id in by_execution
             or not isinstance(assignments, list)
             or execution.get("mode") not in {"serial", "mpi"}
@@ -1660,6 +2527,37 @@ def task_execution_mpi_origin_lineage_evidence(
             and assignment["orphan_artifact_adopted"] is False
         )
         origin_execution_id: str | None = None
+        durable_origin_id: str | None = None
+        if normalized_durable is not None:
+            durable = normalized_durable.get(task_id)
+            declared_origin_keys = {
+                "origin_execution_id",
+                "origin_assignment_relative_path",
+                "origin_assignment_sha256",
+            }
+            if (
+                durable is None
+                or not declared_origin_keys.issubset(assignment)
+                or assignment.get("origin_execution_id")
+                != durable["execution_id"]
+                or assignment.get("origin_assignment_relative_path")
+                != durable["relative_path"]
+                or assignment.get("origin_assignment_sha256")
+                != durable["sha256"]
+                or assignment.get("rank") != durable["rank"]
+                or assignment.get("origin_communicator_size")
+                != durable["communicator_size"]
+                or assignment.get("hostname") != durable["hostname"]
+            ):
+                failures.append(
+                    {
+                        "task_id": task_id,
+                        "reason": "durable_origin_assignment_mismatch",
+                    }
+                )
+                continue
+            if durable["mode"] == "mpi" and mpi_origin:
+                durable_origin_id = str(durable["execution_id"])
         if not assignment["resumed"]:
             if (
                 selected.get("mode") == "mpi"
@@ -1697,6 +2595,21 @@ def task_execution_mpi_origin_lineage_evidence(
                         matches.append(execution_id)
             if matches:
                 origin_execution_id = sorted(set(matches))[0]
+        if durable_origin_id is not None:
+            if (
+                origin_execution_id is not None
+                and origin_execution_id != durable_origin_id
+            ):
+                failures.append(
+                    {
+                        "task_id": task_id,
+                        "reason": (
+                            "execution_history_and_durable_origin_disagree"
+                        ),
+                    }
+                )
+                continue
+            origin_execution_id = durable_origin_id
         if origin_execution_id is None:
             failures.append(
                 {
@@ -1727,6 +2640,10 @@ def task_execution_mpi_origin_lineage_evidence(
         and isinstance(selected.get("communicator_size"), int)
         and not isinstance(selected.get("communicator_size"), bool)
         and selected["communicator_size"] >= 2
+        and (
+            normalized_durable is None
+            or set(normalized_durable) == seen_tasks
+        )
     )
     evidence = {
         "schema": "negfpy_task_mpi_origin_lineage",
@@ -1751,6 +2668,7 @@ def write_execution_manifest(
 ) -> Path:
     if not isinstance(report, MPIExecutionReport):
         raise TypeError("report must be an MPIExecutionReport.")
+    _validate_execution_id(report.execution_id)
     return _publish_immutable(
         Path(path).expanduser(),
         _canonical_bytes(report.as_dict()),
@@ -1781,6 +2699,8 @@ def _execute_one(
     artifact_validator: ArtifactValidator | None,
     orphan_artifact_suffix: str | None,
     orphan_artifact_adopter: OrphanArtifactAdopter | None,
+    execution_id: str,
+    persist_origin_lineage: bool,
 ) -> TaskCheckpoint:
     started = time.perf_counter()
     orphan_adopted = False
@@ -1801,6 +2721,32 @@ def _execute_one(
             thread_limit=thread_limit,
             thread_cap_metadata=cap,
         )
+        origin_assignment: TaskOriginAssignment | None = None
+        origin_assignment_path: Path | None = None
+        if persist_origin_lineage:
+            origin_assignment = TaskOriginAssignment(
+                manifest_sha256=manifest.manifest_sha256,
+                task_id=task.task_id,
+                task_identity_sha256=manifest.task_identity_sha256(task),
+                execution_id=execution_id,
+                mode="serial" if communicator_size == 1 else "mpi",
+                rank=rank,
+                communicator_size=communicator_size,
+                hostname=context.hostname,
+                assigned_utc=_utc_now(),
+                thread_limit=thread_limit,
+                thread_cap=cap,
+            )
+            origin_assignment_path = task_origin_assignment_path(
+                manifest,
+                task,
+                run_directory / "task-assignments",
+                execution_id=execution_id,
+            )
+            write_task_origin_assignment(
+                origin_assignment_path,
+                origin_assignment,
+            )
         orphan_path = (
             None
             if orphan_artifact_suffix is None
@@ -1830,6 +2776,8 @@ def _execute_one(
         elapsed_seconds=elapsed,
         artifact_validator=artifact_validator,
         orphan_artifact_adopted=orphan_adopted,
+        origin_assignment=origin_assignment,
+        origin_assignment_path=origin_assignment_path,
     )
     target = task_checkpoint_path(manifest, task, checkpoint_directory)
     write_task_checkpoint(target, checkpoint)
@@ -1948,6 +2896,15 @@ def _assignments_from_checkpoints(
                 orphan_artifact_adopted=orphan_adopted,
                 cpu_affinity_topology=topology,
                 origin_communicator_size=origin_size,
+                origin_execution_id=execution.get(
+                    "origin_execution_id"
+                ),
+                origin_assignment_relative_path=execution.get(
+                    "origin_assignment_relative_path"
+                ),
+                origin_assignment_sha256=execution.get(
+                    "origin_assignment_sha256"
+                ),
             )
         )
     return tuple(assignments)
@@ -1994,7 +2951,7 @@ def _build_report(
     )
 
 
-def execute_task_manifest(
+def _execute_task_manifest_under_lease(
     manifest: TaskManifest,
     worker: TaskWorker,
     run_directory: str | Path,
@@ -2006,6 +2963,7 @@ def execute_task_manifest(
     execution_id: str | None = None,
     orphan_artifact_suffix: str | None = None,
     orphan_artifact_adopter: OrphanArtifactAdopter | None = None,
+    persist_origin_lineage: bool = False,
 ) -> MPIExecutionReport | None:
     """Execute whole tasks serially or with a rank-zero MPI coordinator.
 
@@ -2022,10 +2980,10 @@ def execute_task_manifest(
         raise TypeError("thread_limit must be an integer.")
     if thread_limit < 1:
         raise ValueError("thread_limit must be positive.")
+    if type(persist_origin_lineage) is not bool:
+        raise TypeError("persist_origin_lineage must be boolean.")
     if execution_id is not None:
-        execution_id = _validate_identifier(execution_id, name="execution_id")
-        if "/" in execution_id or "\\" in execution_id:
-            raise ValueError("execution_id cannot contain path separators.")
+        execution_id = _validate_execution_id(execution_id)
     if (orphan_artifact_suffix is None) != (
         orphan_artifact_adopter is None
     ):
@@ -2051,9 +3009,16 @@ def execute_task_manifest(
                 "MPI ranks constructed different task manifests."
             )
 
-    root = Path(run_directory).expanduser().resolve()
+    root = _resolve_nonsymlink_path(
+        run_directory,
+        name="task run directory",
+        must_exist=True,
+        expected_kind="directory",
+    )
     artifact_root = root / "task-artifacts"
     checkpoint_directory = root / "task-outcomes"
+    assignment_directory = root / "task-assignments"
+    execution_directory = root / "executions"
     manifest_path = root / "task-manifest.json"
     started_clock = time.perf_counter()
     started_utc = _utc_now()
@@ -2063,9 +3028,79 @@ def execute_task_manifest(
     selected_execution_id = execution_id
     if rank == 0:
         try:
-            root.mkdir(parents=True, exist_ok=True)
-            artifact_root.mkdir(parents=True, exist_ok=True)
-            checkpoint_directory.mkdir(parents=True, exist_ok=True)
+            _ensure_owned_directory(
+                root,
+                name="task run directory",
+            )
+            _ensure_owned_directory(
+                artifact_root,
+                name="task artifact directory",
+            )
+            _ensure_owned_directory(
+                checkpoint_directory,
+                name="task outcome directory",
+            )
+            _ensure_owned_directory(
+                execution_directory,
+                name="task execution directory",
+            )
+            if persist_origin_lineage:
+                _ensure_owned_directory(
+                    assignment_directory,
+                    name="task assignment directory",
+                )
+            _cleanup_interrupted_publications(
+                root,
+                allowed_target=lambda name: name == "task-manifest.json",
+                allowed_private_entries=frozenset(
+                    {_EXECUTION_LEASE_NAME}
+                ),
+            )
+            task_prefixes = tuple(
+                (
+                    f"{manifest.ordinal(task):06d}-"
+                    f"{manifest.task_identity_sha256(task)[:16]}"
+                )
+                for task in manifest.tasks
+            )
+            checkpoint_names = {
+                task_checkpoint_path(
+                    manifest,
+                    task,
+                    checkpoint_directory,
+                ).name
+                for task in manifest.tasks
+            }
+            _cleanup_interrupted_publications(
+                artifact_root,
+                allowed_target=lambda name: any(
+                    name.startswith(f"{prefix}.")
+                    for prefix in task_prefixes
+                ),
+            )
+            _cleanup_interrupted_publications(
+                checkpoint_directory,
+                allowed_target=checkpoint_names.__contains__,
+            )
+            if persist_origin_lineage:
+                _cleanup_interrupted_publications(
+                    assignment_directory,
+                    allowed_target=lambda name: (
+                        name.endswith(".assignment.json")
+                        and any(
+                            name.startswith(f"{prefix}-")
+                            for prefix in task_prefixes
+                        )
+                    ),
+                )
+            _cleanup_interrupted_publications(
+                execution_directory,
+                allowed_target=lambda name: (
+                    name.endswith(".json")
+                    and _EXECUTION_ID_PATTERN.fullmatch(name[:-5])
+                    is not None
+                ),
+            )
             write_task_manifest(manifest_path, manifest)
             loaded_manifest = load_task_manifest(manifest_path)
             if loaded_manifest.manifest_sha256 != manifest.manifest_sha256:
@@ -2138,6 +3173,8 @@ def execute_task_manifest(
                     orphan_artifact_adopter=(
                         orphan_artifact_adopter
                     ),
+                    execution_id=selected_execution_id,
+                    persist_origin_lineage=persist_origin_lineage,
                 )
             except Exception as exc:
                 infrastructure_errors.append(
@@ -2195,6 +3232,8 @@ def execute_task_manifest(
                     orphan_artifact_adopter=(
                         orphan_artifact_adopter
                     ),
+                    execution_id=selected_execution_id,
+                    persist_origin_lineage=persist_origin_lineage,
                 )
             except Exception as exc:
                 communicator.send(
@@ -2338,7 +3377,7 @@ def execute_task_manifest(
                 infrastructure_errors=infrastructure_errors,
             )
             execution_path = (
-                root / "executions" / f"{selected_execution_id}.json"
+                execution_directory / f"{selected_execution_id}.json"
             )
             write_execution_manifest(execution_path, report)
             if not report.complete:
@@ -2384,6 +3423,142 @@ def execute_task_manifest(
     return report if rank == 0 else None
 
 
+def execute_task_manifest(
+    manifest: TaskManifest,
+    worker: TaskWorker,
+    run_directory: str | Path,
+    *,
+    comm: Any | None = None,
+    require_mpi: bool = False,
+    thread_limit: int = 1,
+    artifact_validator: ArtifactValidator | None = None,
+    execution_id: str | None = None,
+    orphan_artifact_suffix: str | None = None,
+    orphan_artifact_adopter: OrphanArtifactAdopter | None = None,
+    persist_origin_lineage: bool = False,
+) -> MPIExecutionReport | None:
+    """Execute a manifest while exclusively owning its complete run phase.
+
+    The lease is an advisory OS lock.  A hard-killed process releases the lock
+    automatically, while the persistent single-link lease inode lets an exact
+    restart distinguish a stale unlocked lease from a concurrent invocation.
+    """
+
+    if not isinstance(manifest, TaskManifest):
+        raise TypeError("manifest must be a TaskManifest.")
+    if not callable(worker):
+        raise TypeError("worker must be callable.")
+    if isinstance(thread_limit, bool) or not isinstance(thread_limit, int):
+        raise TypeError("thread_limit must be an integer.")
+    if thread_limit < 1:
+        raise ValueError("thread_limit must be positive.")
+    if type(persist_origin_lineage) is not bool:
+        raise TypeError("persist_origin_lineage must be boolean.")
+    if execution_id is not None:
+        execution_id = _validate_execution_id(execution_id)
+    if (orphan_artifact_suffix is None) != (
+        orphan_artifact_adopter is None
+    ):
+        raise ValueError(
+            "orphan suffix and adopter must be supplied together."
+        )
+    if orphan_artifact_suffix is not None and (
+        _SUFFIX_PATTERN.fullmatch(orphan_artifact_suffix) is None
+    ):
+        raise ValueError("orphan artifact suffix is invalid.")
+
+    communicator = _resolve_communicator(comm, require_mpi=require_mpi)
+    rank = int(communicator.Get_rank())
+    size = int(communicator.Get_size())
+    if size < 1 or rank < 0 or rank >= size:
+        raise TaskMPIError("communicator returned an invalid rank or size.")
+
+    lease: _ExecutionLease | None = None
+    root: Path | None = None
+    lease_error: Exception | None = None
+    if rank == 0:
+        try:
+            root = _ensure_owned_directory(
+                run_directory,
+                name="task run directory",
+            )
+            lease = _acquire_execution_lease(root)
+        except Exception as exc:
+            lease_error = exc
+    startup = {
+        "ok": lease_error is None,
+        "root": None if root is None else os.fspath(root),
+        "error_type": (
+            None if lease_error is None else type(lease_error).__name__
+        ),
+        "error_message": None if lease_error is None else str(lease_error),
+    }
+    if size > 1:
+        startup = communicator.bcast(
+            startup if rank == 0 else None,
+            root=0,
+        )
+    if not startup["ok"]:
+        if rank == 0 and lease_error is not None:
+            raise lease_error
+        raise TaskExecutionError(
+            "rank-zero execution-lease acquisition failed: "
+            f"{startup['error_type']}: {startup['error_message']}"
+        )
+    root = Path(str(startup["root"]))
+
+    result: MPIExecutionReport | None = None
+    body_error: BaseException | None = None
+    try:
+        result = _execute_task_manifest_under_lease(
+            manifest,
+            worker,
+            root,
+            comm=communicator,
+            require_mpi=require_mpi,
+            thread_limit=thread_limit,
+            artifact_validator=artifact_validator,
+            execution_id=execution_id,
+            orphan_artifact_suffix=orphan_artifact_suffix,
+            orphan_artifact_adopter=orphan_artifact_adopter,
+            persist_origin_lineage=persist_origin_lineage,
+        )
+    except BaseException as exc:
+        body_error = exc
+
+    release_error: Exception | None = None
+    if rank == 0:
+        assert lease is not None
+        try:
+            _release_execution_lease(lease)
+        except Exception as exc:
+            release_error = exc
+    released = {
+        "ok": release_error is None,
+        "error_type": (
+            None if release_error is None else type(release_error).__name__
+        ),
+        "error_message": (
+            None if release_error is None else str(release_error)
+        ),
+    }
+    if size > 1:
+        released = communicator.bcast(
+            released if rank == 0 else None,
+            root=0,
+        )
+    if not released["ok"]:
+        if rank == 0 and release_error is not None:
+            raise release_error
+        raise TaskExecutionError(
+            "rank-zero execution-lease release failed: "
+            f"{released['error_type']}: {released['error_message']}"
+        )
+    if body_error is not None:
+        raise body_error
+    return result
+
+
 __all__ = [
     "ArtifactValidator",
     "DuplicateTaskCheckpointError",
@@ -2401,19 +3576,24 @@ __all__ = [
     "TaskMPIError",
     "TaskManifest",
     "TaskManifestError",
+    "TaskOriginAssignment",
     "TaskResult",
     "TaskSpec",
     "TaskWorker",
     "collect_task_checkpoints",
     "execute_task_manifest",
     "load_task_checkpoint",
+    "load_task_origin_assignment",
     "load_task_manifest",
     "mpi_available",
     "serial_task_communicator",
     "task_checkpoint_path",
+    "task_checkpoint_origin_assignment_evidence",
+    "task_origin_assignment_path",
     "task_assignment_physical_core_evidence",
     "task_execution_mpi_origin_lineage_evidence",
     "write_execution_manifest",
     "write_task_checkpoint",
+    "write_task_origin_assignment",
     "write_task_manifest",
 ]
