@@ -185,6 +185,110 @@ def _normalized_input_manifest_payload() -> dict[str, object]:
     }
 
 
+def _environment_prefix_manifest_digest(
+    manifest_without_digest: dict[str, object],
+) -> str:
+    canonical = (
+        json.dumps(
+            manifest_without_digest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _refresh_environment_prefix_manifest_digest(
+    manifest: dict[str, object],
+) -> None:
+    manifest.pop("manifest_sha256", None)
+    manifest["manifest_sha256"] = _environment_prefix_manifest_digest(
+        manifest
+    )
+
+
+def _environment_prefix_manifest_fixture() -> dict[str, object]:
+    python_payload = b"synthetic python executable\n"
+    package_payload = b"NEGFPy silicon oracle marker\n"
+    regular_files: list[dict[str, object]] = [
+        {
+            "mode": 0o755,
+            "path": "bin/python3.12-real",
+            "sha256": hashlib.sha256(python_payload).hexdigest(),
+            "size_bytes": len(python_payload),
+        },
+        {
+            "mode": 0o644,
+            "path": (
+                "lib/python3.12/site-packages/"
+                "negfpy-silicon-oracle.txt"
+            ),
+            "sha256": hashlib.sha256(package_payload).hexdigest(),
+            "size_bytes": len(package_payload),
+        },
+    ]
+    regular_link_text = "python3.12-real"
+    directory_link_text = "site-packages"
+    symlinks: list[dict[str, object]] = [
+        {
+            "link_size": len(regular_link_text.encode("utf-8")),
+            "link_text": regular_link_text,
+            "path": "bin/python",
+            "resolved_path": "bin/python3.12-real",
+            "target_kind": "regular_file",
+        },
+        {
+            "link_size": len(directory_link_text.encode("utf-8")),
+            "link_text": directory_link_text,
+            "path": "lib/python3.12/current",
+            "resolved_path": "lib/python3.12/site-packages",
+            "target_kind": "directory",
+        },
+    ]
+    manifest: dict[str, object] = {
+        "directory_count": 5,
+        "prefix": "/opt/negfpy/silicon-oracle/environment",
+        "regular_file_count": len(regular_files),
+        "regular_files": regular_files,
+        "schema": "negfpy.silicon_environment_prefix.v1",
+        "symlink_count": len(symlinks),
+        "symlinks": symlinks,
+    }
+    _refresh_environment_prefix_manifest_digest(manifest)
+    return manifest
+
+
+def _write_environment_prefix_manifest(
+    tree: _EvidenceTree,
+    manifest: dict[str, object],
+    *,
+    embedded: bool = False,
+) -> Path:
+    path = tree.root / "identity" / "environment-prefix-manifest.json"
+    value: object = manifest
+    if embedded:
+        value = {
+            "schema": "test.embedded.environment-identity.v1",
+            "environment_prefix_manifest": manifest,
+        }
+    _write_json(path, value)
+    return path
+
+
+def _assert_failed_finalize_left_no_mutation(
+    tree: _EvidenceTree,
+    handoff: Path,
+) -> None:
+    assert not handoff.exists()
+    assert not (
+        tree.root / portable._EXTERNAL_STAGING_DIRECTORY  # noqa: SLF001
+    ).exists()
+    assert not tuple(handoff.parent.glob(f".{handoff.name}.*.tmp"))
+
+
 def _bundle_inventory_record(path: Path) -> dict[str, object]:
     return {
         "path": path.name,
@@ -333,6 +437,293 @@ def test_finalize_nested_bundle_inventory_and_normalized_source_manifest(
         relocated_handoff / "SHA256SUMS",
     )
     assert verified.portable_evidence.path_record_count == 6
+
+
+def test_finalize_environment_prefix_manifest_and_verify_after_relocation(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    manifest = _environment_prefix_manifest_fixture()
+    digest = manifest["manifest_sha256"]
+    assert isinstance(digest, str)
+    undigested = dict(manifest)
+    undigested.pop("manifest_sha256")
+    assert digest == _environment_prefix_manifest_digest(undigested)
+    _write_environment_prefix_manifest(tree, manifest)
+
+    handoff = tmp_path / "environment-release-handoff"
+    finalized = portable.finalize_silicon_release_evidence(
+        tree.root,
+        tree.report,
+        handoff,
+    )
+
+    # The environment records describe an authenticated logical namespace.
+    # They are not generic references to members of the release artifact tree.
+    assert finalized.portable_evidence.path_record_count == 3
+    relocated_root = tmp_path / "relocated-environment-artifacts"
+    relocated_handoff = tmp_path / "relocated-environment-handoff"
+    shutil.copytree(tree.root, relocated_root)
+    shutil.copytree(handoff, relocated_handoff)
+    verified = portable.verify_silicon_release_handoff(
+        relocated_root,
+        relocated_handoff / "SHA256SUMS",
+    )
+    assert verified.portable_evidence.path_record_count == 3
+    assert verified.portable_evidence.payload_sha256 == (
+        finalized.portable_evidence.payload_sha256
+    )
+
+
+def test_embedded_environment_prefix_manifest_is_portable(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    _write_environment_prefix_manifest(
+        tree,
+        _environment_prefix_manifest_fixture(),
+        embedded=True,
+    )
+
+    sealed = _seal(tree)
+
+    assert sealed.path_record_count == 3
+    relocated = tmp_path / "relocated-embedded-environment"
+    shutil.copytree(tree.root, relocated)
+    verified = portable.verify_silicon_release_evidence(
+        relocated,
+        tree.manifest,
+    )
+    assert verified.path_record_count == 3
+    assert verified.payload_sha256 == sealed.payload_sha256
+
+
+def test_environment_prefix_symlink_chain_is_portable(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    manifest = _environment_prefix_manifest_fixture()
+    symlinks = manifest["symlinks"]
+    assert isinstance(symlinks, list)
+    chain_text = "python"
+    symlinks.insert(
+        1,
+        {
+            "link_size": len(chain_text.encode("utf-8")),
+            "link_text": chain_text,
+            "path": "bin/python-chain",
+            "resolved_path": "bin/python3.12-real",
+            "target_kind": "regular_file",
+        },
+    )
+    manifest["symlink_count"] = len(symlinks)
+    _refresh_environment_prefix_manifest_digest(manifest)
+    _write_environment_prefix_manifest(tree, manifest)
+
+    sealed = _seal(tree)
+
+    assert sealed.path_record_count == 3
+
+
+def test_embedded_environment_exemption_does_not_hide_ambiguous_sibling(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    _write_json(
+        tree.root / "identity" / "embedded-environment-with-sibling.json",
+        {
+            "schema": "test.embedded.environment-with-sibling.v1",
+            "environment_prefix_manifest": (
+                _environment_prefix_manifest_fixture()
+            ),
+            "unrelated": {"path": "bin/not-an-artifact-record"},
+        },
+    )
+    handoff = tmp_path / "embedded-environment-sibling-handoff"
+
+    with pytest.raises(
+        portable.SiliconReleaseEvidenceError,
+        match="path without SHA256",
+    ):
+        portable.finalize_silicon_release_evidence(
+            tree.root,
+            tree.report,
+            handoff,
+        )
+
+    _assert_failed_finalize_left_no_mutation(tree, handoff)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "canonical-digest",
+        "count",
+        "order",
+        "duplicate",
+        "collision",
+        "regular-file-ancestor",
+        "extra-key",
+        "root-prefix",
+        "unsafe-path",
+        "unsafe-resolved-path",
+        "absolute-link",
+        "nul-link",
+        "escaping-resolution",
+        "symlink-cycle",
+        "declared-resolution-mismatch",
+        "missing-regular-target",
+        "empty-directory-target",
+        "unhashed-directory-target",
+        "wrong-target-kind",
+        "link-size",
+    ],
+)
+def test_environment_prefix_manifest_failures_are_rejected_before_mutation(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    manifest = _environment_prefix_manifest_fixture()
+    regular_files = manifest["regular_files"]
+    symlinks = manifest["symlinks"]
+    assert isinstance(regular_files, list)
+    assert isinstance(symlinks, list)
+    assert all(isinstance(record, dict) for record in regular_files)
+    assert all(isinstance(record, dict) for record in symlinks)
+
+    if failure == "canonical-digest":
+        undigested = dict(manifest)
+        undigested.pop("manifest_sha256")
+        noncanonical = json.dumps(
+            undigested,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        manifest["manifest_sha256"] = hashlib.sha256(noncanonical).hexdigest()
+    elif failure == "count":
+        manifest["regular_file_count"] = len(regular_files) + 1
+    elif failure == "order":
+        regular_files.reverse()
+    elif failure == "duplicate":
+        regular_files.insert(1, dict(regular_files[0]))
+        manifest["regular_file_count"] = len(regular_files)
+    elif failure == "collision":
+        symlinks[0]["path"] = regular_files[0]["path"]
+    elif failure == "regular-file-ancestor":
+        regular_files.insert(
+            1,
+            {
+                "mode": 0o644,
+                "path": "bin/python3.12-real/impossible-child",
+                "sha256": hashlib.sha256(b"impossible\n").hexdigest(),
+                "size_bytes": len(b"impossible\n"),
+            },
+        )
+        manifest["regular_file_count"] = len(regular_files)
+        manifest["directory_count"] = 6
+    elif failure == "extra-key":
+        manifest["unrecognized"] = "not part of the exact v1 schema"
+    elif failure == "root-prefix":
+        manifest["prefix"] = "/"
+    elif failure == "unsafe-path":
+        regular_files[0]["path"] = "bin/./python3.12-real"
+    elif failure == "unsafe-resolved-path":
+        symlinks[0]["resolved_path"] = "../outside"
+    elif failure == "absolute-link":
+        symlinks[0]["link_text"] = "/usr/bin/python3"
+        symlinks[0]["link_size"] = len(b"/usr/bin/python3")
+    elif failure == "nul-link":
+        symlinks[0]["link_text"] = "python\x00"
+        symlinks[0]["link_size"] = len(b"python\x00")
+    elif failure == "escaping-resolution":
+        symlinks[0]["link_text"] = "../../outside"
+        symlinks[0]["link_size"] = len(b"../../outside")
+        symlinks[0]["resolved_path"] = "outside"
+    elif failure == "symlink-cycle":
+        symlinks[0]["link_text"] = "python-loop"
+        symlinks[0]["link_size"] = len(b"python-loop")
+        symlinks[1] = {
+            "link_size": len(b"python"),
+            "link_text": "python",
+            "path": "bin/python-loop",
+            "resolved_path": "bin/python3.12-real",
+            "target_kind": "regular_file",
+        }
+    elif failure == "declared-resolution-mismatch":
+        symlinks[0]["resolved_path"] = regular_files[1]["path"]
+    elif failure == "missing-regular-target":
+        symlinks[0]["link_text"] = "missing-python"
+        symlinks[0]["link_size"] = len(b"missing-python")
+        symlinks[0]["resolved_path"] = "bin/missing-python"
+    elif failure == "empty-directory-target":
+        symlinks[1]["link_text"] = "empty"
+        symlinks[1]["link_size"] = len(b"empty")
+        symlinks[1]["resolved_path"] = "lib/python3.12/empty"
+    elif failure == "unhashed-directory-target":
+        regular_files[1]["path"] = (
+            "lib/python3.12/elsewhere/negfpy-silicon-oracle.txt"
+        )
+        link_text = "../elsewhere/negfpy-silicon-oracle.txt"
+        symlinks.append(
+            {
+                "link_size": len(link_text.encode("utf-8")),
+                "link_text": link_text,
+                "path": "lib/python3.12/site-packages/marker-link",
+                "resolved_path": regular_files[1]["path"],
+                "target_kind": "regular_file",
+            }
+        )
+        manifest["symlink_count"] = len(symlinks)
+        manifest["directory_count"] = 6
+    elif failure == "wrong-target-kind":
+        symlinks[0]["target_kind"] = "directory"
+    elif failure == "link-size":
+        symlinks[0]["link_size"] = int(symlinks[0]["link_size"]) + 1
+    else:  # pragma: no cover - guards additions to the parameter list
+        raise AssertionError(f"unhandled environment failure {failure}")
+
+    if failure != "canonical-digest":
+        _refresh_environment_prefix_manifest_digest(manifest)
+    _write_environment_prefix_manifest(tree, manifest)
+    handoff = tmp_path / f"invalid-environment-handoff-{failure}"
+
+    with pytest.raises(portable.SiliconReleaseEvidenceError):
+        portable.finalize_silicon_release_evidence(
+            tree.root,
+            tree.report,
+            handoff,
+        )
+
+    _assert_failed_finalize_left_no_mutation(tree, handoff)
+
+
+def test_unknown_path_without_sha256_remains_ambiguous_evidence(
+    tmp_path: Path,
+) -> None:
+    tree = _evidence_tree(tmp_path)
+    _write_json(
+        tree.root / "identity" / "unknown-path-record.json",
+        {
+            "schema": "test.unknown.path-record.v1",
+            "record": {"path": "bin/python"},
+        },
+    )
+    handoff = tmp_path / "unknown-path-handoff"
+
+    with pytest.raises(
+        portable.SiliconReleaseEvidenceError,
+        match="path without SHA256",
+    ):
+        portable.finalize_silicon_release_evidence(
+            tree.root,
+            tree.report,
+            handoff,
+        )
+
+    _assert_failed_finalize_left_no_mutation(tree, handoff)
 
 
 @pytest.mark.parametrize(

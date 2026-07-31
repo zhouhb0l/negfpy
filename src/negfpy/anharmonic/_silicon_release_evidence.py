@@ -21,6 +21,13 @@ Normalized input-manifest ``source.files`` records are validated source
 expectations, not declarations that those upstream files belong to the sealed
 artifact tree.
 
+The silicon execution-environment manifest is another typed identity
+document.  Its prefix-relative regular-file and symlink records describe a
+logical namespace rather than files beneath the release artifact root.  Those
+records are excluded from generic artifact-pointer discovery only after the
+complete schema, canonical digest, path topology, and hashed target closure
+have been authenticated.
+
 External path records require a separate explicit staging operation.  Their
 verified bytes are copied into a content-addressed subtree, and an immutable
 alias manifest is then bound into a version-2 portable seal.  No external path
@@ -80,6 +87,31 @@ _NORMALIZED_INPUT_MANIFEST_ROOT_KEYS = frozenset(
         "versions",
         "source",
         "input_manifest_sha256",
+    }
+)
+_ENVIRONMENT_PREFIX_SCHEMA = "negfpy.silicon_environment_prefix.v1"
+_ENVIRONMENT_PREFIX_ROOT_KEYS = frozenset(
+    {
+        "directory_count",
+        "manifest_sha256",
+        "prefix",
+        "regular_file_count",
+        "regular_files",
+        "schema",
+        "symlink_count",
+        "symlinks",
+    }
+)
+_ENVIRONMENT_PREFIX_REGULAR_FILE_KEYS = frozenset(
+    {"mode", "path", "sha256", "size_bytes"}
+)
+_ENVIRONMENT_PREFIX_SYMLINK_KEYS = frozenset(
+    {
+        "link_size",
+        "link_text",
+        "path",
+        "resolved_path",
+        "target_kind",
     }
 )
 
@@ -213,6 +245,7 @@ class _FileSnapshot:
 class _JsonPathSemantics:
     bundle_relative_record_ids: frozenset[int] = frozenset()
     source_expectation_record_ids: frozenset[int] = frozenset()
+    non_artifact_path_record_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -769,6 +802,337 @@ def _normalized_input_manifest_semantics(
     )
 
 
+def _environment_prefix_manifest_semantics(
+    value: Mapping[str, Any],
+    *,
+    name: str,
+) -> _JsonPathSemantics:
+    """Authenticate a complete prefix inventory before exempting its records."""
+
+    _require_exact_keys(
+        value,
+        expected=_ENVIRONMENT_PREFIX_ROOT_KEYS,
+        name=name,
+    )
+    if value["schema"] != _ENVIRONMENT_PREFIX_SCHEMA:
+        raise SiliconReleaseEvidenceError(
+            f"{name}.schema must equal {_ENVIRONMENT_PREFIX_SCHEMA!r}."
+        )
+    prefix = _absolute_posix(value["prefix"], name=f"{name}.prefix")
+    if prefix == "/":
+        raise SiliconReleaseEvidenceError(
+            f"{name}.prefix must not be the filesystem root."
+        )
+
+    def count(field: str, *, positive: bool = False) -> int:
+        raw = value[field]
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, int)
+            or raw < (1 if positive else 0)
+        ):
+            qualifier = "positive" if positive else "nonnegative"
+            raise SiliconReleaseEvidenceError(
+                f"{name}.{field} must be a {qualifier} integer."
+            )
+        return raw
+
+    directory_count = count("directory_count", positive=True)
+    regular_file_count = count("regular_file_count")
+    symlink_count = count("symlink_count")
+    regular_files = value["regular_files"]
+    symlinks = value["symlinks"]
+    if not isinstance(regular_files, list) or not regular_files:
+        raise SiliconReleaseEvidenceError(
+            f"{name}.regular_files must be a nonempty array."
+        )
+    if not isinstance(symlinks, list):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.symlinks must be an array."
+        )
+    if regular_file_count != len(regular_files):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.regular_file_count differs from regular_files."
+        )
+    if symlink_count != len(symlinks):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.symlink_count differs from symlinks."
+        )
+
+    non_artifact_ids: set[int] = set()
+    regular_by_path: dict[str, Mapping[str, Any]] = {}
+    regular_paths: list[str] = []
+    for index, record in enumerate(regular_files):
+        location = f"{name}.regular_files[{index}]"
+        if not isinstance(record, Mapping):
+            raise SiliconReleaseEvidenceError(
+                f"{location} must be a JSON object."
+            )
+        _require_exact_keys(
+            record,
+            expected=_ENVIRONMENT_PREFIX_REGULAR_FILE_KEYS,
+            name=location,
+        )
+        path = _safe_relative_posix(
+            record["path"],
+            name=f"{location}.path",
+        )
+        mode = record["mode"]
+        if (
+            isinstance(mode, bool)
+            or not isinstance(mode, int)
+            or not 0 <= mode <= 0o7777
+        ):
+            raise SiliconReleaseEvidenceError(
+                f"{location}.mode must be a POSIX permission mode."
+            )
+        size = record["size_bytes"]
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.size_bytes is invalid."
+            )
+        _require_sha256(record["sha256"], name=f"{location}.sha256")
+        if path in regular_by_path:
+            raise SiliconReleaseEvidenceError(
+                f"{name}.regular_files contains duplicate path {path!r}."
+            )
+        regular_by_path[path] = record
+        regular_paths.append(path)
+        non_artifact_ids.add(id(record))
+    if regular_paths != sorted(regular_paths):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.regular_files must be strictly sorted by path."
+        )
+
+    symlink_by_path: dict[str, Mapping[str, Any]] = {}
+    symlink_paths: list[str] = []
+    for index, record in enumerate(symlinks):
+        location = f"{name}.symlinks[{index}]"
+        if not isinstance(record, Mapping):
+            raise SiliconReleaseEvidenceError(
+                f"{location} must be a JSON object."
+            )
+        _require_exact_keys(
+            record,
+            expected=_ENVIRONMENT_PREFIX_SYMLINK_KEYS,
+            name=location,
+        )
+        path = _safe_relative_posix(
+            record["path"],
+            name=f"{location}.path",
+        )
+        _safe_relative_posix(
+            record["resolved_path"],
+            name=f"{location}.resolved_path",
+        )
+        target_kind = record["target_kind"]
+        if target_kind not in {"regular_file", "directory"}:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.target_kind is invalid."
+            )
+        link_text = record["link_text"]
+        if (
+            not isinstance(link_text, str)
+            or not link_text
+            or "\x00" in link_text
+            or "\\" in link_text
+            or PurePosixPath(link_text).is_absolute()
+        ):
+            raise SiliconReleaseEvidenceError(
+                f"{location}.link_text must be relative POSIX path text."
+            )
+        try:
+            encoded_link_text = link_text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.link_text is not valid Unicode path text."
+            ) from exc
+        link_size = record["link_size"]
+        if (
+            isinstance(link_size, bool)
+            or not isinstance(link_size, int)
+            or link_size < 0
+            or link_size != len(encoded_link_text)
+        ):
+            raise SiliconReleaseEvidenceError(
+                f"{location}.link_size differs from its UTF-8 link_text."
+            )
+        if path in symlink_by_path:
+            raise SiliconReleaseEvidenceError(
+                f"{name}.symlinks contains duplicate path {path!r}."
+            )
+        symlink_by_path[path] = record
+        symlink_paths.append(path)
+        non_artifact_ids.add(id(record))
+    if symlink_paths != sorted(symlink_paths):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.symlinks must be strictly sorted by path."
+        )
+
+    regular_path_set = set(regular_paths)
+    symlink_path_set = set(symlink_paths)
+    overlap = regular_path_set & symlink_path_set
+    if overlap:
+        raise SiliconReleaseEvidenceError(
+            f"{name} regular and symlink paths are not disjoint: "
+            f"{sorted(overlap)!r}."
+        )
+    all_paths = regular_path_set | symlink_path_set
+    regular_part_sets = {
+        PurePosixPath(path).parts for path in regular_path_set
+    }
+    symlink_part_sets = {
+        PurePosixPath(path).parts for path in symlink_path_set
+    }
+    for path in all_paths:
+        parts = PurePosixPath(path).parts
+        for stop in range(1, len(parts)):
+            if parts[:stop] in regular_part_sets:
+                raise SiliconReleaseEvidenceError(
+                    f"{name} member {path!r} is nested beneath a regular "
+                    "file."
+                )
+            if parts[:stop] in symlink_part_sets:
+                raise SiliconReleaseEvidenceError(
+                    f"{name} member {path!r} is nested beneath a symlink."
+                )
+
+    directory_parts: set[tuple[str, ...]] = {()}
+    for path in all_paths:
+        parts = PurePosixPath(path).parts
+        directory_parts.update(
+            parts[:stop] for stop in range(1, len(parts))
+        )
+    if directory_count != len(directory_parts):
+        raise SiliconReleaseEvidenceError(
+            f"{name}.directory_count differs from the strict parent "
+            "directory closure."
+        )
+
+    def resolve_link(path: str) -> str:
+        record = symlink_by_path[path]
+        pending = [
+            *PurePosixPath(path).parent.parts,
+            *record["link_text"].split("/"),
+        ]
+        resolved: list[str] = []
+        traversed_links: set[str] = set()
+        while pending:
+            component = pending.pop(0)
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                if not resolved:
+                    raise SiliconReleaseEvidenceError(
+                        f"{name} symlink {path!r} lexically escapes prefix."
+                    )
+                resolved.pop()
+                continue
+            resolved.append(component)
+            candidate = "/".join(resolved)
+            nested_link = symlink_by_path.get(candidate)
+            if nested_link is not None:
+                if candidate in traversed_links:
+                    raise SiliconReleaseEvidenceError(
+                        f"{name} symlink {path!r} contains a lexical cycle."
+                    )
+                traversed_links.add(candidate)
+                resolved = list(PurePosixPath(candidate).parent.parts)
+                pending = [
+                    *nested_link["link_text"].split("/"),
+                    *pending,
+                ]
+                continue
+            if candidate in regular_path_set and pending:
+                raise SiliconReleaseEvidenceError(
+                    f"{name} symlink {path!r} traverses a regular file."
+                )
+        if not resolved:
+            raise SiliconReleaseEvidenceError(
+                f"{name} symlink {path!r} resolves to the prefix root."
+            )
+        return _safe_relative_posix(
+            "/".join(resolved),
+            name=f"{name} symlink {path!r} lexical target",
+        )
+
+    regular_path_parts = tuple(
+        PurePosixPath(path).parts for path in regular_paths
+    )
+    for index, path in enumerate(symlink_paths):
+        record = symlink_by_path[path]
+        location = f"{name}.symlinks[{index}]"
+        resolved_path = resolve_link(path)
+        if resolved_path != record["resolved_path"]:
+            raise SiliconReleaseEvidenceError(
+                f"{location}.resolved_path differs from lexical link_text "
+                "resolution."
+            )
+        if record["target_kind"] == "regular_file":
+            if resolved_path not in regular_path_set:
+                raise SiliconReleaseEvidenceError(
+                    f"{location} regular target is absent from regular_files."
+                )
+            continue
+        target_parts = PurePosixPath(resolved_path).parts
+        if target_parts not in directory_parts or not any(
+            len(parts) > len(target_parts)
+            and parts[: len(target_parts)] == target_parts
+            for parts in regular_path_parts
+        ):
+            raise SiliconReleaseEvidenceError(
+                f"{location} directory target lacks a strict hashed-file "
+                "descendant closure."
+            )
+
+    declared_digest = _require_sha256(
+        value["manifest_sha256"],
+        name=f"{name}.manifest_sha256",
+    )
+    digest_body = dict(value)
+    del digest_body["manifest_sha256"]
+    observed_digest = hashlib.sha256(
+        _canonical_bytes(digest_body)
+    ).hexdigest()
+    if declared_digest != observed_digest:
+        raise SiliconReleaseEvidenceError(
+            f"{name}.manifest_sha256 is not the canonical newline digest."
+        )
+    return _JsonPathSemantics(
+        non_artifact_path_record_ids=frozenset(non_artifact_ids)
+    )
+
+
+def _embedded_environment_prefix_semantics(
+    value: Any,
+    *,
+    name: str,
+) -> _JsonPathSemantics:
+    record_ids: set[int] = set()
+
+    def visit(node: Any, *, location: str) -> None:
+        if isinstance(node, Mapping):
+            if node.get("schema") == _ENVIRONMENT_PREFIX_SCHEMA:
+                semantics = _environment_prefix_manifest_semantics(
+                    node,
+                    name=location,
+                )
+                record_ids.update(
+                    semantics.non_artifact_path_record_ids
+                )
+                return
+            for key, child in node.items():
+                visit(child, location=f"{location}.{key}")
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                visit(child, location=f"{location}[{index}]")
+
+    visit(value, location=name)
+    return _JsonPathSemantics(
+        non_artifact_path_record_ids=frozenset(record_ids)
+    )
+
+
 def _json_path_semantics(
     value: Any,
     *,
@@ -777,17 +1141,35 @@ def _json_path_semantics(
     filename = PurePosixPath(relative_path).name
     name = f"JSON evidence {relative_path}"
     keys = set(value) if isinstance(value, Mapping) else set()
+    environment = _embedded_environment_prefix_semantics(
+        value,
+        name=name,
+    )
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema") == _ENVIRONMENT_PREFIX_SCHEMA
+    ):
+        return environment
+    ordinary = _JsonPathSemantics()
     if (
         filename in _BUNDLE_INVENTORY_FILENAMES
         or keys == _BUNDLE_INVENTORY_ROOT_KEYS
     ):
-        return _bundle_inventory_semantics(value, name=name)
-    if (
+        ordinary = _bundle_inventory_semantics(value, name=name)
+    elif (
         filename == _NORMALIZED_INPUT_MANIFEST_FILENAME
         or keys == _NORMALIZED_INPUT_MANIFEST_ROOT_KEYS
     ):
-        return _normalized_input_manifest_semantics(value, name=name)
-    return _JsonPathSemantics()
+        ordinary = _normalized_input_manifest_semantics(value, name=name)
+    return _JsonPathSemantics(
+        bundle_relative_record_ids=ordinary.bundle_relative_record_ids,
+        source_expectation_record_ids=(
+            ordinary.source_expectation_record_ids
+        ),
+        non_artifact_path_record_ids=(
+            environment.non_artifact_path_record_ids
+        ),
+    )
 
 
 def _record_relative_path_candidates(
@@ -853,7 +1235,10 @@ def _audit_path_records(
 ) -> int:
     count = 0
     if isinstance(value, Mapping):
-        if id(value) in semantics.source_expectation_record_ids:
+        if (
+            id(value) in semantics.source_expectation_record_ids
+            or id(value) in semantics.non_artifact_path_record_ids
+        ):
             return 0
         if "path" in value:
             if "sha256" not in value:
@@ -1375,10 +1760,14 @@ def _external_record_declarations(
     recorded_root: str,
     location: str,
     source_expectation_record_ids: frozenset[int],
+    non_artifact_path_record_ids: frozenset[int],
 ) -> tuple[tuple[str, str, int | None, str], ...]:
     declarations: list[tuple[str, str, int | None, str]] = []
     if isinstance(value, Mapping):
-        if id(value) in source_expectation_record_ids:
+        if (
+            id(value) in source_expectation_record_ids
+            or id(value) in non_artifact_path_record_ids
+        ):
             return ()
         if "path" in value:
             if "sha256" not in value:
@@ -1439,6 +1828,9 @@ def _external_record_declarations(
                     source_expectation_record_ids=(
                         source_expectation_record_ids
                     ),
+                    non_artifact_path_record_ids=(
+                        non_artifact_path_record_ids
+                    ),
                 )
             )
     elif isinstance(value, list):
@@ -1450,6 +1842,9 @@ def _external_record_declarations(
                     location=f"{location}[{index}]",
                     source_expectation_record_ids=(
                         source_expectation_record_ids
+                    ),
+                    non_artifact_path_record_ids=(
+                        non_artifact_path_record_ids
                     ),
                 )
             )
@@ -1538,6 +1933,9 @@ def _discover_external_sources(
                 location=location,
                 source_expectation_record_ids=(
                     semantics.source_expectation_record_ids
+                ),
+                non_artifact_path_record_ids=(
+                    semantics.non_artifact_path_record_ids
                 ),
             )
         ):
