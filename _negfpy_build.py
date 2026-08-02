@@ -23,6 +23,7 @@ _SCHEMA: Final = "negfpy.build_provenance.v1"
 _METADATA_NAME: Final = "_build_provenance.json"
 _BUILD_ROOT_SCHEMA: Final = "negfpy.build_root.v1"
 _BUILD_ROOT_MARKER: Final = ".negfpy-build-root.json"
+_BUILD_ROOT_MARKER_PREFIX: Final = ".negfpy-build-root-"
 _BUILD_ROOT_MARKER_KEYS: Final = frozenset(
     {"build_root", "project", "project_root", "schema"}
 )
@@ -313,6 +314,14 @@ def _build_root_marker_document(
     }
 
 
+def _build_root_marker_path(build_root: Path) -> Path:
+    """Return a root-bound ownership marker outside wheel staging."""
+
+    root = build_root.resolve()
+    token = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+    return root.parent / f"{_BUILD_ROOT_MARKER_PREFIX}{token}.json"
+
+
 def _valid_build_root_marker(
     marker: Path,
     *,
@@ -396,6 +405,67 @@ def _create_build_root_marker(
         raise RuntimeError(f"new build-root marker failed validation: {marker}")
 
 
+def _path_entry_exists(path: Path) -> bool:
+    """Inspect a path without following a final-component symlink."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(f"could not inspect build-root marker: {path}") from exc
+    return True
+
+
+def _prepare_build_root_marker(
+    *,
+    marker: Path,
+    legacy_marker: Path,
+    project_root: Path,
+    build_root: Path,
+    allow_new_claim: bool,
+) -> None:
+    """Validate ownership and migrate the former in-staging marker safely."""
+
+    marker_exists = _path_entry_exists(marker)
+    legacy_exists = _path_entry_exists(legacy_marker)
+    if marker_exists and not _valid_build_root_marker(
+        marker,
+        project_root=project_root,
+        build_root=build_root,
+    ):
+        raise RuntimeError(f"invalid build-root ownership marker: {marker}")
+    if legacy_exists and not _valid_build_root_marker(
+        legacy_marker,
+        project_root=project_root,
+        build_root=build_root,
+    ):
+        raise RuntimeError(
+            f"invalid legacy build-root ownership marker: {legacy_marker}"
+        )
+
+    if not marker_exists:
+        if not legacy_exists and not allow_new_claim:
+            raise RuntimeError(
+                "refusing unowned build package target without valid marker: "
+                f"{build_root / 'negfpy'}"
+            )
+        _create_build_root_marker(
+            marker,
+            project_root=project_root,
+            build_root=build_root,
+        )
+
+    if legacy_exists:
+        try:
+            legacy_marker.unlink()
+        except OSError as exc:
+            raise RuntimeError(
+                "could not remove migrated legacy build-root marker: "
+                f"{legacy_marker}"
+            ) from exc
+
+
 def _fresh_package_root(
     build_lib: str | Path,
     *,
@@ -412,7 +482,8 @@ def _fresh_package_root(
         )
     build_root = requested_build_root.resolve()
     target = build_root / "negfpy"
-    marker = build_root / _BUILD_ROOT_MARKER
+    marker = _build_root_marker_path(build_root)
+    legacy_marker = build_root / _BUILD_ROOT_MARKER
     unsafe_root = (
         build_root == project
         or build_root in source_root.parents
@@ -436,14 +507,13 @@ def _fresh_package_root(
     if target.exists():
         if not target.is_dir():
             raise RuntimeError(f"build package target is not a directory: {target}")
-        if not _valid_build_root_marker(
-            marker,
+        _prepare_build_root_marker(
+            marker=marker,
+            legacy_marker=legacy_marker,
             project_root=project,
             build_root=build_root,
-        ):
-            raise RuntimeError(
-                f"refusing unowned build package target without valid marker: {target}"
-            )
+            allow_new_claim=False,
+        )
         shutil.rmtree(target)
         return target
 
@@ -454,31 +524,17 @@ def _fresh_package_root(
     if not build_root.is_dir() or build_root.is_symlink():
         raise RuntimeError(f"build root is not a regular directory: {build_root}")
 
-    marker_exists = False
-    try:
-        marker.lstat()
-        marker_exists = True
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise RuntimeError(f"could not inspect build-root marker: {marker}") from exc
-    if marker_exists:
-        if not _valid_build_root_marker(
-            marker,
-            project_root=project,
-            build_root=build_root,
-        ):
-            raise RuntimeError(f"invalid build-root ownership marker: {marker}")
-    else:
-        if target.exists() or target.is_symlink():
-            raise RuntimeError(
-                f"build package target appeared before marker creation: {target}"
-            )
-        _create_build_root_marker(
-            marker,
-            project_root=project,
-            build_root=build_root,
+    if target.exists() or target.is_symlink():
+        raise RuntimeError(
+            f"build package target appeared before marker creation: {target}"
         )
+    _prepare_build_root_marker(
+        marker=marker,
+        legacy_marker=legacy_marker,
+        project_root=project,
+        build_root=build_root,
+        allow_new_claim=True,
+    )
     return target
 
 

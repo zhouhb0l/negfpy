@@ -16,15 +16,20 @@ special files fail closed. The JSON is canonical and is included in wheel
 `RECORD`. The Git root is resolved from the build-hook module location, never
 from the invoking working directory.
 
-Before copying, the hook claims a build root with the regular, non-symlink
-`build_lib/.negfpy-build-root.json` marker. The strict marker records its
-schema plus the exact resolved project and build roots. It is created only
-when `build_lib/negfpy` is absent. A pre-existing package target without that
-exact valid marker is rejected and preserved byte-for-byte; copied, malformed,
-or symlinked markers do not authorize removal. Only a previously claimed root
-may have its exact generated `build_lib/negfpy` target removed for a repeated
-build. The hook also rejects the project root, source ancestors, source
-descendants, symlinks, and every target overlapping canonical `src/negfpy`.
+Before copying, the hook claims a build root with a regular, non-symlink
+ownership marker in `build_lib.parent`, deliberately outside the wheel staging
+root. Its filename contains a SHA256 binding to the exact resolved build-root
+path, while the strict JSON records its schema plus the exact resolved project
+and build roots. It is created only when `build_lib/negfpy` is absent. A
+pre-existing package target without that exact valid marker is rejected and
+preserved byte-for-byte; copied, malformed, or symlinked markers do not
+authorize removal. A valid marker from the former in-staging location is
+migrated outside `build_lib` before any package removal, and an invalid legacy
+marker fails closed. Only a previously claimed root may have its exact
+generated `build_lib/negfpy` target removed for a repeated build. The hook also
+rejects the project root, source ancestors, source descendants, symlinks, and
+every target overlapping canonical `src/negfpy`. The wheel regression rejects
+ownership markers and absolute project or build paths anywhere in the archive.
 
 After copying, it compares every package path and byte against both
 `src/negfpy` and regular HEAD blobs. It independently compares the current

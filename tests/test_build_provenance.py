@@ -375,11 +375,10 @@ def test_pep517_clean_wheel_contains_bound_record_and_record_entry(
 
     first = _build_wheel(source, tmp_path / "wheel-first", epoch=epoch)
     owned_target = source / "build" / "lib" / "negfpy"
-    owned_marker = (
-        owned_target.parent / build_support._BUILD_ROOT_MARKER
-    )
+    owned_marker = build_support._build_root_marker_path(owned_target.parent)
     assert owned_target.is_dir()
     assert owned_marker.is_file() and not owned_marker.is_symlink()
+    assert not owned_marker.is_relative_to(owned_target.parent)
     (owned_target / "stale_ignored.py").write_text(
         "STALE = True\n", encoding="ascii"
     )
@@ -392,6 +391,22 @@ def test_pep517_clean_wheel_contains_bound_record_and_record_entry(
         metadata_name = "negfpy/_build_provenance.json"
         assert names.count(metadata_name) == 1
         assert "negfpy/stale_ignored.py" not in names
+        assert all(".negfpy-build-root" not in name for name in names)
+        top_levels = {name.split("/", 1)[0] for name in names}
+        assert "negfpy" in top_levels
+        assert len(top_levels) == 2
+        assert next(name for name in top_levels if name != "negfpy").endswith(
+            ".dist-info"
+        )
+        forbidden_paths = (
+            str(source.resolve()).encode("utf-8"),
+            str(owned_target.parent.resolve()).encode("utf-8"),
+        )
+        for name in names:
+            if name.endswith("/"):
+                continue
+            content = archive.read(name)
+            assert all(path not in content for path in forbidden_paths)
         record_name = next(
             name for name in names if name.endswith(".dist-info/RECORD")
         )
@@ -592,6 +607,7 @@ def test_fresh_build_root_rejects_unowned_target_without_modification(
     assert target.is_dir()
     assert sentinel.read_text(encoding="ascii") == "PRESERVE = True\n"
     assert not (build_lib / build_support._BUILD_ROOT_MARKER).exists()
+    assert not build_support._build_root_marker_path(build_lib).exists()
 
 
 def test_fresh_build_root_owned_repeated_build_removes_only_target(
@@ -605,8 +621,10 @@ def test_fresh_build_root_owned_repeated_build_removes_only_target(
     assert build_support._fresh_package_root(
         build_lib, project_root=project
     ) == target
-    marker = build_lib / build_support._BUILD_ROOT_MARKER
+    marker = build_support._build_root_marker_path(build_lib)
     assert marker.is_file() and not marker.is_symlink()
+    assert marker.parent == build_lib.parent
+    assert not marker.is_relative_to(build_lib)
     marker_before = marker.read_bytes()
     unrelated.write_bytes(b"PRESERVE\n")
     target.mkdir()
@@ -629,13 +647,13 @@ def test_fresh_build_root_rejects_invalid_marker_and_target_symlink(
     assert build_support._fresh_package_root(
         build_lib, project_root=project
     ) == target
-    marker = build_lib / build_support._BUILD_ROOT_MARKER
+    marker = build_support._build_root_marker_path(build_lib)
     marker.write_text("{}\n", encoding="ascii")
     target.mkdir()
     sentinel = target / "sentinel.py"
     sentinel.write_bytes(b"PRESERVE = True\n")
 
-    with pytest.raises(RuntimeError, match="valid marker"):
+    with pytest.raises(RuntimeError, match="invalid build-root ownership marker"):
         build_support._fresh_package_root(build_lib, project_root=project)
     assert sentinel.read_bytes() == b"PRESERVE = True\n"
 
@@ -659,7 +677,7 @@ def test_fresh_build_root_rejects_copied_or_symlinked_valid_marker(
         owner_build,
         project_root=owner_project,
     )
-    owner_marker = owner_build / build_support._BUILD_ROOT_MARKER
+    owner_marker = build_support._build_root_marker_path(owner_build)
     valid_for_owner = owner_marker.read_bytes()
 
     other_project = tmp_path / "other-project"
@@ -668,8 +686,8 @@ def test_fresh_build_root_rejects_copied_or_symlinked_valid_marker(
     other_target.mkdir(parents=True)
     sentinel = other_target / "sentinel.py"
     sentinel.write_bytes(b"PRESERVE = True\n")
-    (other_build / build_support._BUILD_ROOT_MARKER).write_bytes(valid_for_owner)
-    with pytest.raises(RuntimeError, match="valid marker"):
+    build_support._build_root_marker_path(other_build).write_bytes(valid_for_owner)
+    with pytest.raises(RuntimeError, match="invalid build-root ownership marker"):
         build_support._fresh_package_root(
             other_build,
             project_root=other_project,
@@ -684,12 +702,61 @@ def test_fresh_build_root_rejects_copied_or_symlinked_valid_marker(
     outside_marker = tmp_path / "outside-marker.json"
     outside_marker.write_bytes(valid_for_owner)
     owner_marker.symlink_to(outside_marker)
-    with pytest.raises(RuntimeError, match="valid marker"):
+    with pytest.raises(RuntimeError, match="invalid build-root ownership marker"):
         build_support._fresh_package_root(
             owner_build,
             project_root=owner_project,
         )
     assert owner_sentinel.read_bytes() == b"PRESERVE = True\n"
+
+
+def test_fresh_build_root_migrates_valid_legacy_marker_outside_staging(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    build_lib = project / "build" / "lib"
+    target = build_lib / "negfpy"
+    target.mkdir(parents=True)
+    sentinel = target / "stale_ignored.py"
+    sentinel.write_bytes(b"STALE = True\n")
+    legacy_marker = build_lib / build_support._BUILD_ROOT_MARKER
+    build_support._create_build_root_marker(
+        legacy_marker,
+        project_root=project.resolve(),
+        build_root=build_lib.resolve(),
+    )
+
+    assert build_support._fresh_package_root(
+        build_lib, project_root=project
+    ) == target
+
+    marker = build_support._build_root_marker_path(build_lib)
+    assert marker.is_file() and not marker.is_symlink()
+    assert not marker.is_relative_to(build_lib)
+    assert not legacy_marker.exists()
+    assert not target.exists()
+
+
+def test_fresh_build_root_rejects_invalid_legacy_marker_without_modification(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    build_lib = project / "build" / "lib"
+    target = build_lib / "negfpy"
+    target.mkdir(parents=True)
+    sentinel = target / "preserve.py"
+    sentinel.write_bytes(b"PRESERVE = True\n")
+    legacy_marker = build_lib / build_support._BUILD_ROOT_MARKER
+    legacy_marker.write_text("{}\n", encoding="ascii")
+
+    with pytest.raises(
+        RuntimeError, match="invalid legacy build-root ownership marker"
+    ):
+        build_support._fresh_package_root(build_lib, project_root=project)
+
+    assert sentinel.read_bytes() == b"PRESERVE = True\n"
+    assert legacy_marker.read_bytes() == b"{}\n"
+    assert not build_support._build_root_marker_path(build_lib).exists()
 
 
 def test_fresh_build_root_cannot_overlap_canonical_source(
