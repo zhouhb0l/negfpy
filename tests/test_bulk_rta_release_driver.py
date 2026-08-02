@@ -586,6 +586,18 @@ def test_runtime_identity_requires_locked_versions_and_tied_import() -> None:
         )
 
 
+@pytest.mark.parametrize("launcher", ("mpiexec", "mpirun", "orterun"))
+def test_openmpi_launcher_banner_variants_are_release_equivalent(
+    launcher: str,
+) -> None:
+    output = f"{launcher} (Open MPI) {driver.PINNED_OPENMPI_VERSION}\n"
+    assert (
+        driver._openmpi_version_from_banner(output)
+        == driver.PINNED_OPENMPI_VERSION
+    )
+    assert driver._openmpi_version_from_banner("mpirun (MPICH) 5.0.10") == "unknown"
+
+
 def test_sys_path_identity_rejects_arbitrary_prefix_subdirectory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

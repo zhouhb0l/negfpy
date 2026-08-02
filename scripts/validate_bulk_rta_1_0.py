@@ -1376,6 +1376,17 @@ def _pinned_import_ownership(
     return result
 
 
+def _openmpi_version_from_banner(output: str) -> str:
+    """Parse official Open MPI launcher names, including resolved symlinks."""
+
+    match = re.search(
+        r"(?im)^(?:mpiexec|mpirun|orterun)\s+\(Open MPI\)\s+"
+        r"([0-9]+\.[0-9]+\.[0-9]+)\s*$",
+        output,
+    )
+    return "unknown" if match is None else match.group(1)
+
+
 def _runtime_identity(repository: Path) -> dict[str, Any]:
     from negfpy.anharmonic._provenance import (
         _package_source_sha256,
@@ -1436,10 +1447,6 @@ def _runtime_identity(repository: Path) -> dict[str, Any]:
             timeout=10.0,
         )
         output = (completed.stdout + "\n" + completed.stderr).strip()
-        match = re.search(
-            r"(?im)^mpiexec\s+\(Open MPI\)\s+" r"([0-9]+\.[0-9]+\.[0-9]+)\s*$",
-            output,
-        )
         try:
             mpiexec_path.relative_to(prefix)
         except ValueError:
@@ -1448,7 +1455,7 @@ def _runtime_identity(repository: Path) -> dict[str, Any]:
             within_prefix = True
         mpiexec_record = {
             "path": str(mpiexec_path),
-            "version": "unknown" if match is None else match.group(1),
+            "version": _openmpi_version_from_banner(output),
             "version_output": output,
             "within_prefix": within_prefix,
         }
