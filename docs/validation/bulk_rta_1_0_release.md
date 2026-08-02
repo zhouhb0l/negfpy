@@ -35,8 +35,8 @@ export VECLIB_MAXIMUM_THREADS=1
   --artifact-root /verified/v0.2.0/artifact-root \
   --crystal-yaml /verified/phono3py_disp.yaml \
   --v0-2-release-manifest /verified/NEGFPy_silicon_bulk_oracle_0.2.0_release_manifest.json \
-  --environment-lock validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64.lock \
-  --environment-lock-sha256 6d8e017b6f1ead8be3ec9fb8abb1c8c1d02fe0de852aad9cbfc69d08ce341bfc \
+  --environment-lock validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64-sha256.lock \
+  --environment-lock-sha256 a1fb0e7f7ae092106ec4b62911b86cf372da8264ab28aba6c8880aa0489f5eb1 \
   --output-dir /artifacts/bulk-rta-1.0.0/<exact-commit>/<run-id>
 ```
 
@@ -46,11 +46,11 @@ the conda inventory, while NEGFPy files must be listed by the wheel RECORD.
 Build the candidate wheel outside this prefix, then install that wheel with
 `pip install --no-deps`; build helpers or other unowned Python files in the
 release prefix intentionally fail preflight.
-The pinned explicit lock itself is authenticated by SHA256. Its current URLs
-do not carry artifact SHA256 fragments, so package records use their recorded
-SHA256 where available and an explicitly labelled MD5 identity otherwise;
-stable installed payloads are still verified with `sha256_in_prefix`. A future
-lock repin should add SHA256 URL fragments for every artifact.
+The pinned explicit release lock itself is authenticated by SHA256, and every
+one of its 153 package URLs carries an artifact SHA256 fragment. The original
+0.2.0 lock remains alongside it to preserve the historical oracle provenance;
+it is not used to construct the 1.0.0 certification environment. Stable
+installed payloads are additionally verified with `sha256_in_prefix`.
 
 Each mesh has separate atomic core and phono3py checkpoints. After an
 infrastructure interruption, rerun the identical command with `--resume`.

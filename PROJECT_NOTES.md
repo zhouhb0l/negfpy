@@ -32,6 +32,7 @@ not define production conventions.
 - [Toy-model report source](docs/validation/toy-model-report/)
 - [Pinned remote MPI environment lock](validation/locks/negf-toy-gate-linux-64.lock)
 - [Pinned silicon/phono3py/Open-MPI lock](validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64.lock)
+- [SHA256-authenticated 1.0 release lock](validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64-sha256.lock)
 
 The dense toy solver is certified at tag `v0.1.0-rc1`, and the pinned silicon
 bulk three-phonon oracle is preserved at `v0.2.0`. The separate 1.0 line adds

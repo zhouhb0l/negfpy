@@ -996,6 +996,11 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
     regenerated = pycache / "module.cpython-312.pyc"
     regenerated.write_bytes(b"runtime-regenerated-bytecode\n")
     url = "https://conda.example/linux-64/tool-1.0-0.conda"
+    package_cache = tmp_path / "package-cache"
+    package_cache.mkdir()
+    cached_artifact = package_cache / "tool-1.0-0.conda"
+    cached_artifact.write_bytes(b"authenticated conda artifact\n")
+    artifact_sha256 = _sha256(cached_artifact)
     record = {
         "url": url,
         "fn": "tool-1.0-0.conda",
@@ -1004,9 +1009,10 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
         "build": "0",
         "build_number": 0,
         "subdir": "linux-64",
-        "size": 123,
+        "size": cached_artifact.stat().st_size,
         "md5": "b" * 32,
-        "sha256": "a" * 64,
+        "sha256": artifact_sha256,
+        "extracted_package_dir": str(package_cache / "tool-1.0-0"),
         "paths_data": {
             "paths_version": 1,
             "paths": [
@@ -1029,13 +1035,16 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
         json.dumps(record), encoding="utf-8"
     )
     lock = tmp_path / "explicit.lock"
-    lock.write_text(f"# release lock\n@EXPLICIT\n{url}#sha256={'a' * 64}\n")
+    lock.write_text(
+        f"# release lock\n@EXPLICIT\n{url}#sha256={artifact_sha256}\n"
+    )
     binding = driver._validate_conda_prefix_against_lock(lock, prefix)
     assert binding["passed"] is True
     assert binding["explicit_url_count"] == 1
     assert binding["explicit_artifact_sha256_count"] == 1
     assert binding["record_artifact_sha256_count"] == 1
     assert binding["record_artifact_md5_count"] == 1
+    assert binding["cache_verified_artifact_sha256_count"] == 0
     assert len(binding["record_artifact_identity_sha256"]) == 64
     assert binding["hashed_file_count"] == 1
     assert binding["hash_declared_file_count"] == 2
@@ -1063,6 +1072,40 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
         "lib/python3.12/site-packages/sitecustomize.py"
     ]
 
+    record["md5"] = None
+    record["sha256"] = None
+    (prefix / "conda-meta/tool-1.0-0.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    sha_only_binding = driver._validate_conda_prefix_against_lock(lock, prefix)
+    assert sha_only_binding["record_artifact_sha256_count"] == 0
+    assert sha_only_binding["record_artifact_md5_count"] == 0
+    assert sha_only_binding["cache_verified_artifact_sha256_count"] == 1
+    cached_payload = cached_artifact.read_bytes()
+    cached_artifact.write_bytes(b"tampered artifact payload\n")
+    record["size"] = cached_artifact.stat().st_size
+    (prefix / "conda-meta/tool-1.0-0.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="Cached conda artifact SHA256 conflicts"):
+        driver._validate_conda_prefix_against_lock(lock, prefix)
+    cached_artifact.write_bytes(cached_payload)
+    record["size"] = cached_artifact.stat().st_size
+    (prefix / "conda-meta/tool-1.0-0.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    lock.write_text(f"@EXPLICIT\n{url}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no authenticated artifact digest"):
+        driver._validate_conda_prefix_against_lock(lock, prefix)
+    lock.write_text(
+        f"@EXPLICIT\n{url}#sha256={artifact_sha256}\n", encoding="utf-8"
+    )
+    record["md5"] = "b" * 32
+    record["sha256"] = artifact_sha256
+    (prefix / "conda-meta/tool-1.0-0.json").write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+
     installed.write_bytes(b"tampered\n")
     with pytest.raises(ValueError, match="SHA256 changed"):
         driver._validate_conda_prefix_against_lock(lock, prefix)
@@ -1073,7 +1116,7 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
     )
     with pytest.raises(ValueError, match="conflicts with lock"):
         driver._validate_conda_prefix_against_lock(lock, prefix)
-    record["sha256"] = "a" * 64
+    record["sha256"] = artifact_sha256
     (prefix / "conda-meta/tool-1.0-0.json").write_text(
         json.dumps(record), encoding="utf-8"
     )

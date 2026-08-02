@@ -68,7 +68,7 @@ FREQUENCY_FACTOR_TO_THZ = 15.633302300230191
 PINNED_NEGFPY_VERSION = "1.0.0"
 PINNED_PHONO3PY_VERSION = "4.4.0"
 PINNED_ENVIRONMENT_LOCK_SHA256 = (
-    "6d8e017b6f1ead8be3ec9fb8abb1c8c1d02fe0de852aad9cbfc69d08ce341bfc"
+    "a1fb0e7f7ae092106ec4b62911b86cf372da8264ab28aba6c8880aa0489f5eb1"
 )
 PINNED_PYTHON_VERSION = "3.12.13"
 PINNED_OPENMPI_VERSION = "5.0.10"
@@ -854,6 +854,7 @@ def _validate_conda_prefix_against_lock(
     record_identities: list[dict[str, Any]] = []
     record_artifact_sha256_count = 0
     record_artifact_md5_count = 0
+    cache_verified_artifact_sha256_count = 0
     hashed_file_count = 0
     hash_declared_file_count = 0
     skipped_declared_hash_count = 0
@@ -909,18 +910,28 @@ def _validate_conda_prefix_against_lock(
             raise ValueError(
                 f"Conda package record {source.name!r} identity conflicts with its URL."
             )
+        expected_artifact_sha256 = lock_artifact_sha256[url]
         record_md5 = record.get("md5")
-        if not isinstance(record_md5, str) or len(record_md5) != 32:
+        if record_md5 is not None:
+            if not isinstance(record_md5, str) or len(record_md5) != 32:
+                raise ValueError(
+                    f"Conda package record {source.name!r} has an invalid "
+                    "artifact MD5."
+                )
+            try:
+                int(record_md5, 16)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Conda package record {source.name!r} has an invalid "
+                    "artifact MD5."
+                ) from exc
+            record_md5 = record_md5.lower()
+            record_artifact_md5_count += 1
+        elif expected_artifact_sha256 is None:
             raise ValueError(
-                f"Conda package record {source.name!r} has no valid artifact MD5."
+                f"Conda package record {source.name!r} has no authenticated "
+                "artifact digest."
             )
-        try:
-            int(record_md5, 16)
-        except ValueError as exc:
-            raise ValueError(
-                f"Conda package record {source.name!r} has no valid artifact MD5."
-            ) from exc
-        record_artifact_md5_count += 1
         record_sha256 = record.get("sha256")
         if record_sha256 is not None and (
             not isinstance(record_sha256, str) or len(record_sha256) != 64
@@ -937,14 +948,46 @@ def _validate_conda_prefix_against_lock(
                 ) from exc
             record_sha256 = record_sha256.lower()
             record_artifact_sha256_count += 1
-        expected_artifact_sha256 = lock_artifact_sha256[url]
         if (
             expected_artifact_sha256 is not None
+            and record_sha256 is not None
             and record_sha256 != expected_artifact_sha256
         ):
             raise ValueError(
                 f"Conda package record artifact SHA256 conflicts with lock for {url!r}."
             )
+        artifact_sha256_verification = (
+            "record_sha256"
+            if expected_artifact_sha256 is not None
+            else "record_md5"
+        )
+        if expected_artifact_sha256 is not None and record_sha256 is None:
+            extracted_package_dir = record.get("extracted_package_dir")
+            if (
+                not isinstance(extracted_package_dir, str)
+                or not extracted_package_dir
+                or not Path(extracted_package_dir).is_absolute()
+            ):
+                raise ValueError(
+                    f"Conda package record {source.name!r} has no usable "
+                    "artifact-cache location."
+                )
+            cached_artifact = Path(extracted_package_dir).parent / filename
+            if cached_artifact.is_symlink() or not cached_artifact.is_file():
+                raise ValueError(
+                    f"Conda package record {source.name!r} has no regular "
+                    "cached artifact."
+                )
+            if cached_artifact.stat().st_size != int(record["size"]):
+                raise ValueError(
+                    f"Cached conda artifact size changed for {source.name!r}."
+                )
+            if _sha256(cached_artifact) != expected_artifact_sha256:
+                raise ValueError(
+                    f"Cached conda artifact SHA256 conflicts with lock for {url!r}."
+                )
+            artifact_sha256_verification = "package_cache_sha256"
+            cache_verified_artifact_sha256_count += 1
         record_identities.append(
             {
                 "url": url,
@@ -955,8 +998,10 @@ def _validate_conda_prefix_against_lock(
                 "subdir": record["subdir"],
                 "filename": filename,
                 "size": record["size"],
-                "md5": record_md5.lower(),
+                "md5": record_md5,
                 "sha256": record_sha256,
+                "authenticated_sha256": expected_artifact_sha256,
+                "sha256_verification": artifact_sha256_verification,
             }
         )
 
@@ -1089,6 +1134,9 @@ def _validate_conda_prefix_against_lock(
         "package_record_count": len(records),
         "record_artifact_sha256_count": record_artifact_sha256_count,
         "record_artifact_md5_count": record_artifact_md5_count,
+        "cache_verified_artifact_sha256_count": (
+            cache_verified_artifact_sha256_count
+        ),
         "record_artifact_identity_sha256": hashlib.sha256(
             _canonical_json(record_identities).encode("utf-8")
         ).hexdigest(),
