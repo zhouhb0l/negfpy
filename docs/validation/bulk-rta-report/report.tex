@@ -1,0 +1,557 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=23mm,headheight=15pt]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[scaled=0.92]{helvet}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs,tabularx,array,longtable}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\definecolor{ink}{HTML}{17324D}
+\definecolor{muted}{HTML}{67727E}
+\definecolor{rulegray}{HTML}{D9DEE3}
+\definecolor{statusgreen}{HTML}{27864B}
+\definecolor{statusgreenlight}{HTML}{E7F4EA}
+\definecolor{statusamber}{HTML}{C48319}
+\definecolor{statusamberlight}{HTML}{FFF2D8}
+\definecolor{statusred}{HTML}{B5443C}
+\definecolor{statusredlight}{HTML}{F8E5E3}
+\definecolor{accent}{HTML}{168A85}
+\definecolor{linkblue}{HTML}{2C6E9B}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=ink,
+  citecolor=linkblue,
+  urlcolor=linkblue,
+  pdftitle={NEGFPy 1.0 bulk phonon and SMRTA validation report},
+  pdfauthor={NEGFPy validation project}
+}
+\captionsetup{
+  font=small,
+  labelfont={bf,color=ink},
+  textfont={color=ink},
+  margin=8pt
+}
+\setlist[itemize]{leftmargin=1.55em,itemsep=2pt,topsep=3pt}
+\setlist[enumerate]{leftmargin=1.75em,itemsep=2pt,topsep=3pt}
+\setlength{\emergencystretch}{3em}
+\renewcommand{\arraystretch}{1.16}
+
+\makeatletter
+\renewcommand\@seccntformat[1]{\csname the#1\endcsname\hspace{0.65em}}
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-2.6ex \@plus -0.8ex \@minus -.2ex}%
+  {1.2ex \@plus .2ex}%
+  {\normalfont\Large\sffamily\bfseries\color{ink}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2.0ex \@plus -0.6ex \@minus -.2ex}%
+  {0.8ex \@plus .2ex}%
+  {\normalfont\large\sffamily\bfseries\color{ink}}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-1.6ex \@plus -0.4ex \@minus -.2ex}%
+  {0.6ex \@plus .2ex}%
+  {\normalfont\normalsize\sffamily\bfseries\color{ink}}}
+\makeatother
+
+\input{generated/evidence_macros.tex}
+\input{generated/harmonic_table.tex}
+\input{generated/mesh_table.tex}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily\color{muted}NEGFPy bulk phonon/SMRTA validation}
+\fancyhead[R]{\small\sffamily\color{muted}\CandidateShortCommit}
+\fancyfoot[L]{\small\sffamily\color{muted}Version 1.0.0 candidate}
+\fancyfoot[R]{\small\sffamily\color{muted}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\q}{\vect{q}}
+\newcommand{\kvec}{\vect{k}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\scopewarning}[1]{%
+  \begin{quote}\small\color{muted}\sffamily #1\end{quote}%
+}
+
+\begin{document}
+\hypersetup{pageanchor=false}
+
+\begin{titlepage}
+\thispagestyle{empty}
+\vspace*{9mm}
+
+{\sffamily\bfseries\color{accent}\large NEGFPy VALIDATION PROGRAM\par}
+\vspace{8mm}
+{\sffamily\bfseries\color{ink}\fontsize{27}{32}\selectfont
+Bulk phonons and intrinsic thermal\par conductivity\par}
+\vspace{2mm}
+{\sffamily\color{muted}\fontsize{16}{20}\selectfont
+Band structure, density of states, three-phonon relaxation,\par
+and SMRTA transport\par}
+
+\vspace{11mm}
+\noindent{\color{rulegray}\rule{\textwidth}{0.7pt}}
+\vspace{8mm}
+
+\noindent\fcolorbox{\EvidenceStatusColor}{\EvidenceStatusBackground}{%
+  \parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule\relax}{%
+    \vspace{2mm}
+    {\sffamily\bfseries\color{\EvidenceStatusColor}\large
+      \EvidenceStatusTitle\par}
+    \vspace{1mm}
+    {\small \EvidenceStatusMessage\par}
+    \vspace{2mm}
+  }%
+}
+
+\vspace{7mm}
+\small
+\begin{tabularx}{\textwidth}{>{\sffamily\bfseries\color{ink}}p{0.28\textwidth} X}
+Candidate revision & \CandidateCommit \\
+Git tree & \CandidateTree \\
+Reference implementation & phono3py 4.4.0 \\
+Reference dataset & Si-PBEsol example pinned at commit
+\texttt{302ad205452e\ldots} \\
+Transport approximation & Intrinsic three-phonon single-mode relaxation-time approximation (SMRTA) \\
+Candidate release gates & \textbf{\CandidateDecisionStatus} \\
+Certification authority & \texttt{release-completion-receipt.json} (sole) \\
+Authoritative decision & \textbf{\AuthoritativeDecisionStatus} \\
+Physical mesh convergence & \textbf{false} \\
+Report input time & \ReportGeneratedUTC \\
+\end{tabularx}
+\normalsize
+
+\vfill
+\noindent{\small\color{muted}
+The numerical values on the $3^3$, $5^3$, and $11^3$ meshes are
+implementation-validation points evaluated at fixed settings. They are not a
+mesh- or smearing-converged prediction of silicon thermal conductivity. This
+report does not validate anharmonic heat transport through an open junction.}
+\end{titlepage}
+
+\hypersetup{pageanchor=true}
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\pagenumbering{arabic}
+
+\section{Executive result and scope}
+
+\ifreportcertified
+The frozen commit-last completion receipt, acting as the sole certification
+authority, records that the exact version 1.0.0 candidate release gates passed.
+The bound validation JSON and evidence sidecar remain provisional with
+\code{release\_certified=false}, as required by the acyclic publication
+contract. This statement certifies the bulk-observable and SMRTA implementation
+only; \emph{physical\_mesh\_convergence\_certified remains false}.
+\else
+This is a provisional rendering. Either the sole completion receipt does not
+certify the candidate, or this is a legacy development input without the frozen
+commit-last authority. Recorded same-input comparisons may still be useful,
+but no release tag or silicon-property claim follows from this document.
+\fi
+
+The 1.0 scope is a bulk-crystal workflow. Given mapped second- and third-order
+interatomic force constants (FC2 and FC3), it supplies:
+
+\begin{itemize}
+  \item harmonic frequencies and eigenvectors on arbitrary paths or complete
+  uniform meshes;
+  \item phonon band structures, total density of states (DOS), and analytic
+  group velocities;
+  \item on-shell intrinsic three-phonon linewidths and population lifetimes;
+  \item mode heat capacities, mean free paths, tensorial SMRTA conductivity,
+  and cumulative conductivity; and
+  \item immutable numerical results carrying units, input identities,
+  approximation names, and provenance metadata.
+\end{itemize}
+
+\scopewarning{The 1.0 conductivity is a bulk phonon-Boltzmann result. It is
+not evaluated from a left-device-right junction, and its reservoirs do not
+contain FC3. Open-device anharmonic self-energies and their conservation laws
+belong to the planned 2.0 development line.}
+
+\section{Formulation and unit contract}
+
+\subsection{Harmonic spectrum and band structure}
+
+With mass-normalized reciprocal-space dynamical matrix $D(\q)$, the harmonic
+problem is
+\begin{equation}
+  D(\q)\vect{e}_{\q s}=\omega_{\q s}^{2}\vect{e}_{\q s},
+  \qquad
+  \vect{e}_{\q s}^{\dagger}\vect{e}_{\q s'}=\delta_{ss'}.
+\end{equation}
+The public frequency is the cyclic frequency
+$\nu_{\q s}=\omega_{\q s}/(2\pi)$ in THz. A band structure samples the same
+eigenproblem along a declared piecewise-linear reciprocal-space path. It is
+never reconstructed by sorting an unrelated uniform mesh.
+
+For real-space FC2, the release preflight checks masses, atom mappings,
+reciprocal pairs, translational and rotational residuals, random-$\q$
+Hermiticity, $D(-\q)=D(\q)^{*}$, and sampled stability before harmonic
+observables can be called release-eligible.
+
+\subsection{Density of states}
+
+For a complete uniform mesh with $N_q$ points and $n_b$ branches, the total
+DOS per primitive cell is
+\begin{equation}
+  g(\nu)=\frac{1}{N_q}\sum_{\q s}\delta(\nu-\nu_{\q s}),
+  \qquad
+  \int g(\nu)\,d\nu=n_b=3N_{\mathrm{atom}}.
+\end{equation}
+The implementation supports an explicitly declared broadening and refuses to
+treat a band path as a DOS sampling mesh. A frequency window that truncates
+the normalization is rejected unless the caller opts into a separately named
+truncated-window result.
+
+\subsection{Group velocity}
+
+The Cartesian group velocity is
+\begin{equation}
+  \vect{v}_{\q s}=\nabla_{\kvec}\omega_{\q s},
+\end{equation}
+evaluated analytically from derivatives of $D(\q)$. Within a degenerate
+subspace the derivative matrices are diagonalized before velocities are
+reported. The archived unit is THz\,\AA, with
+$1\ \mathrm{THz}\,\text{\AA}=100\ \mathrm{m\,s^{-1}}$.
+
+\subsection{Three-phonon linewidth and population lifetime}
+
+The FC3 calculation evaluates the standard lowest-order three-phonon
+self-energy using energy-conserving decay and difference channels, Bose
+occupation factors, and crystal-momentum conservation. Normal and Umklapp
+contributions sum to the total on-shell linewidth. The production input
+$\gamma_{\q s}$ follows the phono3py convention: cyclic-frequency HWHM in THz.
+Therefore
+\begin{equation}
+  \Gamma^{\mathrm{angular}}_{\mathrm{FWHM},\q s}
+  =4\pi\gamma_{\q s}\quad [\mathrm{ps}^{-1}],
+  \qquad
+  \tau_{\q s}=\frac{1}{4\pi\gamma_{\q s}}\quad [\mathrm{ps}].
+  \label{eq:lifetime}
+\end{equation}
+This factor of $4\pi$ is a locked unit identity, not a fitted convention.
+Modes below the declared acoustic cutoff or with unresolved nonpositive rates
+are masked explicitly rather than assigned an arbitrary lifetime.
+
+\subsection{Heat capacity, mean free path, and SMRTA conductivity}
+
+For $x=h\nu/(k_BT)$, the harmonic mode heat capacity is
+\begin{equation}
+  C_{\q s}=k_B\frac{x^2e^x}{(e^x-1)^2}.
+\end{equation}
+Small-$x$, large-$x$, and zero-temperature limits are evaluated without
+unstable direct exponentials. The mode mean-free-path vector and the bulk
+conductivity tensor are
+\begin{align}
+  \vect{\Lambda}_{\q s} &= \vect{v}_{\q s}\tau_{\q s},\\
+  \kappa_{ij}^{\mathrm{SMRTA}}(T)
+  &=\frac{1}{N_q V}\sum_{\q s}
+    C_{\q s}(T)v_{\q s,i}v_{\q s,j}\tau_{\q s}(T),
+  \label{eq:kappa}
+\end{align}
+where $V$ is the primitive-cell volume. The stored per-mode tensors must sum
+back to the total tensor. Raw band-index decompositions are bookkeeping only:
+within a degenerate manifold, only the complete subspace sum is gauge
+invariant.
+
+\section{Approximation hierarchy}
+
+\begin{table}[htbp]
+\centering
+\caption{Physics included in version 1.0 and its explicit boundaries.}
+\small
+\begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{0.21\textwidth} >{\raggedright\arraybackslash}p{0.18\textwidth} >{\raggedright\arraybackslash}X}
+\toprule
+Layer & 1.0 status & Meaning and limitation \\
+\midrule
+Harmonic lattice dynamics & Included & FC2 bands, DOS, eigenvectors, and analytic group velocities. \\
+Intrinsic three-phonon scattering & Included & Lowest-order on-shell FC3 rates with normal and Umklapp channels; FC3 is not placed in a lead or open device. \\
+SMRTA & Included & Each mode relaxes independently. Off-diagonal mode coupling and the iterative linearized BTE correction are excluded. \\
+Isotopes and boundaries & Excluded & No mass-disorder, finite-size, grain-boundary, or phenomenological boundary rate is silently added. \\
+Higher anharmonicity & Excluded & No quartic renormalization, four-phonon scattering, thermal expansion, or tadpole shift. \\
+Nonphononic channels & Excluded & No electron-phonon, defect, magnetic, or radiative scattering. \\
+Coherent/interband transport & Excluded & No Wigner interband term; no off-diagonal density-matrix conductivity. \\
+Anharmonic NEGF junction & Planned 2.0 & Cubic device self-energies, Dyson/Keldysh iteration, current conservation, and transverse-momentum coupling. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+SMRTA is mature and useful for rapid screening, mode-resolved diagnosis, and
+an independent bulk scale for later device calculations. It is not universally
+quantitative. In crystals dominated by momentum-conserving normal processes,
+the iterative BTE may differ materially because the collision operator is not
+diagonal in the harmonic-mode basis \cite{ziman1960,togo2015}.
+
+\section{IFC, mapping, and provenance gates}
+
+The release workflow separates raw input, audit, correction, mass
+normalization, and transport assembly. Raw arrays are never silently
+symmetrized, remapped, range-truncated, or assigned missing reciprocal partners.
+The same crystal mapping and phase convention are shared by FC2 reconstruction,
+FC3 Fourier transformation, and mode-space contractions.
+
+\begin{table}[htbp]
+\centering
+\caption{Required input and provenance checks. ``Current artifact'' refers to
+the machine-readable input used by this rendering, not to an inferred state.}
+\small
+\begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{0.25\textwidth} >{\raggedright\arraybackslash}p{0.27\textwidth} >{\raggedright\arraybackslash}X}
+\toprule
+Gate & Release requirement & Current artifact evidence \\
+\midrule
+FC2 physical audit & Reciprocity, ASR, rotational moments, Hermiticity,
+time reversal, stability, masses, and mappings pass declared tolerances &
+\ifreportcertified Direct harmonic metrics and the FC2 schema/physical-audit
+decisions are authenticated and passing.\else Numerical audit details must be
+embedded in the final 1.0 validation JSON.\fi \\
+FC3 identity and audit & Full/compact mapping, permutation/ASR/range audit,
+and physical-input SHA bind the linewidth field & \ifreportcertified The sealed
+source and archive identities are bound through the release evidence
+sidecar.\else The development artifact records pinned FC3 and v0.2 source
+hashes; final 1.0 must authenticate the sealed v0.2 manifest.\fi \\
+Linewidth identity & Mesh, selected modes, cutoff, smearing, units, and
+physics-only problem digest match the RTA problem & Enforced by the result
+assembler and HDF5 archive invariants. \\
+Source provenance & Exact clean commit, tree, wheel, environment lock, and
+input hashes agree & \ifreportcertified The recorded before/after runtime
+states are identical, clean, and input-authenticated.\else A dirty development
+checkout cannot satisfy this gate.\fi \\
+Archive integrity & Atomic regular files, strict schemas, payload SHA256, and
+commit-last cross-binding & The provisional JSON and evidence remain false;
+the sole receipt binds their hashes, the HDF5 hash, the exact-tree checksum
+manifest hash, and the candidate decision before any certified wording. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The exact report JSON, release-evidence sidecar, HDF5, checksum-manifest, and
+completion-receipt identities used for a rendering are written to
+\path{generated/normalized_report_state.json}. The report generator refuses
+symlinked inputs, reconstructs the checksum manifest from the complete artifact
+tree, verifies the evidence SHA embedded by both the JSON and HDF5, verifies
+the receipt's report/evidence/HDF5/manifest hashes and candidate decision, and
+recomputes all per-mode conductivity sums.
+
+\section{Silicon implementation validation}
+
+\subsection{External comparisons}
+
+The pinned silicon comparison uses the phono3py 4.4.0 Si-PBEsol example and
+the exact FC2/FC3 artifacts already qualified by the 0.2.0 bulk oracle. The
+group-velocity reference uses phono3py's analytic implementation; the heat
+capacity and conductivity references are assembled independently from the
+same archived frequencies and rates. Small $3^3$ and $5^3$ cases additionally
+run phono3py end to end. \ifreportcertified The authenticated $11^3$ harmonic
+archive also supplies the fixed $\Gamma$--X--L--$\Gamma$ band path and DOS,
+whose external error metrics pass the declared gates.\else A final 1.0 report
+also requires externally compared high-symmetry bands and DOS, rather than
+only plotting internally generated curves.\fi
+
+\begin{table}[H]
+\centering
+\caption{Harmonic-observable reporting fields. \ifreportcertified These rows
+are authenticated by the locked release evidence.\else Missing rows keep this
+rendering uncertified even if other numerical comparisons pass.\fi}
+\small
+\begin{tabularx}{\textwidth}{>{\bfseries}p{0.30\textwidth} p{0.25\textwidth} X}
+\toprule
+Observable & Status & Maximum absolute error \\
+\midrule
+\HarmonicValidationRows
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Same-input silicon implementation validation. Conductivities are in
+W\,m$^{-1}$\,K$^{-1}$ and are reported at the single archived temperature.
+The values are not a mesh-convergence series.}
+\scriptsize
+\begin{tabular}{ccccccc}
+\toprule
+Mesh & $N_q$ & max $|\Delta v|$ & max $|\Delta C|$ & NEGFPy $\kappa_{xx}$ & reference $\kappa_{xx}$ & end to end \\
+ & & (THz\,\AA) & (eV K$^{-1}$) & & & \\
+\midrule
+\MeshValidationRows
+\bottomrule
+\end{tabular}
+\end{table}
+
+The variation among the three archived values is evidence that these points
+must \emph{not} be interpreted as a converged silicon property. Their purpose
+is code-path equality at fixed inputs.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/band_and_dos.pdf}
+  \caption{\textbf{Harmonic observables.} \ifreportcertified The left panel
+  shows the authenticated fixed $\Gamma$--X--L--$\Gamma$ band path; the right
+  panel shows the authenticated total DOS. Their independently computed
+  comparison errors are reported in the harmonic-validation table.\else A
+  final report plots the independently compared high-symmetry band path at
+  left. The provisional artifact lacks that dataset, so the panel remains an
+  explicit placeholder. At right, the draft plot is a Gaussian DOS computed
+  only from the complete $11^3$ uniform-mesh frequencies; it is not promoted
+  to an external DOS validation.\fi}
+  \label{fig:band-dos}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/rates_and_mfp.pdf}
+  \caption{\textbf{Three-phonon relaxation and transport lengths on the
+  $11^3$ implementation mesh.} Population lifetimes use the exact cyclic-HWHM
+  conversion in \cref{eq:lifetime}. Mean free paths combine the same lifetimes
+  with analytic group velocities. Points below the acoustic cutoff or without
+  a positive resolved rate are omitted. For readability the mean-free-path
+  panel also omits displayed values below $10^{-6}$\,nm; all numerical values
+  remain in the HDF5 artifact.}
+  \label{fig:rates}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/conductivity_and_cumulative.pdf}
+  \caption{\textbf{SMRTA conductivity diagnostics.} The left panel deliberately
+  uses a logarithmic axis to show the nonconverged variation among the three
+  implementation meshes. The right panel accumulates the nonnegative trace
+  contribution of $11^3$ modes by mean-free-path threshold. For display,
+  contributions at or below $10^{-6}$\,nm are collected at that lower bound;
+  the accumulated conductivity is unchanged. Neither panel is evidence of
+  physical mesh convergence.}
+  \label{fig:kappa}
+\end{figure}
+
+\clearpage
+\section{Numerical invariants and release gates}
+
+The 1.0 result objects and archives enforce cross-field identities in addition
+to pointwise comparisons:
+\begin{itemize}
+  \item $\Gamma_{\mathrm{FWHM}}^{\mathrm{angular}}=4\pi\gamma$ and
+  $\tau\Gamma_{\mathrm{FWHM}}^{\mathrm{angular}}=1$ on every resolved mode;
+  \item $\vect{\Lambda}=\vect{v}\tau$ under the stored THz\,\AA/ps convention;
+  \item included-mode, positive-rate, stability, cutoff, and q-point masks are
+  identical across the linewidth and conductivity inputs;
+  \item every per-mode tensor sums to the archived total tensor, which is
+  symmetric within the strict field tolerances;
+  \item compact and full FC2/FC3 representations share physical mappings and
+  reproduce gauge-invariant quantities; and
+  \item serial and task-level MPI bulk-linewidth fields are merged in canonical
+  target-$\q$ order without floating-point MPI reductions.
+\end{itemize}
+
+Final release acceptance requires exact Python 3.10 and 3.12 test records, a
+fresh-wheel import, clean commit/tree/environment provenance, authenticated
+reuse of the 0.2.0 linewidth oracle, external band/DOS comparison, the complete
+$3^3/5^3/11^3$ matrix, strict archives, and an independently checked rendered
+PDF. A post-processing or report failure can resume from immutable completed
+scientific artifacts; it must not trigger an unnecessary FC3 rerun.
+
+\section{Version 1.0 boundary and version 2.0 plan}
+
+\begin{table}[htbp]
+\centering
+\caption{Scientific boundary between the first bulk release and the planned
+anharmonic-NEGF development line.}
+\small
+\begin{tabularx}{\textwidth}{>{\bfseries\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Question & Version 1.0 & Planned version 2.0 \\
+\midrule
+Geometry & Infinite periodic bulk crystal & Left lead--finite device--right lead, with optional transverse periodicity \\
+Anharmonicity & On-shell FC3 rates used in a bulk SMRTA collision model & Frequency-dependent cubic NEGF self-energy in the device \\
+Leads & Not applicable to bulk BTE & Harmonic in the first material-device stage; anharmonic reservoirs require a separate formalism \\
+Primary output & $\nu$, DOS, $\vect{v}$, $\gamma$, $\tau$, $\vect{\Lambda}$, and $\bm{\kappa}$ & Spectral heat current, interacting conductance, collision power, and spatial conservation \\
+Core validation & phono3py equality and bulk invariants & Dense/sparse SCBA equality, acoustic contact limits, current conservation, and $q$-coupled convergence \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The first 2.0 vertical slice should therefore map the already validated silicon
+FC3 into a padded $N_q=1$ interaction region, prove dense/sparse equality, and
+demonstrate contact-current and internal-collision-power conservation. Only
+after that gate should transverse-momentum-coupled SCBA and silicon-film or
+interface comparisons begin.
+
+\clearpage
+\section{Reproducibility record}
+
+This report is generated from one provisional validation JSON, one bound HDF5
+results archive, one provisional release-evidence sidecar, their exact-tree
+checksum manifest, and the commit-last completion receipt. The completion
+receipt is the sole certification authority; neither provisional input may
+carry a true release flag.
+The report JSON SHA256 is \ValidationJSONSHA; the release-evidence SHA256 is
+\ReleaseEvidenceSHA; the whole-file HDF5 SHA256 is \ResultsHDFSHA; the checksum
+manifest SHA256 is \ChecksumManifestSHA; and the completion-receipt SHA256 is
+\CompletionReceiptSHA. The generator creates figures, LaTeX evidence macros,
+a normalized report state, and a PDF checksum list. It
+does not call FC2, FC3, phono3py, or any transport solver. Figure generation is
+deterministic for fixed numerical inputs; the PDF build uses a fixed
+\code{SOURCE\_DATE\_EPOCH}, UTC, and disabled shell escape.
+
+The source report deliberately contains no hard-coded certification decision.
+Certified wording is available only with an explicit release-rendering switch
+and only when the sole receipt certifies the candidate, every hash binding and
+mesh decision passes, and the band/DOS external-validation fields and their
+HDF5 arrays are present and passing.
+The current harmonic data status is \textbf{\HarmonicDataStatus}; physical mesh
+convergence is \textbf{\PhysicalConvergenceStatus}.
+
+\section{Conclusion}
+
+The implemented 1.0 architecture closes a useful and well-defined bulk layer:
+harmonic phonon observables, validated intrinsic three-phonon relaxation, and
+SMRTA thermal conductivity with explicit units and approximation metadata.
+\ifreportcertified The exact archived silicon cases demonstrate internal and
+external implementation equality, not a converged material prediction. This
+scientific certification does not by itself record the separately required
+human PDF visual-inspection record or create a release tag.\else The provisional
+silicon numbers demonstrate internal and external implementation equality,
+not a converged material prediction. Completion of the exact clean release
+gate, including band/DOS evidence and final visual inspection, is still
+required before version 1.0.0 may be tagged.\fi{} Anharmonic NEGF junction
+physics remains a distinct version 2.0 objective.
+
+\begin{thebibliography}{9}
+
+\bibitem{togo2015}
+A. Togo, L. Chaput, and I. Tanaka,
+``Distributions of phonon lifetimes in Brillouin zones,''
+\emph{Physical Review B} \textbf{91}, 094306 (2015).
+
+\bibitem{togo2023}
+A. Togo, L. Chaput, T. Tadano, and I. Tanaka,
+``Implementation strategies in phonopy and phono3py,''
+\emph{Journal of Physics: Condensed Matter} \textbf{35}, 353001 (2023).
+
+\bibitem{ziman1960}
+J. M. Ziman,
+\emph{Electrons and Phonons} (Oxford University Press, 1960).
+
+\bibitem{guo2020}
+Y. Guo \emph{et al.},
+``Thermal transport in silicon films from anharmonic atomistic Green's
+functions,'' \emph{Physical Review B} \textbf{102}, 195412 (2020).
+
+\end{thebibliography}
+
+\end{document}

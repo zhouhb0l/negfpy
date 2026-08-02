@@ -43,7 +43,6 @@ from .momentum import (
 )
 from .translational_fc3 import TranslationalFC3
 
-
 Array = np.ndarray
 Metadata = Mapping[str, Any]
 
@@ -475,6 +474,8 @@ def compute_three_phonon_interactions(
         qpoints,
         frequency_factor_to_thz=problem.frequency_factor_to_thz,
         hermitianize=True,
+        sampling_kind="uniform_full_mesh",
+        mesh_shape=problem.mesh.shape,
     )
     shape = (
         targets.size,
@@ -556,6 +557,11 @@ def compute_three_phonon_interactions(
                 reciprocal == (0, 0, 0)
             )
 
+    from ._bulk_identity import (
+        bulk_three_phonon_physics_sha256,
+        bulk_three_phonon_problem_sha256,
+    )
+
     metadata = {
         "schema": "negfpy.bulk_three_phonon_interactions.v1",
         "method": "deterministic_serial_full_mesh",
@@ -588,6 +594,8 @@ def compute_three_phonon_interactions(
         ),
         "interaction_strength_units": "eV^2",
         "estimated_result_bytes": estimate,
+        "problem_sha256": bulk_three_phonon_problem_sha256(problem),
+        "physics_input_sha256": bulk_three_phonon_physics_sha256(problem),
         "problem_metadata": problem.metadata,
     }
     return BulkThreePhononInteractions(
@@ -689,9 +697,34 @@ class BulkThreePhononLinewidths:
     metadata: Metadata
 
     def __post_init__(self) -> None:
+        if not isinstance(self.interactions, BulkThreePhononInteractions):
+            raise TypeError(
+                "interactions must be a BulkThreePhononInteractions result."
+            )
         temperatures = _readonly(self.temperatures, dtype=np.float64)
         grid_points = _readonly(self.grid_points, dtype=np.int64)
         bands = _readonly(self.band_indices, dtype=np.int64)
+        if (
+            temperatures.ndim != 1
+            or temperatures.size < 1
+            or not np.all(np.isfinite(temperatures))
+            or np.any(temperatures < 0.0)
+        ):
+            raise ValueError(
+                "temperatures must be a nonempty finite nonnegative vector."
+            )
+        if grid_points.ndim != 1 or grid_points.size < 1:
+            raise ValueError("grid_points must be a nonempty vector.")
+        if bands.ndim != 1 or bands.size < 1:
+            raise ValueError("band_indices must be a nonempty vector.")
+        if not np.array_equal(grid_points, self.interactions.grid_points):
+            raise ValueError(
+                "linewidth grid_points must equal interaction grid_points."
+            )
+        if not np.array_equal(bands, self.interactions.band_indices):
+            raise ValueError(
+                "linewidth band_indices must equal interaction band_indices."
+            )
         expected = (temperatures.size, grid_points.size, bands.size)
         arrays = {
             "gamma_thz_hwhm": _readonly(
@@ -710,11 +743,47 @@ class BulkThreePhononLinewidths:
         for name, values in arrays.items():
             if values.shape != expected or not np.all(np.isfinite(values)):
                 raise ValueError(f"{name} must have finite shape {expected}.")
+            if np.any(values < 0.0):
+                raise ValueError(f"{name} must be nonnegative.")
+        if not np.allclose(
+            arrays["gamma_thz_hwhm"],
+            arrays["gamma_normal_thz_hwhm"]
+            + arrays["gamma_umklapp_thz_hwhm"],
+            rtol=1.0e-13,
+            atol=1.0e-15,
+        ):
+            raise ValueError(
+                "Total linewidth must equal normal plus Umklapp linewidth."
+            )
+        if not np.allclose(
+            arrays["gamma_angular_fwhm"],
+            4.0 * np.pi * arrays["gamma_thz_hwhm"],
+            rtol=1.0e-13,
+            atol=1.0e-15,
+        ):
+            raise ValueError(
+                "Angular FWHM linewidth must equal 4*pi*cyclic-THz HWHM."
+            )
         phase_shape = (grid_points.size, bands.size)
         decay = _readonly(self.decay_phase_space, dtype=np.float64)
         difference = _readonly(self.difference_phase_space, dtype=np.float64)
         if decay.shape != phase_shape or difference.shape != phase_shape:
             raise ValueError("Phase-space arrays have inconsistent shape.")
+        if not np.all(np.isfinite(decay)) or not np.all(np.isfinite(difference)):
+            raise ValueError("Phase-space arrays must be finite.")
+        if np.any(decay < 0.0):
+            raise ValueError("Decay phase space must be nonnegative.")
+
+        metadata = _freeze_mapping(self.metadata)
+        for name in ("problem_sha256", "physics_input_sha256"):
+            interaction_identity = self.interactions.metadata.get(name)
+            linewidth_identity = metadata.get(name)
+            if interaction_identity is not None and (
+                linewidth_identity != interaction_identity
+            ):
+                raise ValueError(
+                    f"Linewidth {name} conflicts with interaction metadata."
+                )
 
         object.__setattr__(self, "temperatures", temperatures)
         object.__setattr__(self, "grid_points", grid_points)
@@ -723,7 +792,7 @@ class BulkThreePhononLinewidths:
             object.__setattr__(self, name, values)
         object.__setattr__(self, "decay_phase_space", decay)
         object.__setattr__(self, "difference_phase_space", difference)
-        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+        object.__setattr__(self, "metadata", metadata)
 
 
 def compute_three_phonon_linewidths(
@@ -908,6 +977,10 @@ def compute_three_phonon_linewidths(
         "phase_space_normalization": "complete_full_mesh_1_over_Nq",
         "sigma_cutoff": None,
         "temperature_units": "K",
+        "problem_sha256": interactions.metadata["problem_sha256"],
+        "physics_input_sha256": interactions.metadata[
+            "physics_input_sha256"
+        ],
         "interaction_metadata": interactions.metadata,
     }
     return BulkThreePhononLinewidths(

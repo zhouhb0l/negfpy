@@ -12,6 +12,7 @@ reports live in the sibling workspace directories described in the
 | Harmonic NEGF | [core package](src/negfpy/core/) | Surface Green functions, device Green functions, transmission, currents, and harmonic observables |
 | Models and IFC mapping | [modeling package](src/negfpy/modeling/), [I/O package](src/negfpy/io/), and [workflows](src/negfpy/workflows/) | Unit-aware IFC ingestion, mapping, audits, and construction of harmonic transport problems |
 | Cubic anharmonic NEGF | [anharmonic package](src/negfpy/anharmonic/) | Signed grids, cubic contractions, Born and conserving SCBA solvers, currents, diagnostics, and restart state |
+| Bulk phonons and SMRTA | [bulk API](src/negfpy/bulk/) and [bulk guide](docs/bulk_rta.md) | Audited FC2-only bands/DOS/group velocities plus explicit heavy FC3 linewidth, lifetime, mean-free-path, and intrinsic SMRTA conductivity workflows |
 | Task-level MPI | [private MPI scheduler](src/negfpy/anharmonic/_mpi_tasks.py) | Parallel execution of complete validation cases; it does not partition an SCBA solve |
 | Silicon bulk oracle | [bulk three-phonon theory](docs/theory/bulk_three_phonon_oracle.md) and [validation record](docs/validation/silicon_bulk_oracle.md) | Pinned phono3py FC2/FC3 ingestion, crystal mapping, mode-space interactions, linewidths, complete-target-\(q\) MPI, and strict release evidence |
 | Tests | [test suite](tests/) | Scientific identities, analytic fixtures, release gates, MPI equivalence, restart integrity, and remote-lifecycle checks |
@@ -27,19 +28,30 @@ not define production conventions.
 - [Historical convention mapping](docs/anharmonic_historical_conventions.md)
 - [Remote heavy-validation protocol](docs/remote_heavy_validation.md)
 - [Silicon remote-validation protocol](docs/silicon_remote_validation.md)
+- [Bulk phonon and SMRTA user guide](docs/bulk_rta.md)
 - [Toy-model report source](docs/validation/toy-model-report/)
 - [Pinned remote MPI environment lock](validation/locks/negf-toy-gate-linux-64.lock)
 - [Pinned silicon/phono3py/Open-MPI lock](validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64.lock)
 
-The dense toy solver is certified at tag `v0.1.0-rc1`. The active release
-gate is the silicon bulk oracle for `0.2.0`; sparse and
-transverse-momentum material-device SCBA remain blocked until that exact
-remote gate passes.
+The dense toy solver is certified at tag `v0.1.0-rc1`, and the pinned silicon
+bulk three-phonon oracle is preserved at `v0.2.0`. The separate 1.0 line adds
+the user-facing periodic-crystal harmonic and intrinsic three-phonon SMRTA
+workflow. Its safe entry point is `BulkHarmonicProblem`; FC3 contraction is an
+explicit heavy operation through `BulkTransportProblem`.
 
-The production hierarchy is harmonic NEGF, one-shot cubic Born for screening,
-and conserving cubic SCBA for interacting conductance. Historical Wang and
-Mingo implementations are regression or literature-reproduction work and
-cannot calibrate the production cubic prefactor.
+The planned 2.0 line is real-material anharmonic NEGF. Sparse and
+transverse-momentum material-device SCBA remain gated on the independently
+validated toy and bulk-oracle foundations. Bulk SMRTA lifetimes are a useful
+oracle but are not inserted into harmonic transmission as a substitute for a
+conserving open-device self-energy.
+
+For periodic bulk transport, the 1.0 approximation is explicitly
+three-phonon SMRTA; iterative LBTE and additional scattering mechanisms are
+outside that result. For open devices, the production hierarchy remains
+harmonic NEGF, one-shot cubic Born for screening, and conserving cubic SCBA
+for interacting conductance. Historical Wang and Mingo implementations are
+regression or literature-reproduction work and cannot calibrate the
+production cubic prefactor.
 
 ## Workspace responsibilities
 

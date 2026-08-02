@@ -6,11 +6,15 @@ import pytest
 from negfpy.anharmonic.bulk_harmonic import (
     DEFAULT_FREQUENCY_FACTOR_TO_THZ,
     PHONO3PY_4_4_FREQUENCY_FACTOR_TO_THZ,
+    BulkGroupVelocities,
+    compute_bulk_group_velocities,
     compute_bulk_phonons,
+    dynamical_matrix_derivatives_from_fc2,
     dynamical_matrix_from_fc2,
 )
 from negfpy.anharmonic.crystal import CrystalCell, CrystalMapping
 from negfpy.anharmonic.fc2 import FC2Data
+from negfpy.bulk.fc2_audit import audit_mapped_fc2
 
 
 def _chain_mapping() -> CrystalMapping:
@@ -67,9 +71,90 @@ def _compact_fc2() -> FC2Data:
     )
 
 
+def _skew_chain_mapping() -> CrystalMapping:
+    lattice = np.array(
+        [
+            [2.0, 0.5, 0.0],
+            [0.0, 1.5, 0.2],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    primitive = CrystalCell(
+        lattice=lattice,
+        scaled_positions=[[0.0, 0.0, 0.0]],
+        masses=[2.0],
+        symbols=["X"],
+    )
+    supercell_matrix = np.diag([3, 1, 1])
+    supercell = CrystalCell(
+        lattice=supercell_matrix @ lattice,
+        scaled_positions=[
+            [0.0, 0.0, 0.0],
+            [1.0 / 3.0, 0.0, 0.0],
+            [2.0 / 3.0, 0.0, 0.0],
+        ],
+        masses=[2.0, 2.0, 2.0],
+        symbols=["X", "X", "X"],
+    )
+    return CrystalMapping(
+        primitive_matrix=np.eye(3),
+        supercell_matrix=supercell_matrix,
+        primitive=primitive,
+        supercell=supercell,
+        p2s=[1],
+        s2p=[1, 1, 1],
+        p2p=[-1, 0, -1],
+        shortest_vectors=[
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        multiplicity=[[[1, 0]], [[1, 1]], [[1, 2]]],
+        atomic_permutations=[[0, 1, 2]],
+        purpose="fc2",
+    )
+
+
 def _full_fc2() -> FC2Data:
     values = np.zeros((3, 3, 3, 3))
     values[1] = _compact_fc2().values[0]
+    return FC2Data(
+        values=values,
+        masses=[2.0, 2.0, 2.0],
+        compact=False,
+        p2s_map=[1],
+        s2p_map=[1, 1, 1],
+    )
+
+
+def _translation_complete_chain_mapping() -> CrystalMapping:
+    mapping = _chain_mapping()
+    return CrystalMapping(
+        primitive_matrix=mapping.primitive_matrix,
+        supercell_matrix=mapping.supercell_matrix,
+        primitive=mapping.primitive,
+        supercell=mapping.supercell,
+        p2s=mapping.p2s,
+        s2p=mapping.s2p,
+        p2p=mapping.p2p,
+        shortest_vectors=mapping.shortest_vectors,
+        multiplicity=mapping.multiplicity,
+        atomic_permutations=mapping.atomic_permutations,
+        translation_permutations=[
+            [0, 1, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+        ],
+        purpose="fc2",
+    )
+
+
+def _translation_complete_full_fc2() -> FC2Data:
+    representative = _compact_fc2().values[0]
+    values = np.empty((3, 3, 3, 3))
+    values[1] = representative
+    values[0] = representative[[1, 2, 0]]
+    values[2] = representative[[2, 0, 1]]
     return FC2Data(
         values=values,
         masses=[2.0, 2.0, 2.0],
@@ -241,6 +326,115 @@ def test_full_and_compact_reconstructions_are_exactly_equal() -> None:
         full = dynamical_matrix_from_fc2(_full_fc2(), mapping, q)
         compact = dynamical_matrix_from_fc2(_compact_fc2(), mapping, q)
         np.testing.assert_array_equal(full, compact)
+
+
+@pytest.mark.parametrize("q", [0.125, 0.25, 0.375])
+def test_chain_analytical_dynamical_derivative(q: float) -> None:
+    derivatives = dynamical_matrix_derivatives_from_fc2(
+        _compact_fc2(),
+        _chain_mapping(),
+        [q, 0.0, 0.0],
+    )
+    expected = 4.0 * np.pi * np.sin(2.0 * np.pi * q)
+    np.testing.assert_allclose(
+        derivatives[0],
+        expected * np.eye(3),
+        rtol=1.0e-14,
+        atol=1.0e-14,
+    )
+    np.testing.assert_allclose(derivatives[1:], 0.0, atol=1.0e-15)
+
+
+def test_chain_group_velocity_matches_closed_form_and_si_conversion() -> None:
+    qpoints = np.array([[0.125, 0.0, 0.0], [0.25, 0.0, 0.0]])
+    result = compute_bulk_group_velocities(
+        _compact_fc2(),
+        _chain_mapping(),
+        qpoints,
+        frequency_factor_to_thz=1.0,
+        cutoff_frequency_thz=1.0e-8,
+    )
+
+    assert isinstance(result, BulkGroupVelocities)
+    expected_x = 2.0 * np.pi * np.cos(np.pi * qpoints[:, 0])
+    np.testing.assert_allclose(
+        result.values_thz_angstrom[:, :, 0],
+        np.repeat(expected_x[:, None], 3, axis=1),
+        rtol=1.0e-14,
+        atol=1.0e-14,
+    )
+    np.testing.assert_allclose(result.values_thz_angstrom[:, :, 1:], 0.0)
+    np.testing.assert_allclose(
+        result.values_m_per_s,
+        100.0 * result.values_thz_angstrom,
+    )
+    assert not result.values_thz_angstrom.flags.writeable
+
+
+def test_skew_cell_group_velocity_uses_cartesian_row_lattice_and_time_reversal() -> None:
+    mapping = _skew_chain_mapping()
+    q = 0.21
+    result = compute_bulk_group_velocities(
+        _compact_fc2(),
+        mapping,
+        [[q, 0.0, 0.0], [-q, 0.0, 0.0]],
+        frequency_factor_to_thz=1.0,
+        cutoff_frequency_thz=1.0e-8,
+    )
+    expected = 2.0 * np.pi * np.cos(np.pi * q) * mapping.primitive.lattice[0]
+    np.testing.assert_allclose(
+        result.values_thz_angstrom[0],
+        np.repeat(expected[None, :], 3, axis=0),
+        rtol=2.0e-14,
+        atol=2.0e-14,
+    )
+    np.testing.assert_allclose(
+        result.values_thz_angstrom[1],
+        -result.values_thz_angstrom[0],
+        rtol=2.0e-14,
+        atol=2.0e-14,
+    )
+
+
+def test_mapped_fc2_physical_audit_accepts_chain_and_rejects_nonreciprocity() -> None:
+    accepted = audit_mapped_fc2(_compact_fc2(), _chain_mapping())
+    assert accepted.passed
+    assert accepted.asr_valid
+    assert accepted.rotational_valid
+    assert accepted.hermiticity_valid
+    assert accepted.stable
+
+    rejected = audit_mapped_fc2(
+        _asymmetric_compact_fc2(),
+        _asymmetric_two_species_mapping(),
+    )
+    assert not rejected.passed
+    assert not rejected.hermiticity_valid
+
+
+def test_full_fc2_audit_checks_every_redundant_translation_row() -> None:
+    mapping = _translation_complete_chain_mapping()
+    valid = _translation_complete_full_fc2()
+    accepted = audit_mapped_fc2(valid, mapping)
+    assert accepted.passed
+    assert accepted.translation_redundancy_valid
+    assert accepted.metrics["translation_redundancy_checked_rows"] == 2.0
+
+    corrupted_values = valid.values.copy()
+    corrupted_values[0, 0, 0, 0] += 12345.0
+    rejected = audit_mapped_fc2(
+        FC2Data(
+            values=corrupted_values,
+            masses=valid.masses,
+            compact=False,
+            p2s_map=valid.p2s_map,
+            s2p_map=valid.s2p_map,
+        ),
+        mapping,
+    )
+    assert not rejected.passed
+    assert not rejected.translation_redundancy_valid
+    assert any("redundant translation audit failed" in error for error in rejected.errors)
 
 
 def test_negative_q_is_complex_conjugate_before_hermitianization() -> None:

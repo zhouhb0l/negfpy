@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from types import MappingProxyType
 
 import numpy as np
@@ -260,6 +261,115 @@ def test_reader_does_not_apply_mask_or_modify_raw_fc3(tmp_path) -> None:
     np.testing.assert_array_equal(data.values, values)
     np.testing.assert_array_equal(data.fc3_nonzero_indices, mask)
     assert not validate_fc3(data).permutation_valid
+
+
+@pytest.mark.parametrize("link_kind", ["soft", "external"])
+def test_reader_rejects_non_hard_primary_dataset_links(tmp_path, link_kind) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / f"fc3-primary-{link_kind}.hdf5"
+    external = tmp_path / "fc3-primary-external.hdf5"
+    values = np.ones((1, 1, 1, 3, 3, 3))
+    if link_kind == "external":
+        with h5py.File(external, "w") as handle:
+            handle.create_dataset("payload", data=values)
+    with h5py.File(path, "w") as handle:
+        if link_kind == "soft":
+            handle.create_dataset("payload", data=values)
+            handle["fc3"] = h5py.SoftLink("/payload")
+        else:
+            handle["fc3"] = h5py.ExternalLink(str(external), "/payload")
+
+    with pytest.raises(ValueError, match="internal hard-link chain"):
+        read_phono3py_fc3(path, masses=[1.0])
+
+
+@pytest.mark.parametrize(
+    ("name", "link_kind"),
+    [("p2s_map", "soft"), ("version", "external")],
+)
+def test_reader_rejects_non_hard_optional_dataset_links(
+    tmp_path,
+    name: str,
+    link_kind: str,
+) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / f"fc3-optional-{name}.hdf5"
+    external = tmp_path / f"fc3-optional-{name}-external.hdf5"
+    payload = np.array([0], dtype=np.int64) if name == "p2s_map" else np.bytes_("4.4.0")
+    if link_kind == "external":
+        with h5py.File(external, "w") as handle:
+            handle.create_dataset("payload", data=payload)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("fc3", data=np.ones((1, 1, 1, 3, 3, 3)))
+        if link_kind == "soft":
+            handle.create_dataset("payload", data=payload)
+            handle[name] = h5py.SoftLink("/payload")
+        else:
+            handle[name] = h5py.ExternalLink(str(external), "/payload")
+
+    with pytest.raises(ValueError, match="internal hard-link chain"):
+        read_phono3py_fc3(path, masses=[1.0])
+
+
+def test_reader_validates_source_attribute_object_links(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "fc3-source-attrs-external-link.hdf5"
+    external = tmp_path / "fc3-source-attrs-external-payload.hdf5"
+    with h5py.File(external, "w") as handle:
+        handle.create_dataset("payload", data=np.ones(1))
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("fc3", data=np.ones((1, 1, 1, 3, 3, 3)))
+        handle["attribute_alias"] = h5py.ExternalLink(str(external), "/payload")
+
+    with pytest.raises(ValueError, match="attribute_alias.*hard-link chain"):
+        read_phono3py_fc3(path, masses=[1.0])
+
+
+def test_reader_accepts_nested_internal_hard_link_chain(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "fc3-nested-hard-link.hdf5"
+    values = np.arange(27.0).reshape(1, 1, 1, 3, 3, 3)
+    with h5py.File(path, "w") as handle:
+        payload = handle.create_group("payload")
+        payload.create_dataset("fc3", data=values)
+        handle["hard_alias"] = payload
+
+    data = read_phono3py_fc3(
+        path,
+        masses=[1.0],
+        dataset="hard_alias/fc3",
+    )
+
+    np.testing.assert_array_equal(data.values, values)
+
+
+def test_reader_rejects_external_parent_in_nested_dataset_path(tmp_path) -> None:
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "fc3-nested-external-link.hdf5"
+    external = tmp_path / "fc3-nested-external-payload.hdf5"
+    with h5py.File(external, "w") as handle:
+        group = handle.create_group("payload")
+        group.create_dataset("fc3", data=np.ones((1, 1, 1, 3, 3, 3)))
+    with h5py.File(path, "w") as handle:
+        handle["external_alias"] = h5py.ExternalLink(str(external), "/payload")
+
+    with pytest.raises(ValueError, match="external_alias.*hard-link chain"):
+        read_phono3py_fc3(
+            path,
+            masses=[1.0],
+            dataset="external_alias/fc3",
+        )
+
+
+def test_reader_rejects_container_change_during_read(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "fc3-changing-container.hdf5"
+    _write_fc3(path, np.ones((1, 1, 1, 3, 3, 3)))
+    reader = importlib.import_module("negfpy.anharmonic.io.phono3py")
+    digests = iter(("a" * 64, "b" * 64))
+    monkeypatch.setattr(reader, "_sha256_file", lambda _path: next(digests))
+
+    with pytest.raises(RuntimeError, match="container changed while it was read"):
+        read_phono3py_fc3(path, masses=[1.0])
 
 
 def test_fc3_data_detaches_new_first_class_metadata_arrays() -> None:

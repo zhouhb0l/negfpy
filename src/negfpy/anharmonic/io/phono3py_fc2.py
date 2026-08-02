@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from ..fc2 import FC2Data
-
+from ._hdf5_links import resolve_hard_link_chain
 
 Array = np.ndarray
 
@@ -48,11 +48,13 @@ def _attrs(obj: Any) -> dict[str, Any]:
 
 
 def _object_dataset(handle: Any, name: str, h5py: Any) -> Any | None:
-    if name not in handle:
+    obj = resolve_hard_link_chain(handle, name, h5py, required=False)
+    if obj is None:
         return None
-    obj = handle[name]
     if not isinstance(obj, h5py.Dataset):
-        raise ValueError(f"HDF5 object {name!r} is not a dataset.")
+        raise ValueError(  # noqa: TRY004 - malformed HDF5 file content
+            f"HDF5 object {name!r} is not a dataset."
+        )
     return obj
 
 
@@ -199,14 +201,13 @@ def read_phono3py_fc2(
     if not isinstance(dataset, str) or not dataset.strip():
         raise ValueError("dataset must be a non-empty HDF5 dataset name.")
 
+    source_sha256 = _sha256_file(source_path)
     with h5py.File(source_path, "r") as handle:
-        if dataset not in handle:
+        fc2_dataset = _object_dataset(handle, dataset, h5py)
+        if fc2_dataset is None:
             raise KeyError(
                 f"HDF5 dataset {dataset!r} was not found in {source_path}."
             )
-        fc2_dataset = handle[dataset]
-        if not isinstance(fc2_dataset, h5py.Dataset):
-            raise ValueError(f"HDF5 object {dataset!r} is not a dataset.")
 
         values = np.asarray(fc2_dataset[...])
         dataset_attrs = _attrs(fc2_dataset)
@@ -234,12 +235,16 @@ def read_phono3py_fc2(
         )
 
         dataset_inventory = {}
-        for name, obj in handle.items():
+        for name in handle:
+            obj = resolve_hard_link_chain(handle, str(name), h5py, required=True)
             if isinstance(obj, h5py.Dataset):
                 dataset_inventory[str(name)] = {
                     "shape": tuple(int(value) for value in obj.shape),
                     "dtype": str(obj.dtype),
                 }
+
+    if _sha256_file(source_path) != source_sha256:
+        raise RuntimeError("Phono3py FC2 container changed while it was read.")
 
     if compact is not None:
         if not isinstance(compact, (bool, np.bool_)):
@@ -309,7 +314,6 @@ def read_phono3py_fc2(
                 "HDF5 cutoff metadata must be a non-negative finite real scalar."
             )
 
-    source_sha256 = _sha256_file(source_path)
     auxiliary_attrs = {
         "p2s_map": p2s_attrs,
         "s2p_map": s2p_attrs,

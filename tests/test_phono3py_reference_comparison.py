@@ -23,7 +23,6 @@ from negfpy.anharmonic.phono3py_reference import (
     read_phono3py_silicon_reference,
 )
 
-
 _RANDOM_QPOINTS = np.asarray(
     [
         [0.125, 0.25, -0.375],
@@ -792,25 +791,22 @@ def test_small_degenerate_modes_use_per_mode_absolute_gate(tmp_path) -> None:
     assert small_pair.mean_absolute_error_thz == pytest.approx(0.8e-6)
 
 
-def test_linewidth_gate_verifies_angular_fwhm_conversion(tmp_path) -> None:
-    reference = read_phono3py_silicon_reference(_write_reference(tmp_path))
+def test_linewidth_gate_verifies_angular_fwhm_conversion() -> None:
     _, interactions, linewidths = _candidate()
-    invalid = BulkThreePhononLinewidths(
-        temperatures=linewidths.temperatures,
-        grid_points=linewidths.grid_points,
-        band_indices=linewidths.band_indices,
-        gamma_thz_hwhm=linewidths.gamma_thz_hwhm,
-        gamma_normal_thz_hwhm=linewidths.gamma_normal_thz_hwhm,
-        gamma_umklapp_thz_hwhm=linewidths.gamma_umklapp_thz_hwhm,
-        gamma_angular_fwhm=2.0 * np.pi * linewidths.gamma_thz_hwhm,
-        decay_phase_space=linewidths.decay_phase_space,
-        difference_phase_space=linewidths.difference_phase_space,
-        interactions=interactions,
-        metadata=linewidths.metadata,
-    )
-
     with pytest.raises(ValueError, match="4\\*pi"):
-        compare_linewidths(reference, invalid)
+        BulkThreePhononLinewidths(
+            temperatures=linewidths.temperatures,
+            grid_points=linewidths.grid_points,
+            band_indices=linewidths.band_indices,
+            gamma_thz_hwhm=linewidths.gamma_thz_hwhm,
+            gamma_normal_thz_hwhm=linewidths.gamma_normal_thz_hwhm,
+            gamma_umklapp_thz_hwhm=linewidths.gamma_umklapp_thz_hwhm,
+            gamma_angular_fwhm=2.0 * np.pi * linewidths.gamma_thz_hwhm,
+            decay_phase_space=linewidths.decay_phase_space,
+            difference_phase_space=linewidths.difference_phase_space,
+            interactions=interactions,
+            metadata=linewidths.metadata,
+        )
 
 
 def test_phase_space_is_refused_without_matching_cutoff_definition(

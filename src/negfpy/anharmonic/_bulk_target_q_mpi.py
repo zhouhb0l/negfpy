@@ -14,16 +14,15 @@ operation.  ``mpi4py`` remains lazy through :mod:`negfpy.anharmonic._mpi_tasks`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields, is_dataclass
 import hashlib
 import importlib
 import json
 import math
 import os
-from pathlib import Path
 import re
-import struct
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
@@ -31,6 +30,10 @@ from uuid import uuid4
 import numpy as np
 
 from . import _mpi_tasks as mpi_tasks
+from ._bulk_identity import (
+    _update_scientific_digest,
+    bulk_three_phonon_problem_sha256,
+)
 from ._mpi_tasks import (
     ArtifactValidator,
     DuplicateTaskCheckpointError,
@@ -53,7 +56,6 @@ from .bulk_three_phonon import (
     BulkThreePhononProblem,
     compute_three_phonon_linewidths,
 )
-
 
 Array = np.ndarray
 ProblemFactory = Callable[[], BulkThreePhononProblem]
@@ -292,134 +294,6 @@ def _hash_mapping(
             raise TypeError(f"{name} keys must be non-empty strings.")
         result[key] = _validate_sha256(value, name=f"{name}[{key!r}]")
     return MappingProxyType(dict(sorted(result.items())))
-
-
-def _update_scientific_digest(
-    digest: Any,
-    value: Any,
-    *,
-    path: str,
-) -> None:
-    """Stream a deterministic, type-sensitive scientific object identity."""
-
-    if value is None:
-        digest.update(b"N;")
-        return
-    if isinstance(value, np.generic):
-        _update_scientific_digest(digest, value.item(), path=path)
-        return
-    if isinstance(value, bool):
-        digest.update(b"B1;" if value else b"B0;")
-        return
-    if isinstance(value, int):
-        digest.update(b"I")
-        digest.update(str(value).encode("ascii"))
-        digest.update(b";")
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"{path} contains NaN or infinity.")
-        digest.update(b"F")
-        digest.update(struct.pack(">d", float(value)))
-        digest.update(b";")
-        return
-    if isinstance(value, complex):
-        if not math.isfinite(value.real) or not math.isfinite(value.imag):
-            raise ValueError(f"{path} contains NaN or infinity.")
-        digest.update(b"C")
-        digest.update(struct.pack(">dd", float(value.real), float(value.imag)))
-        digest.update(b";")
-        return
-    if isinstance(value, str):
-        encoded = value.encode("utf-8")
-        digest.update(b"S")
-        digest.update(str(len(encoded)).encode("ascii"))
-        digest.update(b":")
-        digest.update(encoded)
-        digest.update(b";")
-        return
-    if isinstance(value, Path):
-        _update_scientific_digest(digest, value.as_posix(), path=path)
-        return
-    if isinstance(value, np.ndarray):
-        array = np.ascontiguousarray(value)
-        if array.dtype.hasobject:
-            raise TypeError(f"{path} cannot contain an object-dtype array.")
-        header = _canonical_json(
-            {"dtype": array.dtype.str, "shape": list(array.shape)}
-        ).encode("ascii")
-        digest.update(b"A")
-        digest.update(str(len(header)).encode("ascii"))
-        digest.update(b":")
-        digest.update(header)
-        digest.update(b":")
-        digest.update(memoryview(array).cast("B"))
-        digest.update(b";")
-        return
-    if is_dataclass(value) and not isinstance(value, type):
-        name = f"{type(value).__module__}.{type(value).__qualname__}"
-        digest.update(b"D")
-        _update_scientific_digest(digest, name, path=f"{path}.__type__")
-        for item in fields(value):
-            _update_scientific_digest(
-                digest, item.name, path=f"{path}.__field__"
-            )
-            _update_scientific_digest(
-                digest,
-                getattr(value, item.name),
-                path=f"{path}.{item.name}",
-            )
-        digest.update(b";")
-        return
-    if isinstance(value, Mapping):
-        digest.update(b"M")
-        keys = tuple(value.keys())
-        if not all(isinstance(key, str) for key in keys):
-            raise TypeError(f"{path} mapping keys must be strings.")
-        for key in sorted(keys):
-            _update_scientific_digest(digest, key, path=f"{path}.__key__")
-            _update_scientific_digest(
-                digest, value[key], path=f"{path}.{key}"
-            )
-        digest.update(b";")
-        return
-    if isinstance(value, (tuple, list)):
-        digest.update(b"T" if isinstance(value, tuple) else b"L")
-        for index, item in enumerate(value):
-            _update_scientific_digest(
-                digest, item, path=f"{path}[{index}]"
-            )
-        digest.update(b";")
-        return
-    if isinstance(value, (set, frozenset)):
-        item_hashes: list[bytes] = []
-        for index, item in enumerate(value):
-            item_digest = hashlib.sha256()
-            _update_scientific_digest(
-                item_digest, item, path=f"{path}[{index}]"
-            )
-            item_hashes.append(item_digest.digest())
-        digest.update(b"E")
-        for item_hash in sorted(item_hashes):
-            digest.update(item_hash)
-        digest.update(b";")
-        return
-    raise TypeError(
-        f"{path} contains unsupported identity type {type(value).__name__}."
-    )
-
-
-def bulk_three_phonon_problem_sha256(
-    problem: BulkThreePhononProblem,
-) -> str:
-    """Return the canonical, full scientific identity of a bulk problem."""
-
-    if not isinstance(problem, BulkThreePhononProblem):
-        raise TypeError("problem must be a BulkThreePhononProblem.")
-    digest = hashlib.sha256()
-    digest.update(b"negfpy.bulk_three_phonon_problem.v1\0")
-    _update_scientific_digest(digest, problem, path="problem")
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True, eq=False, kw_only=True)
@@ -977,11 +851,11 @@ def _validate_group_schema(handle: Any) -> None:
         "phonons": frozenset(_PHONON_DATASETS),
         "metadata": frozenset(_METADATA_DATASETS),
     }
-    if frozenset(str(name) for name in handle.keys()) != frozenset(expected):
+    if frozenset(str(name) for name in handle) != frozenset(expected):
         raise ValueError("HDF5 root groups are not exact.")
     for group_name, child_names in expected.items():
         group = handle[group_name]
-        if frozenset(str(name) for name in group.keys()) != child_names:
+        if frozenset(str(name) for name in group) != child_names:
             raise ValueError(f"HDF5 group {group_name!r} is not exact.")
         if tuple(group.attrs):
             raise ValueError(
@@ -996,7 +870,9 @@ def _validate_json_dataset(dataset: Any, *, name: str) -> Mapping[str, Any]:
     except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ValueError(f"{name} is not canonical ASCII JSON.") from exc
     if not isinstance(document, dict):
-        raise ValueError(f"{name} metadata must be a JSON object.")
+        raise ValueError(  # noqa: TRY004 - malformed archive content
+            f"{name} metadata must be a JSON object."
+        )
     if payload != _canonical_json(document).encode("ascii"):
         raise ValueError(f"{name} metadata is not in canonical JSON form.")
     return document

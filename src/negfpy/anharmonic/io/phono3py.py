@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from ..fc3 import FC3Data
-
+from ._hdf5_links import resolve_hard_link_chain
 
 Array = np.ndarray
 
@@ -93,17 +93,19 @@ def _bool_hint(*mappings: dict[str, Any]) -> bool | None:
     return None
 
 
-def _optional_dataset(handle: Any, name: str) -> Array | None:
-    if name not in handle:
+def _optional_dataset(handle: Any, name: str, h5py: Any) -> Array | None:
+    obj = resolve_hard_link_chain(handle, name, h5py, required=False)
+    if obj is None:
         return None
-    obj = handle[name]
-    if not hasattr(obj, "shape"):
-        raise ValueError(f"HDF5 object {name!r} is not a dataset.")
+    if not isinstance(obj, h5py.Dataset):
+        raise ValueError(  # noqa: TRY004 - malformed HDF5 file content
+            f"HDF5 object {name!r} is not a dataset."
+        )
     return np.asarray(obj[...])
 
 
-def _optional_scalar_dataset(handle: Any, name: str) -> Any | None:
-    values = _optional_dataset(handle, name)
+def _optional_scalar_dataset(handle: Any, name: str, h5py: Any) -> Any | None:
+    values = _optional_dataset(handle, name, h5py)
     if values is None:
         return None
     if values.size != 1:
@@ -244,31 +246,43 @@ def read_phono3py_fc3(
     if not isinstance(dataset, str) or not dataset.strip():
         raise ValueError("dataset must be a non-empty HDF5 dataset name.")
 
+    source_sha256 = _sha256_file(source_path)
     with h5py.File(source_path, "r") as handle:
-        if dataset not in handle:
+        fc3_dataset = resolve_hard_link_chain(
+            handle,
+            dataset,
+            h5py,
+            required=False,
+        )
+        if fc3_dataset is None:
             raise KeyError(
                 f"HDF5 dataset {dataset!r} was not found in {source_path}."
             )
-        fc3_dataset = handle[dataset]
         if not isinstance(fc3_dataset, h5py.Dataset):
-            raise ValueError(f"HDF5 object {dataset!r} is not a dataset.")
+            raise ValueError(  # noqa: TRY004 - malformed HDF5 file content
+                f"HDF5 object {dataset!r} is not a dataset."
+            )
         values = np.asarray(fc3_dataset[...])
         dataset_attrs = _attrs(fc3_dataset)
         file_attrs = _attrs(handle)
-        object_attrs = {
-            str(name): _attrs(obj)
-            for name, obj in handle.items()
-        }
+        object_attrs = {}
+        for name in handle:
+            obj = resolve_hard_link_chain(handle, str(name), h5py, required=True)
+            object_attrs[str(name)] = _attrs(obj)
 
-        file_p2s = _optional_dataset(handle, "p2s_map")
-        file_s2p = _optional_dataset(handle, "s2p_map")
+        file_p2s = _optional_dataset(handle, "p2s_map", h5py)
+        file_s2p = _optional_dataset(handle, "s2p_map", h5py)
         file_nonzero_indices = _optional_dataset(
             handle,
             "fc3_nonzero_indices",
+            h5py,
         )
-        version_dataset = _optional_scalar_dataset(handle, "version")
-        fc3_cutoff_dataset = _optional_scalar_dataset(handle, "fc3_cutoff")
-        cutoff_dataset = _optional_scalar_dataset(handle, "cutoff")
+        version_dataset = _optional_scalar_dataset(handle, "version", h5py)
+        fc3_cutoff_dataset = _optional_scalar_dataset(handle, "fc3_cutoff", h5py)
+        cutoff_dataset = _optional_scalar_dataset(handle, "cutoff", h5py)
+
+    if _sha256_file(source_path) != source_sha256:
+        raise RuntimeError("Phono3py FC3 container changed while it was read.")
 
     selected_p2s, p2s_source = _select_mapping(
         name="p2s_map",
@@ -365,7 +379,6 @@ def read_phono3py_fc3(
         "datasets": object_attrs,
     }
 
-    source_sha256 = _sha256_file(source_path)
     provenance = {
         "format": "phono3py_fc3_hdf5",
         "source_path": str(source_path),

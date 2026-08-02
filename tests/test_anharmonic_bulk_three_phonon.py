@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
+from negfpy.anharmonic._bulk_identity import (
+    bulk_three_phonon_physics_sha256,
+    bulk_three_phonon_problem_sha256,
+)
+from negfpy.anharmonic.bulk_rta import (
+    compute_rta_thermal_conductivity,
+    summarize_three_phonon_linewidths,
+)
 from negfpy.anharmonic.bulk_three_phonon import (
     BulkThreePhononProblem,
     _average_selected_degenerate,
@@ -100,6 +110,92 @@ def test_pinned_unit_factors_match_phono3py_4_4_values() -> None:
         3306215.697005045,
         rel=1.0e-15,
     )
+
+
+def test_rta_rejects_linewidths_from_a_different_fc3_problem() -> None:
+    source = _problem(coupling=0.2)
+    different = _problem(coupling=0.3)
+    linewidths = compute_three_phonon_linewidths(
+        source,
+        temperatures=[300.0],
+    )
+    with pytest.raises(ValueError, match="not computed from the same FC2/FC3"):
+        compute_rta_thermal_conductivity(
+            different,
+            temperatures=[300.0],
+            linewidths=linewidths,
+        )
+
+
+def test_physics_identity_ignores_annotations_but_not_couplings() -> None:
+    reference = _problem(coupling=0.2)
+    relocated = replace(
+        reference,
+        metadata={"source_path": "/a/different/machine/identical-inputs"},
+    )
+    changed_coupling = _problem(coupling=0.3)
+
+    assert bulk_three_phonon_problem_sha256(reference) != (
+        bulk_three_phonon_problem_sha256(relocated)
+    )
+    assert bulk_three_phonon_physics_sha256(reference) == (
+        bulk_three_phonon_physics_sha256(relocated)
+    )
+    assert bulk_three_phonon_physics_sha256(reference) != (
+        bulk_three_phonon_physics_sha256(changed_coupling)
+    )
+
+
+def test_rta_accepts_same_physics_with_different_user_metadata() -> None:
+    source = _problem(coupling=0.2)
+    relocated = replace(source, metadata={"relocated": True})
+    linewidths = compute_three_phonon_linewidths(
+        source,
+        temperatures=[300.0],
+    )
+    result = compute_rta_thermal_conductivity(
+        relocated,
+        temperatures=[300.0],
+        linewidths=linewidths,
+    )
+    rates = summarize_three_phonon_linewidths(linewidths)
+    compact_result = compute_rta_thermal_conductivity(
+        relocated,
+        temperatures=[300.0],
+        linewidths=rates,
+    )
+    np.testing.assert_allclose(
+        compact_result.kappa_w_mk,
+        result.kappa_w_mk,
+        rtol=1.0e-13,
+        atol=1.0e-13,
+    )
+    assert result.metadata["bulk_three_phonon_physics_sha256"] == (
+        bulk_three_phonon_physics_sha256(source)
+    )
+
+
+def test_rta_rejects_duck_typed_provenance_wrapper() -> None:
+    class FakeWrapper:
+        def __init__(self, problem: BulkThreePhononProblem) -> None:
+            self.three_phonon = problem
+            self.source_sha256 = {
+                "crystal": "a" * 64,
+                "fc2": "b" * 64,
+                "fc3": "c" * 64,
+            }
+
+    source = _problem(coupling=0.2)
+    linewidths = compute_three_phonon_linewidths(
+        source,
+        temperatures=[300.0],
+    )
+    with pytest.raises(TypeError, match="BulkTransportProblem"):
+        compute_rta_thermal_conductivity(
+            FakeWrapper(source),
+            temperatures=[300.0],
+            linewidths=linewidths,
+        )
 
 
 def test_three_mode_matrix_element_and_fixed_normalizations() -> None:
