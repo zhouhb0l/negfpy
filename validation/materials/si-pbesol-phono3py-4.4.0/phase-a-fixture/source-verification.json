@@ -1,0 +1,33 @@
+{
+  "commit": "302ad205452ee36e57887b10bbf4a0289dd037bb",
+  "dataset_id": "phono3py-4.4.0-Si-PBEsol",
+  "files": {
+    "forces_fc3": {
+      "path_in_source": "example/Si-PBEsol/FORCES_FC3",
+      "resolved_path": "/home/hangbo/negfpy-validation/datasets/phono3py-4.4.0-Si-PBEsol-302ad205/upstream-repository/example/Si-PBEsol/FORCES_FC3",
+      "sha256": "d53c5443f028c5d66c70adff20191e00b54af56a81e93d8d20e28f9320c94039",
+      "size_bytes": 357907
+    },
+    "phono3py_yaml": {
+      "path_in_source": "example/Si-PBEsol/phono3py_disp.yaml",
+      "resolved_path": "/home/hangbo/negfpy-validation/datasets/phono3py-4.4.0-Si-PBEsol-302ad205/upstream-repository/example/Si-PBEsol/phono3py_disp.yaml",
+      "sha256": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7",
+      "size_bytes": 32796
+    },
+    "poscar_unitcell": {
+      "path_in_source": "example/Si-PBEsol/POSCAR-unitcell",
+      "resolved_path": "/home/hangbo/negfpy-validation/datasets/phono3py-4.4.0-Si-PBEsol-302ad205/upstream-repository/example/Si-PBEsol/POSCAR-unitcell",
+      "sha256": "0840b7748c1eff72c9237a2d4d074f7a7f38f8c1ed6501fea69cd647d7a5fcb8",
+      "size_bytes": 727
+    },
+    "readme": {
+      "path_in_source": "example/Si-PBEsol/README.md",
+      "resolved_path": "/home/hangbo/negfpy-validation/datasets/phono3py-4.4.0-Si-PBEsol-302ad205/upstream-repository/example/Si-PBEsol/README.md",
+      "sha256": "4b68f565c6c30075adb2ed8ec5d7a4684b64e5427bf7fc946b919edcb79d2188",
+      "size_bytes": 2836
+    }
+  },
+  "repository": "https://github.com/phonopy/phono3py.git",
+  "schema_version": 1,
+  "source_root": "/home/hangbo/negfpy-validation/datasets/phono3py-4.4.0-Si-PBEsol-302ad205/upstream-repository"
+}

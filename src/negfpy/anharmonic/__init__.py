@@ -110,6 +110,20 @@ from .io import (
     read_phono3py_fc2,
     read_phono3py_fc3,
 )
+from .layered import (
+    LayeredDeviceMapping,
+    LayeredHarmonicModel,
+    build_layered_device_mapping,
+    build_layered_harmonic_model,
+)
+from .layered_validation import (
+    LayeredGeometryValidationReport,
+    LayeredHarmonicComparisonReport,
+    LayeredHarmonicValidationReport,
+    compare_layered_harmonic_models,
+    validate_layered_device_mapping,
+    validate_layered_harmonic_model,
+)
 from .momentum import (
     GRID_INDEX_ORDER,
     PHONO3PY_4_4_BZ_GRID_TOLERANCE_FACTOR,
@@ -150,6 +164,13 @@ from .retarded import (
     retarded_from_keldysh,
 )
 from .solver import solve_one_shot_born, solve_scba
+from .sparse_cubic import (
+    SparseCubicVertex,
+    cubic_sparse_lesser_greater,
+    cubic_vertex_is_zero,
+    cubic_vertex_max_abs,
+    cubic_vertex_physics_sha256,
+)
 from .translational_fc3 import (
     PHONO3PY_4_4_SYMPREC,
     PHONO3PY_R0_AVERAGE_ANCHOR_CONVENTION,
@@ -225,6 +246,11 @@ __all__ = [
     "InteractionStrengthComparison",
     "InteractionStrengthSample",
     "KeldyshSpectrum",
+    "LayeredDeviceMapping",
+    "LayeredGeometryValidationReport",
+    "LayeredHarmonicComparisonReport",
+    "LayeredHarmonicModel",
+    "LayeredHarmonicValidationReport",
     "LinewidthComparison",
     "LinewidthSubspaceComparison",
     "MassNormalizedFC3",
@@ -244,6 +270,7 @@ __all__ = [
     "SiliconReferenceComparison",
     "SolverScale",
     "SpatialCurrentReport",
+    "SparseCubicVertex",
     "TranslationalFC3",
     "TranslationalFC3ValidationReport",
     "UniformBZMesh",
@@ -253,12 +280,15 @@ __all__ = [
     "bond_heat_currents",
     "bose_occupation_signed",
     "broadening",
+    "build_layered_device_mapping",
+    "build_layered_harmonic_model",
     "build_contact_spectra",
     "check_solution",
     "collision_power",
     "compare_fc2_random_q",
     "compare_interaction_strengths",
     "compare_linewidths",
+    "compare_layered_harmonic_models",
     "compare_phase_space",
     "compare_primitive_mappings",
     "compare_silicon_reference",
@@ -277,6 +307,10 @@ __all__ = [
     "convert_fc3_to_translational",
     "convert_fc3_values_to_si",
     "cubic_lesser_greater",
+    "cubic_sparse_lesser_greater",
+    "cubic_vertex_is_zero",
+    "cubic_vertex_max_abs",
+    "cubic_vertex_physics_sha256",
     "derive_phono3py_all_shortest",
     "dynamical_matrix_derivatives_from_fc2",
     "dynamical_matrix_from_fc2",
@@ -320,5 +354,7 @@ __all__ = [
     "validate_crystal_mapping",
     "validate_fc2",
     "validate_fc3",
+    "validate_layered_device_mapping",
+    "validate_layered_harmonic_model",
     "validate_translational_fc3",
 ]

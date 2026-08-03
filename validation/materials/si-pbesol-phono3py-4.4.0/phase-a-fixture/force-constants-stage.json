@@ -1,0 +1,68 @@
+{
+  "completed_at_utc": "2026-07-31T10:45:31.940452+00:00",
+  "runtime": {
+    "backend": "Rust",
+    "calculator": "None",
+    "compact_fc2_dtype": "float64",
+    "compact_fc2_shape": [
+      2,
+      64,
+      3,
+      3
+    ],
+    "compact_fc3_dtype": "float64",
+    "compact_fc3_nonzero_indices_shape": null,
+    "compact_fc3_shape": [
+      2,
+      64,
+      64,
+      3,
+      3,
+      3
+    ],
+    "fc2_units": "eV/angstrom^2",
+    "fc3_cutoff": null,
+    "fc3_units": "eV/angstrom^3",
+    "frequency_unit_conversion_factor": 15.633302300230191,
+    "full_fc2_dtype": "float64",
+    "full_fc2_shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "full_fc3_dtype": "float64",
+    "full_fc3_nonzero_indices_shape": null,
+    "full_fc3_shape": [
+      64,
+      64,
+      64,
+      3,
+      3,
+      3
+    ],
+    "implementation": "phono3py_4_4_0",
+    "is_crystal_symmetry": true,
+    "is_mesh_symmetry": false,
+    "is_nac": false,
+    "make_r0_average": true,
+    "phono3py_version": "4.4.0",
+    "phonopy_version": "4.4.0",
+    "private_apis": [],
+    "public_apis": [
+      "phono3py.load",
+      "phono3py.api_phono3py.Phono3py.produce_fc2",
+      "phono3py.api_phono3py.Phono3py.produce_fc3",
+      "phono3py.api_phono3py.Phono3py.symmetrize_fc2",
+      "phono3py.api_phono3py.Phono3py.symmetrize_fc3",
+      "phono3py.file_IO.write_fc2_to_hdf5",
+      "phono3py.file_IO.write_fc3_to_hdf5"
+    ],
+    "symmetrize_fc": true,
+    "symprec": 1e-05,
+    "use_grg": false
+  },
+  "schema_version": 1,
+  "stage": "force_constants",
+  "status": "complete"
+}
