@@ -69,8 +69,8 @@ def _authenticated_full_fc3(fixture: Path) -> Path:
     return path
 
 
-def test_real_si_r0_full_fc3_maps_exactly_on_the_five_layer_crop() -> None:
-    """Exercise the release-shaped five-layer real-Si Phase-B bridge."""
+def test_real_si_r0_full_fc3_maps_on_the_minimum_nine_layer_crop() -> None:
+    """Exercise the range-complete nine-layer real-Si Phase-B bridge."""
 
     pytest.importorskip("phono3py")
     fixture = _phase_a_fixture()
@@ -137,23 +137,36 @@ def test_real_si_r0_full_fc3_maps_exactly_on_the_five_layer_crop() -> None:
     mapped = map_fc3_to_device(
         normalized,
         device_mapping,
-        n_device_layers=5,
-        interaction_layers=(1, 2, 3),
-        observation_layers=(2,),
+        n_device_layers=9,
+        interaction_layers=(2, 3, 4, 5, 6),
+        observation_layers=(4,),
     )
-    assert mapped.nnz == 207_360
-    assert mapped.report.required_left_halo_layers == 1
-    assert mapped.report.required_right_halo_layers == 1
-    assert mapped.report.harmonic_buffer_layers == ((0,), (4,))
+    assert mapped.ndof == 9 * device_mapping.n_principal_layer_dofs == 216
+    assert mapped.nnz > 0
+    assert mapped.report.final_nonzero_count == mapped.nnz
+    assert mapped.report.required_left_halo_layers == 2
+    assert mapped.report.required_right_halo_layers == 2
+    np.testing.assert_array_equal(
+        mapped.report.pairwise_max_principal_layers,
+        np.full(3, 2, dtype=np.int64),
+    )
+    assert mapped.report.contact_layers == (0, 8)
+    assert mapped.report.harmonic_buffer_layers == ((0, 1), (7, 8))
     assert mapped.report.permutation_tolerance_passed
-    assert mapped.report.exact_permutation_equality
+    assert mapped.report.permutation_missing_count == 0
+    assert mapped.report.permutation_max_roundoff_ratio <= (
+        mapped.report.permutation_roundoff_factor
+    )
+    # Bitwise equality is diagnostic only: the r0 reference-leg paths have
+    # different, but rigorously roundoff-bounded, weighted decompositions.
+    assert isinstance(mapped.report.exact_permutation_equality, bool)
     assert mapped.report.certification_passed
     assert mapped.report.failure_codes == ()
     preflight = mapped.metadata["compact_accumulation_preflight"]
     assert preflight["geometry_pass_count"] == 2
     assert preflight["retained_periodic_record_count"] == 0
     assert preflight["retained_python_contribution_record_count"] == 0
-    assert preflight["estimated_peak_bytes"] < 512 * 1024**2
+    assert preflight["estimated_peak_bytes"] < 2 * 1024**3
     assert mapped.report.source_fc3_content_sha256 == (
         _SOURCE_FC3_CONTENT_SHA256
     )

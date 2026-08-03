@@ -19,6 +19,7 @@ from negfpy.anharmonic.mapped_fc3 import (
     MassNormalizedTranslationalFC3,
     _accumulate_compact,
     _compact_accumulation_preflight,
+    _permutation_audit,
     map_fc3_to_device,
     mass_normalize_translational_fc3,
     scale_device_fc3,
@@ -47,10 +48,11 @@ def _mapping(
     *,
     duplicate_images: bool = False,
     cross_cell: bool = False,
+    two_cell: bool = False,
 ) -> CrystalMapping:
     cell = _cell()
-    second_from_first = 1.5 if cross_cell else 0.5
-    first_from_second = -1.5 if cross_cell else -0.5
+    second_from_first = 2.5 if two_cell else (1.5 if cross_cell else 0.5)
+    first_from_second = -2.5 if two_cell else (-1.5 if cross_cell else -0.5)
     base = (
         np.array([0.0, 0.0, 0.0]),
         np.array([first_from_second, 0.0, 0.0]),
@@ -123,6 +125,7 @@ def _translational(
     *,
     duplicate_images: bool = False,
     cross_cell: bool = False,
+    two_cell: bool = False,
 ) -> tuple[TranslationalFC3, CrystalMapping, FC3ValidationReport]:
     raw = _raw_fc3()
     certification = validate_fc3(raw)
@@ -132,6 +135,7 @@ def _translational(
         "fc3",
         duplicate_images=duplicate_images,
         cross_cell=cross_cell,
+        two_cell=two_cell,
     )
     translated = convert_fc3_to_translational(raw, crystal)
     return translated, crystal, certification
@@ -141,10 +145,12 @@ def _normalized(
     *,
     duplicate_images: bool = False,
     cross_cell: bool = False,
+    two_cell: bool = False,
 ) -> MassNormalizedTranslationalFC3:
     translated, crystal, certification = _translational(
         duplicate_images=duplicate_images,
         cross_cell=cross_cell,
+        two_cell=two_cell,
     )
     return mass_normalize_translational_fc3(
         translated,
@@ -302,6 +308,73 @@ def test_contact_layers_are_the_required_five_layer_harmonic_halo() -> None:
     assert mapped.report.exact_permutation_equality
 
 
+def test_two_layer_range_requires_the_minimum_nine_layer_crop() -> None:
+    mapped = map_fc3_to_device(
+        _normalized(two_cell=True),
+        _layered_mapping(),
+        n_device_layers=9,
+        interaction_layers=(2, 3, 4, 5, 6),
+        observation_layers=(4,),
+    )
+    assert mapped.report.required_left_halo_layers == 2
+    assert mapped.report.required_right_halo_layers == 2
+    np.testing.assert_array_equal(
+        mapped.report.pairwise_max_principal_layers,
+        np.full(3, 2, dtype=np.int64),
+    )
+    assert mapped.report.harmonic_buffer_layers == ((0, 1), (7, 8))
+    assert mapped.report.failure_codes == ()
+    assert mapped.report.certification_passed
+
+    five_layer = map_fc3_to_device(
+        _normalized(two_cell=True),
+        _layered_mapping(),
+        n_device_layers=5,
+        interaction_layers=(1, 2, 3),
+        observation_layers=(2,),
+    )
+    assert not five_layer.report.certification_passed
+    assert {
+        "left_harmonic_buffer",
+        "right_harmonic_buffer",
+        "observation_left_padding",
+        "observation_right_padding",
+    }.issubset(five_layer.report.failure_codes)
+
+
+def test_roundoff_bounded_permutation_is_certified_without_modification() -> None:
+    indices = np.asarray(sorted(itertools.permutations((0, 1, 2))), dtype=np.int64)
+    values = np.ones(len(indices), dtype=np.float64)
+    values[0] = np.nextafter(1.0, 2.0)
+    original = np.array(values, copy=True)
+    contribution_l1 = np.full(len(indices), 8.0, dtype=np.float64)
+    maximum, missing, passed, exact, ratio = _permutation_audit(
+        3,
+        indices,
+        values,
+        contribution_l1,
+    )
+    assert maximum == np.spacing(1.0)
+    assert missing == 0
+    assert passed
+    assert not exact
+    assert ratio < 1.0
+    np.testing.assert_array_equal(values, original)
+
+    asymmetric = np.array(values, copy=True)
+    asymmetric[0] = 1.01
+    _maximum, missing, passed, exact, ratio = _permutation_audit(
+        3,
+        indices,
+        asymmetric,
+        contribution_l1,
+    )
+    assert missing == 0
+    assert not passed
+    assert not exact
+    assert ratio > 32.0
+
+
 def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
     ndof = 4
     records = (
@@ -330,10 +403,8 @@ def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
         [value for _output, _suffix, value in ordered],
         dtype=np.float64,
     )
-    indices, values, duplicate_count, cancellation_count = _accumulate_compact(
-        keys,
-        contributions,
-        ndof=ndof,
+    indices, values, contribution_l1, duplicate_count, cancellation_count = (
+        _accumulate_compact(keys, contributions, ndof=ndof)
     )
 
     legacy: dict[tuple[int, int, int], list[tuple[tuple[int, ...], float]]]
@@ -357,6 +428,14 @@ def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
     )
     assert duplicate_count == sum(len(group) - 1 for group in legacy.values())
     assert cancellation_count == 1
+    expected_l1 = {
+        output: math.fsum(abs(value) for _key, value in legacy[output])
+        for output in expected
+    }
+    np.testing.assert_array_equal(
+        contribution_l1,
+        np.asarray([expected_l1[tuple(index)] for index in indices]),
+    )
 
 
 def test_compact_accumulation_preflight_is_linear_and_allocation_free() -> None:

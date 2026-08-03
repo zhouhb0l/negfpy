@@ -96,13 +96,13 @@ def _harmonic_model():
 
 
 def _mapped_fc3(model) -> DeviceMappedFC3:
-    n_layers = 5
+    n_layers = 9
     layer_dofs = model.mapping.n_principal_layer_dofs
     ndof = n_layers * layer_dofs
     triples: set[tuple[int, int, int]] = set()
     for triple in (
-        (1 * layer_dofs, 2 * layer_dofs, 2 * layer_dofs),
-        (2 * layer_dofs, 3 * layer_dofs, 3 * layer_dofs),
+        (2 * layer_dofs, 4 * layer_dofs, 4 * layer_dofs),
+        (4 * layer_dofs, 6 * layer_dofs, 6 * layer_dofs),
     ):
         triples.update(permutations(triple))
     indices = np.asarray(sorted(triples), dtype=np.int64)
@@ -112,7 +112,7 @@ def _mapped_fc3(model) -> DeviceMappedFC3:
     values[3:] = 3.0
     physics_hash = _cubic_physics_sha256(ndof, indices, values)
     report = FC3DeviceMappingReport(
-        schema_version="negfpy.fc3-device-mapping.v1",
+        schema_version="negfpy.fc3-device-mapping.v2",
         raw_term_count=2,
         nonzero_raw_block_count=2,
         exact_zero_raw_block_count=0,
@@ -125,22 +125,24 @@ def _mapped_fc3(model) -> DeviceMappedFC3:
         exact_cancellation_count=0,
         final_nonzero_count=len(values),
         support_density=float(len(values) / ndof**3),
-        pairwise_max_transport_cells=np.ones(3, dtype=np.int64),
-        pairwise_max_principal_layers=np.ones(3, dtype=np.int64),
+        pairwise_max_transport_cells=np.full(3, 2, dtype=np.int64),
+        pairwise_max_principal_layers=np.full(3, 2, dtype=np.int64),
         pairwise_max_distance_m=np.full(3, 1.0e-10),
-        required_left_halo_layers=1,
-        required_right_halo_layers=1,
+        required_left_halo_layers=2,
+        required_right_halo_layers=2,
         n_device_layers=n_layers,
         contact_layers=(0, n_layers - 1),
-        harmonic_buffer_layers=((0,), (4,)),
-        interaction_layers=(1, 2, 3),
-        observation_layers=(2,),
+        harmonic_buffer_layers=((0, 1), (7, 8)),
+        interaction_layers=(2, 3, 4, 5, 6),
+        observation_layers=(4,),
         permutation_max_abs=0.0,
+        permutation_max_roundoff_ratio=0.0,
+        permutation_roundoff_factor=32.0,
         permutation_missing_count=0,
         permutation_tolerance_passed=True,
         exact_permutation_equality=True,
-        permutation_atol=1.0e-12,
-        permutation_rtol=1.0e-10,
+        permutation_atol=0.0,
+        permutation_rtol=float(32.0 * np.finfo(np.float64).eps),
         source_fc3_content_sha256="a" * 64,
         source_translational_sha256="b" * 64,
         mass_normalized_fc3_sha256="c" * 64,
@@ -259,8 +261,8 @@ def test_builds_exact_device_contacts_sparse_vertex_and_run_inputs() -> None:
         coupling_scale=0.25,
     )
 
-    assert problem.device.n_layers == mapped.report.n_device_layers == 5
-    assert problem.ndof == mapped.ndof == 15
+    assert problem.device.n_layers == mapped.report.n_device_layers == 9
+    assert problem.ndof == mapped.ndof == 27
     assert isinstance(problem.vertex, SparseCubicVertex)
     assert problem.vertex.ndof == mapped.ndof
     np.testing.assert_array_equal(problem.vertex.indices, mapped.indices)
@@ -274,7 +276,7 @@ def test_builds_exact_device_contacts_sparse_vertex_and_run_inputs() -> None:
     np.testing.assert_array_equal(problem.left.device_to_lead, model.d10)
     np.testing.assert_array_equal(problem.right.device_to_lead, model.d01)
     np.testing.assert_array_equal(problem.left.device_indices, [0, 1, 2])
-    np.testing.assert_array_equal(problem.right.device_indices, [12, 13, 14])
+    np.testing.assert_array_equal(problem.right.device_indices, [24, 25, 26])
     assert all(
         np.array_equal(block, model.d00) for block in problem.device.onsite_blocks
     )
@@ -321,11 +323,59 @@ def test_zero_coupling_and_signed_bias_are_explicit_and_deterministic() -> None:
     assert len(problem.vertex.metadata["uncontinued_vertex_storage_sha256"]) == 64
 
 
+def test_accepts_nonexact_roundoff_diagnostic_but_rejects_a_failed_bound() -> None:
+    model = _harmonic_model()
+    mapped = _mapped_fc3(model)
+    diagnostic_only = _replace_report(
+        mapped,
+        exact_permutation_equality=False,
+        permutation_max_abs=float(np.spacing(2.0)),
+        permutation_max_roundoff_ratio=0.5,
+    )
+    problem = build_material_nq1_problem(
+        model,
+        diagnostic_only,
+        grid=SignedFrequencyGrid(step=0.1, n_positive=2),
+        mean_temperature=0.5,
+    )
+    assert isinstance(problem.vertex, SparseCubicVertex)
+
+    failed_bound = _replace_report(
+        mapped,
+        permutation_tolerance_passed=False,
+        permutation_max_roundoff_ratio=33.0,
+        certification_passed=False,
+        failure_codes=("permutation_tolerance",),
+    )
+    with pytest.raises(MaterialNQ1ProblemError, match="preflight"):
+        build_material_nq1_problem(
+            model,
+            failed_bound,
+            grid=SignedFrequencyGrid(step=0.1, n_positive=2),
+            mean_temperature=0.5,
+        )
+
+    missing_support = _replace_report(
+        mapped,
+        permutation_missing_count=1,
+        permutation_tolerance_passed=False,
+        certification_passed=False,
+        failure_codes=("permutation_tolerance",),
+    )
+    with pytest.raises(MaterialNQ1ProblemError, match="preflight"):
+        build_material_nq1_problem(
+            model,
+            missing_support,
+            grid=SignedFrequencyGrid(step=0.1, n_positive=2),
+            mean_temperature=0.5,
+        )
+
+
 def test_fails_closed_on_report_range_and_cross_stage_identity() -> None:
     model = _harmonic_model()
     mapped = _mapped_fc3(model)
     grid = SignedFrequencyGrid(step=0.1, n_positive=2)
-    insufficient = _replace_report(mapped, required_left_halo_layers=2)
+    insufficient = _replace_report(mapped, required_left_halo_layers=3)
     with pytest.raises(MaterialNQ1ProblemError, match="lacks the directional range"):
         build_material_nq1_problem(
             model,

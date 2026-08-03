@@ -17,7 +17,7 @@ from itertools import permutations
 import struct
 import sys
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from scipy import sparse as scipy_sparse
@@ -106,36 +106,104 @@ def _storage_sha256(
     return hashlib.sha256(preimage).hexdigest()
 
 
-def _validate_exact_permutation_symmetry(indices: Array, values: Array) -> None:
+def _permutation_symmetry_audit(
+    indices: Array,
+    values: Array,
+    *,
+    rtol: float,
+    atol: float,
+    cubic_physics_sha256: str,
+) -> Mapping[str, Any]:
+    """Validate complete support and numerical symmetry without correction.
+
+    The comparison is the finite-value form of ``numpy.isclose`` used by
+    :class:`DenseCubicVertex`: ``abs(a-b) <= atol + rtol*abs(b)``.  Both
+    directions are checked because every stored ordering is visited.  Exact
+    equality remains an audit result, never a reason to rewrite a coefficient.
+    """
+
     lookup = {
-        tuple(int(component) for component in index): np.float64(value).tobytes()
-        for index, value in zip(indices, values, strict=True)
+        tuple(int(component) for component in index): position
+        for position, index in enumerate(indices)
     }
-    for index, value_bytes in lookup.items():
-        for order in permutations(index):
-            if order not in lookup:
+    maximum = 0.0
+    exact = True
+    comparison_count = 0
+    first_failure: (
+        tuple[tuple[int, int, int], tuple[int, int, int], float, float]
+        | None
+    ) = None
+    for index, position in lookup.items():
+        reference = float(values[position])
+        reference_bytes = np.float64(reference).tobytes()
+        for raw_order in sorted(set(permutations(index))):
+            order = tuple(int(component) for component in raw_order)
+            observed_position = lookup.get(order)
+            if observed_position is None:
                 raise ValueError(
                     "Every distinct ordered permutation of a sparse cubic "
                     f"component must be present; missing {order}."
                 )
-            if lookup[order] != value_bytes:
-                raise ValueError(
-                    "Permutation-orbit coefficients must be bitwise equal; "
-                    "implicit symmetrization is forbidden."
-                )
+            observed = float(values[observed_position])
+            difference = abs(reference - observed)
+            allowed = atol + rtol * abs(observed)
+            maximum = max(maximum, difference)
+            comparison_count += 1
+            if np.float64(observed).tobytes() != reference_bytes:
+                exact = False
+            if difference > allowed and first_failure is None:
+                first_failure = (index, order, difference, allowed)
+
+    if first_failure is not None:
+        index, order, difference, allowed = first_failure
+        raise ValueError(
+            "Permutation-orbit coefficients must be numerically permutation "
+            "symmetric without correction; "
+            f"{index} versus {order} differs by {difference:.17g}, exceeding "
+            f"{allowed:.17g} for rtol={rtol:.17g}, atol={atol:.17g}."
+        )
+
+    scale = float(np.max(np.abs(values), initial=0.0))
+    relative = maximum / scale if scale else 0.0
+    return {
+        "schema_version": "negfpy.sparse-cubic-permutation-audit.v1",
+        "cubic_physics_sha256": cubic_physics_sha256,
+        "support_complete": True,
+        "permutation_tolerance_passed": True,
+        "exact_permutation_equality": exact,
+        "symmetry_rtol": rtol,
+        "symmetry_atol": atol,
+        "permutation_max_abs": maximum,
+        "coefficient_scale": scale,
+        "permutation_relative_to_global_scale": relative,
+        "checked_ordered_comparison_count": comparison_count,
+        "comparison_rule": "abs(a-b) <= atol + rtol*abs(b), both directions",
+        "symmetrized": False,
+        "corrected": False,
+        "coefficients_modified": False,
+    }
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class SparseCubicVertex:
-    """Unique lexicographically sorted cubic components in solver units."""
+    """Unique sparse cubic components in solver units, never corrected.
+
+    Every ordered permutation must be stored.  Coefficients use the same
+    scale-aware numerical symmetry contract as :class:`DenseCubicVertex`;
+    last-bit differences are retained and reported rather than averaged.
+    """
 
     ndof: int
     indices: Array
     coefficients: Array
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    permutation_symmetry: Mapping[str, Any] = field(init=False)
     cubic_physics_sha256: str = field(init=False)
     metadata_sha256: str = field(init=False)
     vertex_storage_sha256: str = field(init=False)
+
+    symmetry_rtol: ClassVar[float] = DenseCubicVertex.symmetry_rtol
+    symmetry_atol: ClassVar[float] = DenseCubicVertex.symmetry_atol
 
     def __post_init__(self) -> None:
         if isinstance(self.ndof, (bool, np.bool_)) or not isinstance(self.ndof, (int, np.integer)):
@@ -162,12 +230,38 @@ class SparseCubicVertex:
                 raise ValueError("indices must be lexicographically sorted.")
             if len(indices) > 1 and np.any(np.all(indices[1:] == indices[:-1], axis=1)):
                 raise ValueError("indices must be unique.")
-        _validate_exact_permutation_symmetry(indices, coefficients)
+        physics_digest = _physics_sha256(ndof, indices, coefficients)
+        symmetry_audit = _permutation_symmetry_audit(
+            indices,
+            coefficients,
+            rtol=self.symmetry_rtol,
+            atol=self.symmetry_atol,
+            cubic_physics_sha256=physics_digest,
+        )
         if not isinstance(self.metadata, Mapping):
             raise TypeError("metadata must be a mapping.")
         metadata = _freeze(self.metadata)
+        declared_audit = metadata.get("permutation_symmetry")
+        if declared_audit is not None:
+            if not isinstance(declared_audit, Mapping):
+                raise TypeError(
+                    "metadata['permutation_symmetry'] must be a mapping."
+                )
+            declared_physics = declared_audit.get("cubic_physics_sha256")
+            if (
+                declared_physics == physics_digest
+                and canonical_encode(declared_audit)
+                != canonical_encode(symmetry_audit)
+            ):
+                raise ValueError(
+                    "metadata['permutation_symmetry'] does not match the "
+                    "coefficient audit."
+                )
+        enriched_metadata = dict(metadata)
+        enriched_metadata["permutation_symmetry"] = symmetry_audit
+        metadata = _freeze(enriched_metadata)
+        frozen_audit = metadata["permutation_symmetry"]
         metadata_digest = domain_digest("NEGFPY-METADATA", metadata)
-        physics_digest = _physics_sha256(ndof, indices, coefficients)
         storage_digest = _storage_sha256(
             ndof,
             indices,
@@ -179,6 +273,7 @@ class SparseCubicVertex:
         object.__setattr__(self, "indices", indices)
         object.__setattr__(self, "coefficients", coefficients)
         object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "permutation_symmetry", frozen_audit)
         object.__setattr__(self, "cubic_physics_sha256", physics_digest)
         object.__setattr__(self, "metadata_sha256", metadata_digest)
         object.__setattr__(self, "vertex_storage_sha256", storage_digest)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the bounded silicon FC3 finite-device Phase-B preflight.
 
-This driver stops immediately after an authenticated five-layer cubic mapping,
+This driver stops immediately after an authenticated nine-layer cubic mapping,
 the real acoustic-lead audit, and conversion to ``SparseCubicVertex``.  It does
 not construct a frequency grid and cannot call an SCBA solver.  The resulting
 HDF5 file is therefore reusable input evidence for a later, separately sealed
@@ -70,10 +70,14 @@ TRANSPORT_TRANSFORM = np.array(
 )
 HBAR_J_S = 1.0545718176461565e-34
 OMEGA0_RAD_S = 2.0 * np.pi * 1.0e13
-N_DEVICE_LAYERS = 5
-INTERACTION_LAYERS = (1, 2, 3)
-OBSERVATION_LAYERS = (2,)
-CONTACT_LAYERS = (0, 4)
+N_DEVICE_LAYERS = 9
+N_PRINCIPAL_LAYER_DOFS = 24
+N_DEVICE_DOFS = N_DEVICE_LAYERS * N_PRINCIPAL_LAYER_DOFS
+INTERACTION_LAYERS = (2, 3, 4, 5, 6)
+OBSERVATION_LAYERS = (4,)
+CONTACT_LAYERS = (0, 8)
+HARMONIC_BUFFER_LAYERS = ((0, 1), (7, 8))
+REQUIRED_HALO_LAYERS = 2
 SIGNED_GRID_SIZES = (17, 41)
 MIN_AVAILABLE_MEMORY_BYTES = 8 * 1024**3
 MIN_OUTPUT_FREE_BYTES = 2 * 1024**3
@@ -595,7 +599,7 @@ def run_phase_b(
     output_hdf5: Path,
     campaign_manifest_sha256: str,
 ) -> dict[str, Any]:
-    """Execute the authenticated, five-layer mapping and publish its evidence."""
+    """Execute the authenticated, nine-layer mapping and publish its evidence."""
 
     campaign_hash = _validate_sha256(
         campaign_manifest_sha256, name="campaign_manifest_sha256"
@@ -706,7 +710,7 @@ def run_phase_b(
     )
     mapped = _timed(
         timings,
-        "map_r0_fc3_to_five_layers",
+        "map_r0_fc3_to_nine_layers",
         lambda: map_fc3_to_device(
             normalized,
             layered_mapping,
@@ -737,22 +741,38 @@ def run_phase_b(
             raw_report.passed and raw_report.permutation_complete
         ),
         "r0_average_enabled": bool(translational.make_r0_average),
-        "five_device_layers": report.n_device_layers == N_DEVICE_LAYERS,
+        "nine_device_layers": report.n_device_layers == N_DEVICE_LAYERS,
+        "silicon_principal_layer_dofs": (
+            int(layered_mapping.n_principal_layer_dofs)
+            == N_PRINCIPAL_LAYER_DOFS
+        ),
+        "silicon_total_device_dofs": int(mapped.ndof) == N_DEVICE_DOFS,
         "contact_layers": tuple(report.contact_layers) == CONTACT_LAYERS,
         "interaction_layers": tuple(report.interaction_layers) == INTERACTION_LAYERS,
         "observation_layers": tuple(report.observation_layers) == OBSERVATION_LAYERS,
         "contact_layers_count_as_harmonic_buffers": tuple(
             tuple(item) for item in report.harmonic_buffer_layers
         )
-        == ((0,), (4,)),
+        == HARMONIC_BUFFER_LAYERS,
         "range_certification": bool(
-            report.required_left_halo_layers <= 1
-            and report.required_right_halo_layers <= 1
-            and not report.failure_codes
-            and report.certification_passed
+            report.required_left_halo_layers == REQUIRED_HALO_LAYERS
+            and report.required_right_halo_layers == REQUIRED_HALO_LAYERS
+            and len(report.harmonic_buffer_layers[0])
+            >= report.required_left_halo_layers
+            and len(report.harmonic_buffer_layers[1])
+            >= report.required_right_halo_layers
+            and report.observation_layers[0] - report.interaction_layers[0]
+            >= report.required_left_halo_layers
+            and report.interaction_layers[-1] - report.observation_layers[-1]
+            >= report.required_right_halo_layers
         ),
-        "permutation_tolerance": bool(report.permutation_tolerance_passed),
-        "permutation_exact": bool(report.exact_permutation_equality),
+        "mapping_certification": bool(
+            report.certification_passed and not report.failure_codes
+        ),
+        "permutation_support_complete": report.permutation_missing_count == 0,
+        "permutation_roundoff_bound": bool(
+            report.permutation_tolerance_passed
+        ),
         "no_source_mutation_or_truncation": bool(
             not report.symmetrized
             and not report.corrected
@@ -769,6 +789,16 @@ def run_phase_b(
             and sparse.ndof == mapped.ndof
             and sparse.nnz == mapped.nnz
         ),
+    }
+    diagnostics = {
+        "permutation": {
+            "exact_bitwise_equality": bool(report.exact_permutation_equality),
+            "maximum_absolute_difference": float(report.permutation_max_abs),
+            "maximum_roundoff_ratio": float(
+                report.permutation_max_roundoff_ratio
+            ),
+            "roundoff_factor": float(report.permutation_roundoff_factor),
+        }
     }
     certified = all(checks.values())
     coefficients = None if sparse is None else np.asarray(sparse.coefficients)
@@ -849,6 +879,7 @@ def run_phase_b(
             "acoustic_lead_classification": _json_value(lead),
         },
         "checks": checks,
+        "diagnostics": diagnostics,
     }
     hdf5_sha256 = _timed(
         timings,
@@ -905,6 +936,7 @@ def run_phase_b(
             "schema": ARCHIVE_SCHEMA,
         },
         "checks": checks,
+        "diagnostics": diagnostics,
         "phase_b_certified": certified,
         "scba_executed": False,
         "release_certified": False,

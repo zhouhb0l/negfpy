@@ -56,18 +56,68 @@ def test_sparse_vertex_roundtrip_and_physics_identity() -> None:
     assert sparse.support_density == 7 / 64
     assert sparse.max_abs == 0.25
     assert not sparse.is_zero
+    assert sparse.permutation_symmetry["permutation_tolerance_passed"] is True
+    assert sparse.permutation_symmetry["exact_permutation_equality"] is True
+    assert sparse.metadata["permutation_symmetry"] == sparse.permutation_symmetry
     assert cubic_vertex_physics_sha256(dense) == sparse.cubic_physics_sha256
     rebuilt = sparse.to_dense(max_bytes=10_000_000)
     np.testing.assert_array_equal(rebuilt.values, dense.values)
 
 
-def test_sparse_vertex_rejects_missing_or_unequal_permutation() -> None:
+def test_sparse_vertex_rejects_missing_permutation_support() -> None:
     with pytest.raises(ValueError, match="missing"):
         SparseCubicVertex(3, [[0, 1, 2]], [1.0])
+
+
+def test_sparse_vertex_retains_last_bit_permutation_differences() -> None:
     indices = np.array(sorted(set(itertools.permutations((0, 1, 2)))))
     values = np.ones(6)
     values[-1] = np.nextafter(1.0, 2.0)
-    with pytest.raises(ValueError, match="bitwise"):
+    original_bits = values.view(np.uint64).copy()
+    dense_values = np.zeros((3, 3, 3), dtype=np.float64)
+    dense_values[tuple(indices.T)] = values
+
+    # This is the same scale-aware contract accepted by DenseCubicVertex.
+    dense = DenseCubicVertex(dense_values)
+    sparse = SparseCubicVertex(
+        3,
+        indices,
+        values,
+        metadata={"source": "mapped-style-roundoff"},
+    )
+
+    np.testing.assert_array_equal(
+        sparse.coefficients.view(np.uint64),
+        original_bits,
+    )
+    assert sparse.metadata["source"] == "mapped-style-roundoff"
+    audit = sparse.permutation_symmetry
+    assert audit["support_complete"] is True
+    assert audit["permutation_tolerance_passed"] is True
+    assert audit["exact_permutation_equality"] is False
+    assert audit["coefficients_modified"] is False
+    assert audit["symmetrized"] is False
+    assert audit["corrected"] is False
+    assert audit["permutation_max_abs"] == np.spacing(1.0)
+    assert cubic_vertex_physics_sha256(dense) == sparse.cubic_physics_sha256
+
+    # Persisted audit metadata is accepted only when it reproduces from the
+    # unchanged coefficient payload.
+    restored = SparseCubicVertex(3, indices, values, metadata=sparse.metadata)
+    assert restored.metadata_sha256 == sparse.metadata_sha256
+    bad_metadata = dict(sparse.metadata)
+    bad_audit = dict(sparse.permutation_symmetry)
+    bad_audit["exact_permutation_equality"] = True
+    bad_metadata["permutation_symmetry"] = bad_audit
+    with pytest.raises(ValueError, match="does not match the coefficient audit"):
+        SparseCubicVertex(3, indices, values, metadata=bad_metadata)
+
+
+def test_sparse_vertex_rejects_material_permutation_asymmetry() -> None:
+    indices = np.array(sorted(set(itertools.permutations((0, 1, 2)))))
+    values = np.ones(6)
+    values[-1] = 1.001
+    with pytest.raises(ValueError, match="numerically permutation symmetric"):
         SparseCubicVertex(3, indices, values)
 
 

@@ -51,8 +51,17 @@ Array = np.ndarray
 Metadata = Mapping[str, Any]
 CertificationKind = Literal["full_validation", "paired_full_compact"]
 
-_PERMUTATION_ATOL = 1.0e-12
-_PERMUTATION_RTOL = 1.0e-10
+_PERMUTATION_ATOL = 0.0
+# Each mapped contribution has at most three binary64 image/r0 weight
+# multiplications after the common mass normalization.  The two sides of a
+# permutation comparison are independently rounded and then accumulated with
+# ``math.fsum``.  Thirty-two epsilons is a conservative platform-independent
+# envelope for that work while remaining five orders of magnitude stricter
+# than the former global 1e-10 criterion.
+_PERMUTATION_ROUNDOFF_FACTOR = 32.0
+_PERMUTATION_RTOL = (
+    _PERMUTATION_ROUNDOFF_FACTOR * float(np.finfo(np.float64).eps)
+)
 _FRACTIONAL_SNAP_ATOL = 1.0e-10
 _FRACTIONAL_MATCH_ATOL = 5.0e-10
 _CARTESIAN_MATCH_ATOL_M = 1.0e-12
@@ -755,7 +764,8 @@ def _permutation_audit(
     ndof: int,
     indices: Array,
     values: Array,
-) -> tuple[float, int, bool, bool]:
+    contribution_l1: Array,
+) -> tuple[float, int, bool, bool, float]:
     """Audit an already lexicographically ordered sparse cubic vertex.
 
     A dictionary is deliberately not constructed here.  The compact output
@@ -763,8 +773,10 @@ def _permutation_audit(
     test without reintroducing one Python object per mapped component.
     """
 
+    if contribution_l1.shape != values.shape:
+        raise ValueError("Permutation contribution L1 norms must align with values.")
     if len(values) == 0:
-        return 0.0, 0, True, True
+        return 0.0, 0, True, True, 0.0
     keys = (
         (
             np.asarray(indices[:, 0], dtype=np.uint64) * np.uint64(ndof)
@@ -776,6 +788,8 @@ def _permutation_audit(
     maximum = 0.0
     missing = 0
     exact = True
+    maximum_roundoff_ratio = 0.0
+    epsilon = float(np.finfo(np.float64).eps)
     for ordinal, raw_key in enumerate(indices):
         key = tuple(int(value) for value in raw_key)
         reference = float(values[ordinal])
@@ -794,14 +808,27 @@ def _permutation_audit(
                 maximum = max(maximum, abs(reference))
                 continue
             observed = float(values[position])
-            maximum = max(maximum, abs(reference - observed))
+            difference = abs(reference - observed)
+            maximum = max(maximum, difference)
+            if difference:
+                l1_scale = epsilon * (
+                    float(contribution_l1[ordinal])
+                    + float(contribution_l1[position])
+                )
+                ratio = difference / l1_scale if l1_scale else float("inf")
+                maximum_roundoff_ratio = max(maximum_roundoff_ratio, ratio)
             if struct.pack("<d", observed) != reference_bytes:
                 exact = False
-    scale = float(np.max(np.abs(values), initial=0.0))
-    tolerance_passed = missing == 0 and maximum <= (
-        _PERMUTATION_ATOL + _PERMUTATION_RTOL * scale
+    tolerance_passed = missing == 0 and maximum_roundoff_ratio <= (
+        _PERMUTATION_ROUNDOFF_FACTOR
     )
-    return maximum, missing, tolerance_passed, exact
+    return (
+        maximum,
+        missing,
+        tolerance_passed,
+        exact,
+        maximum_roundoff_ratio,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -850,7 +877,9 @@ def _compact_accumulation_preflight(
     stable_order = count * _INDEX_BYTES
     # NumPy's stable indirect sort may require one index-sized scratch array.
     stable_scratch = count * _INDEX_BYTES
-    final_compact = maximum_final * (_UINT64_BYTES + _FLOAT64_BYTES)
+    final_compact = maximum_final * (
+        _UINT64_BYTES + 2 * _FLOAT64_BYTES
+    )
     sort_peak = payload + stable_order + stable_scratch
     accumulation_peak = payload + stable_order + final_compact
     # Final decoding overlaps the caller-owned compact payload and needs at
@@ -858,7 +887,7 @@ def _compact_accumulation_preflight(
     # copy, and one uint64 ufunc temporary per final entry.
     finalization_peak = payload + maximum_final * (
         _UINT64_BYTES  # compact final keys
-        + _FLOAT64_BYTES  # compact grouped values or the result-value copy
+        + 2 * _FLOAT64_BYTES  # grouped value and contribution L1 result
         + 3 * int(np.dtype(np.int64).itemsize)  # decoded result indices
         + _UINT64_BYTES  # one decoding ufunc temporary
     )
@@ -934,7 +963,7 @@ def _accumulate_compact(
     contribution_values: Array,
     *,
     ndof: int,
-) -> tuple[Array, Array, int, int]:
+) -> tuple[Array, Array, Array, int, int]:
     """Stably group compact records and apply one ``math.fsum`` per output."""
 
     count = int(len(output_keys))
@@ -943,9 +972,11 @@ def _accumulate_compact(
     if count == 0:
         indices = np.empty((0, 3), dtype=np.int64)
         values = np.empty((0,), dtype=np.float64)
+        contribution_l1 = np.empty((0,), dtype=np.float64)
         indices.setflags(write=False)
         values.setflags(write=False)
-        return indices, values, 0, 0
+        contribution_l1.setflags(write=False)
+        return indices, values, contribution_l1, 0, 0
 
     # The fill stream is in the legacy record-key order.  A stable indirect
     # sort by output therefore reproduces the old per-output tuple sort while
@@ -961,6 +992,7 @@ def _accumulate_compact(
 
     final_keys = np.empty(group_count, dtype=np.uint64)
     final_values = np.empty(group_count, dtype=np.float64)
+    final_l1 = np.empty(group_count, dtype=np.float64)
     cursor = 0
     write = 0
     cancellations = 0
@@ -973,11 +1005,16 @@ def _accumulate_compact(
             float(contribution_values[int(raw_ordinal)])
             for raw_ordinal in order[cursor:end]
         )
+        l1_norm = math.fsum(
+            abs(float(contribution_values[int(raw_ordinal)]))
+            for raw_ordinal in order[cursor:end]
+        )
         if value == 0.0:
             cancellations += 1
         else:
             final_keys[write] = np.uint64(key)
             final_values[write] = value
+            final_l1[write] = l1_norm
             write += 1
         cursor = end
 
@@ -990,6 +1027,9 @@ def _accumulate_compact(
     result_values[result_values == 0.0] = 0.0
     result_values.setflags(write=False)
     del final_values
+    result_l1 = np.array(final_l1[:write], dtype=np.float64, copy=True)
+    result_l1.setflags(write=False)
+    del final_l1
 
     result_indices = np.empty((write, 3), dtype=np.int64)
     keys = final_keys[:write]
@@ -998,7 +1038,13 @@ def _accumulate_compact(
     result_indices[:, 1] = (keys // np.uint64(ndof)) % np.uint64(ndof)
     result_indices[:, 2] = keys % np.uint64(ndof)
     result_indices.setflags(write=False)
-    return result_indices, result_values, duplicate_count, cancellations
+    return (
+        result_indices,
+        result_values,
+        result_l1,
+        duplicate_count,
+        cancellations,
+    )
 
 
 def _cubic_physics_sha256(
@@ -1049,6 +1095,8 @@ class FC3DeviceMappingReport:
     interaction_layers: tuple[int, ...]
     observation_layers: tuple[int, ...]
     permutation_max_abs: float
+    permutation_max_roundoff_ratio: float
+    permutation_roundoff_factor: float
     permutation_missing_count: int
     permutation_tolerance_passed: bool
     exact_permutation_equality: bool
@@ -1329,7 +1377,7 @@ def map_fc3_to_device(
         )
 
     try:
-        indices, values, duplicate_count, cancellation_count = (
+        indices, values, contribution_l1, duplicate_count, cancellation_count = (
             _accumulate_compact(
                 output_keys,
                 contribution_values,
@@ -1344,9 +1392,14 @@ def map_fc3_to_device(
         ) from exc
     del output_keys, contribution_values
     physics_hash = _cubic_physics_sha256(ndof, indices, values)
-    permutation_max, permutation_missing, permutation_passed, exact_permutation = (
-        _permutation_audit(ndof, indices, values)
-    )
+    (
+        permutation_max,
+        permutation_missing,
+        permutation_passed,
+        exact_permutation,
+        permutation_max_roundoff_ratio,
+    ) = _permutation_audit(ndof, indices, values, contribution_l1)
+    del contribution_l1
 
     # The explicit contact device layers are harmonic-only, noninteracting
     # layers and therefore count toward the FC3 range halo.
@@ -1362,7 +1415,6 @@ def map_fc3_to_device(
             interactions[-1] - observations[-1] >= required_right
         ),
         "permutation_tolerance": permutation_passed,
-        "exact_permutation_equality": exact_permutation,
     }
     failures = tuple(sorted(name for name, passed in checks.items() if not passed))
 
@@ -1378,7 +1430,7 @@ def map_fc3_to_device(
         raw_blocks[key] = nonzero
 
     provisional = FC3DeviceMappingReport(
-        schema_version="negfpy.fc3-device-mapping.v1",
+        schema_version="negfpy.fc3-device-mapping.v2",
         raw_term_count=len(fc3.terms),
         nonzero_raw_block_count=sum(raw_blocks.values()),
         exact_zero_raw_block_count=len(raw_blocks) - sum(raw_blocks.values()),
@@ -1404,6 +1456,8 @@ def map_fc3_to_device(
         interaction_layers=interactions,
         observation_layers=observations,
         permutation_max_abs=permutation_max,
+        permutation_max_roundoff_ratio=permutation_max_roundoff_ratio,
+        permutation_roundoff_factor=_PERMUTATION_ROUNDOFF_FACTOR,
         permutation_missing_count=permutation_missing,
         permutation_tolerance_passed=permutation_passed,
         exact_permutation_equality=exact_permutation,

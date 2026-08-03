@@ -45,6 +45,15 @@ class CampaignError(RuntimeError):
     """A fail-closed Phase-B orchestration or provenance error."""
 
 
+def _next_gate(phase_b_certified: bool) -> str:
+    if phase_b_certified:
+        return "remote one-bubble/one-shot timing and memory preflight"
+    return (
+        "resolve the Phase-B scientific failure on a new exact commit before "
+        "one-bubble work"
+    )
+
+
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
     return (
         json.dumps(
@@ -232,7 +241,7 @@ def build_manifest(
     return {
         "schema": SCHEMA,
         "scientific_scope": (
-            "authenticated five-layer full-FC3 r0 mapping, real acoustic "
+            "authenticated nine-layer full-FC3 r0 mapping, real acoustic "
             "lead audit, and sparse scaling; explicitly no SCBA"
         ),
         "source": source,
@@ -487,7 +496,7 @@ def run_campaign(
         "phase_b_certified": certified,
         "scba_executed": False,
         "release_certified": False,
-        "next_gate": "remote one-bubble/one-shot timing and memory preflight",
+        "next_gate": _next_gate(certified),
     }
     report_path = artifacts / "phase-b-report.json"
     _publish_once(report_path, _canonical_json(report))

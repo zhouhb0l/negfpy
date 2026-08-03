@@ -113,12 +113,25 @@ def test_preflight_rejects_compact_or_wrong_raw_fc3_before_science(
 
 
 def _patch_bounded_pipeline(
-    monkeypatch: pytest.MonkeyPatch, *, exact_permutation: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exact_permutation: bool = True,
+    mapping_certified: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     indices = np.array(
-        [[0, 0, 0], [1, 1, 1], [2, 2, 2]], dtype=np.int64
+        [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ],
+        dtype=np.int64,
     )
-    values = np.array([2.0, -3.0, 4.0], dtype=np.float64)
+    values = np.full(len(indices), 2.0, dtype=np.float64)
+    if not exact_permutation:
+        values[-1] = np.nextafter(values[-1], np.inf)
     coefficients = values * 0.125
     monkeypatch.setattr(
         driver,
@@ -177,7 +190,7 @@ def _patch_bounded_pipeline(
     )
     monkeypatch.setattr(driver, "read_phono3py_fc2", lambda *_args, **_kwargs: object())
     layered = SimpleNamespace(
-        n_principal_layer_dofs=6,
+        n_principal_layer_dofs=24,
         fc2_content_sha256="4" * 64,
         primitive_crystal_content_sha256="5" * 64,
         fc2_crystal_mapping_content_sha256="6" * 64,
@@ -193,17 +206,23 @@ def _patch_bounded_pipeline(
     harmonic = SimpleNamespace(name="harmonic")
     monkeypatch.setattr(driver, "build_layered_harmonic_model", lambda *_args: harmonic)
     mapping_report = SimpleNamespace(
-        n_device_layers=5,
-        contact_layers=(0, 4),
-        harmonic_buffer_layers=((0,), (4,)),
-        interaction_layers=(1, 2, 3),
-        observation_layers=(2,),
-        required_left_halo_layers=1,
-        required_right_halo_layers=1,
-        failure_codes=() if exact_permutation else ("exact_permutation_equality",),
-        certification_passed=exact_permutation,
-        permutation_tolerance_passed=exact_permutation,
+        n_device_layers=9,
+        contact_layers=(0, 8),
+        harmonic_buffer_layers=((0, 1), (7, 8)),
+        interaction_layers=(2, 3, 4, 5, 6),
+        observation_layers=(4,),
+        required_left_halo_layers=2,
+        required_right_halo_layers=2,
+        failure_codes=() if mapping_certified else ("permutation_tolerance",),
+        certification_passed=mapping_certified,
+        permutation_missing_count=0,
+        permutation_tolerance_passed=mapping_certified,
         exact_permutation_equality=exact_permutation,
+        permutation_max_abs=float(np.ptp(values)),
+        permutation_max_roundoff_ratio=(
+            0.0 if exact_permutation else (1.0 if mapping_certified else 64.0)
+        ),
+        permutation_roundoff_factor=32.0,
         symmetrized=False,
         corrected=False,
         truncated=False,
@@ -214,9 +233,9 @@ def _patch_bounded_pipeline(
         report=mapping_report,
         indices=indices,
         values=values,
-        ndof=30,
-        nnz=3,
-        support_density=3 / 30**3,
+        ndof=216,
+        nnz=len(values),
+        support_density=len(values) / 216**3,
         content_sha256="9" * 64,
         cubic_physics_sha256="a" * 64,
     )
@@ -225,9 +244,9 @@ def _patch_bounded_pipeline(
         "map_fc3_to_device",
         lambda *_args, **kwargs: mapped
         if kwargs == {
-            "n_device_layers": 5,
-            "interaction_layers": (1, 2, 3),
-            "observation_layers": (2,),
+            "n_device_layers": 9,
+            "interaction_layers": (2, 3, 4, 5, 6),
+            "observation_layers": (4,),
         }
         else pytest.fail("wrong finite mapping domain"),
     )
@@ -240,7 +259,7 @@ def _patch_bounded_pipeline(
     )
     monkeypatch.setattr(driver, "classify_harmonic_lead", lambda _model: lead)
     sparse = SparseCubicVertex(
-        ndof=30,
+        ndof=216,
         indices=indices,
         coefficients=coefficients,
         metadata={
@@ -271,13 +290,19 @@ def test_run_phase_b_publishes_reloadable_non_scba_evidence(
     assert not outcome["scba_executed"]
     assert not outcome["release_certified"]
     assert outcome["dense_scba_memory_estimates_bytes"] == {
-        "17": 288 * 17 * 30**2,
-        "41": 288 * 41 * 30**2,
+        "17": 288 * 17 * 216**2,
+        "41": 288 * 41 * 216**2,
     }
+    assert outcome["checks"]["nine_device_layers"]
+    assert outcome["checks"]["silicon_principal_layer_dofs"]
+    assert outcome["checks"]["silicon_total_device_dofs"]
+    assert outcome["checks"]["range_certification"]
+    assert outcome["checks"]["mapping_certification"]
+    assert outcome["dimensions"]["nnz"] == len(values)
     archive = driver.verify_phase_b_hdf5(output_hdf5)
     assert archive["phase_b_certified"]
-    assert archive["ndof"] == 30
-    assert archive["nnz"] == 3
+    assert archive["ndof"] == 216
+    assert archive["nnz"] == len(values)
     with h5py.File(output_hdf5, "r") as handle:
         np.testing.assert_array_equal(handle["indices"][...], indices)
         np.testing.assert_array_equal(handle["values"][...], values)
@@ -304,10 +329,50 @@ def test_run_phase_b_publishes_reloadable_non_scba_evidence(
         )
 
 
-def test_failed_exact_permutation_is_archived_without_sparse_scaling(
+def test_roundoff_bounded_nonexact_permutation_scales_and_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_bounded_pipeline(monkeypatch, exact_permutation=False)
+    indices, values, coefficients = _patch_bounded_pipeline(
+        monkeypatch, exact_permutation=False
+    )
+    output_hdf5 = tmp_path / "nonexact.h5"
+    outcome = driver.run_phase_b(
+        fixture=tmp_path / "fixture",
+        fc3_full=tmp_path / "fc3.full.hdf5",
+        output_json=tmp_path / "nonexact.json",
+        output_hdf5=output_hdf5,
+        campaign_manifest_sha256="0" * 64,
+    )
+    assert outcome["phase_b_certified"]
+    assert outcome["checks"]["mapping_certification"]
+    assert outcome["checks"]["permutation_support_complete"]
+    assert outcome["checks"]["permutation_roundoff_bound"]
+    assert "permutation_exact" not in outcome["checks"]
+    assert not outcome["diagnostics"]["permutation"]["exact_bitwise_equality"]
+    assert outcome["array_hashes"]["solver_coefficients"] is not None
+    with h5py.File(output_hdf5, "r") as handle:
+        assert "solver_coefficients" in handle
+        np.testing.assert_array_equal(handle["indices"][...], indices)
+        np.testing.assert_array_equal(handle["values"][...], values)
+        np.testing.assert_array_equal(
+            handle["solver_coefficients"][...], coefficients
+        )
+        metadata = json.loads(
+            bytes(
+                np.asarray(handle["metadata_json"][...], dtype=np.uint8)
+            ).decode("ascii")
+        )
+    assert not metadata["diagnostics"]["permutation"]["exact_bitwise_equality"]
+
+
+def test_failed_mapping_is_archived_without_sparse_scaling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_bounded_pipeline(
+        monkeypatch,
+        exact_permutation=False,
+        mapping_certified=False,
+    )
     monkeypatch.setattr(
         driver,
         "scale_device_fc3",
@@ -322,8 +387,24 @@ def test_failed_exact_permutation_is_archived_without_sparse_scaling(
         campaign_manifest_sha256="0" * 64,
     )
     assert not outcome["phase_b_certified"]
+    assert outcome["checks"]["range_certification"]
+    assert not outcome["checks"]["mapping_certification"]
+    assert outcome["checks"]["permutation_support_complete"]
+    assert not outcome["checks"]["permutation_roundoff_bound"]
+    assert not outcome["diagnostics"]["permutation"]["exact_bitwise_equality"]
+    assert outcome["array_hashes"]["solver_coefficients"] is None
+    assert outcome["identities"]["sparse_vertex_storage_sha256"] is None
     with h5py.File(output_hdf5, "r") as handle:
         assert "solver_coefficients" not in handle
+
+
+def test_campaign_next_gate_depends_on_phase_b_certification() -> None:
+    assert campaign._next_gate(True) == (
+        "remote one-bubble/one-shot timing and memory preflight"
+    )
+    failed_gate = campaign._next_gate(False)
+    assert "scientific failure" in failed_gate
+    assert "before one-bubble work" in failed_gate
 
 
 def test_archive_tamper_is_detected(

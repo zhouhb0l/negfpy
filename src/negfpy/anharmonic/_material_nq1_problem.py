@@ -211,9 +211,13 @@ def _validate_mapped_fc3(
             "FC3 device mapping used forbidden support-changing operations: "
             f"{changed!r}."
         )
-    if not report.permutation_tolerance_passed or not report.exact_permutation_equality:
+    if (
+        report.permutation_missing_count != 0
+        or not report.permutation_tolerance_passed
+    ):
         raise MaterialNQ1ProblemError(
-            "FC3 device mapping lacks exact permutation certification."
+            "FC3 device mapping lacks complete, roundoff-bounded "
+            "permutation certification."
         )
 
     expected_report_hash = domain_digest(
