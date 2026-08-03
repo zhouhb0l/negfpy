@@ -7,13 +7,17 @@ from dataclasses import dataclass, field
 from itertools import permutations
 import re
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
 
 from negfpy.core.types import Device1D, LeadBlocks
 
 from .grid import SignedFrequencyGrid
+
+
+if TYPE_CHECKING:
+    from .sparse_cubic import SparseCubicVertex
 
 
 Array = np.ndarray
@@ -437,12 +441,17 @@ class HarmonicReservoir:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class CubicSCBAProblem:
-    """Complete dense cubic-SCBA problem in dimensionless solver units."""
+    """Complete cubic-SCBA problem in dimensionless solver units.
+
+    The harmonic Green-function state remains dense.  ``vertex`` may retain
+    either the dense correctness representation or the exact sparse cubic
+    support without changing the solver call signatures.
+    """
 
     device: Device1D
     left: HarmonicReservoir
     right: HarmonicReservoir
-    vertex: DenseCubicVertex
+    vertex: DenseCubicVertex | SparseCubicVertex
     grid: SignedFrequencyGrid
     scale: SolverScale = field(default_factory=SolverScale)
 
@@ -453,8 +462,15 @@ class CubicSCBAProblem:
             raise TypeError("left must be a HarmonicReservoir instance.")
         if not isinstance(self.right, HarmonicReservoir):
             raise TypeError("right must be a HarmonicReservoir instance.")
-        if not isinstance(self.vertex, DenseCubicVertex):
-            raise TypeError("vertex must be a DenseCubicVertex instance.")
+        # ``sparse_cubic`` imports ``DenseCubicVertex`` to provide explicit
+        # conversion helpers, so keep this runtime import late and avoid a
+        # module-import cycle.
+        from .sparse_cubic import SparseCubicVertex
+
+        if not isinstance(self.vertex, (DenseCubicVertex, SparseCubicVertex)):
+            raise TypeError(
+                "vertex must be a DenseCubicVertex or SparseCubicVertex instance."
+            )
         if not isinstance(self.grid, SignedFrequencyGrid):
             raise TypeError("grid must be a SignedFrequencyGrid instance.")
         if not isinstance(self.scale, SolverScale):

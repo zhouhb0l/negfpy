@@ -73,6 +73,9 @@ def test_validate_full_fc3_and_detect_permutation_failure_without_mutation() -> 
     report = validate_fc3(data)
     assert report.passed
     assert report.permutation_complete
+    assert report.source_fc3_content_sha256 == data.provenance[
+        "source_fc3_content_sha256"
+    ]
     assert report.metrics["permutation_max_abs"] < 1.0e-12
 
     broken = values.copy()
@@ -82,6 +85,17 @@ def test_validate_full_fc3_and_detect_permutation_failure_without_mutation() -> 
     broken_report = validate_fc3(broken_data)
     assert not broken_report.permutation_valid
     np.testing.assert_array_equal(broken_data.values, original)
+
+
+def test_declared_fc3_content_identity_cannot_spoof_another_tensor() -> None:
+    values = np.ones((1, 1, 1, 3, 3, 3))
+
+    with pytest.raises(ValueError, match="conflicts with the canonical FC3"):
+        FC3Data(
+            values=values,
+            masses=[1.0],
+            provenance={"source_fc3_content_sha256": "0" * 64},
+        )
 
 
 def test_validate_reports_finite_mass_and_mapping_errors() -> None:

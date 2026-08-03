@@ -253,6 +253,32 @@ class FC3Data:
         )
         object.__setattr__(self, "provenance", _freeze_mapping(self.provenance))
 
+        # Canonicalizable inputs carry their physics-content identity from the
+        # first immutable boundary onward.  Deliberately malformed FC3Data is
+        # still constructible for non-mutating validation; validate_fc3 will
+        # report why an identity could not be formed.
+        from ._canonical import fc3_content_sha256, validate_sha256
+
+        try:
+            content_sha256 = fc3_content_sha256(self)
+        except (TypeError, ValueError):
+            content_sha256 = None
+        declared = self.provenance.get("source_fc3_content_sha256")
+        if declared is not None:
+            declared = validate_sha256(
+                declared,
+                name="source_fc3_content_sha256",
+            )
+            if content_sha256 is not None and declared != content_sha256:
+                raise ValueError(
+                    "Declared source_fc3_content_sha256 conflicts with the "
+                    "canonical FC3 content."
+                )
+        elif content_sha256 is not None:
+            provenance = dict(self.provenance)
+            provenance["source_fc3_content_sha256"] = content_sha256
+            object.__setattr__(self, "provenance", _freeze_mapping(provenance))
+
     @property
     def fc3(self) -> Array:
         """Alias matching phono3py's name for the tensor."""
@@ -356,6 +382,7 @@ class FC3ValidationReport:
     warnings: tuple[str, ...] = ()
     metrics: Mapping[str, float] = field(default_factory=dict)
     checked_permutations: tuple[str, ...] = ()
+    source_fc3_content_sha256: str | None = None
 
     def __post_init__(self) -> None:
         errors = tuple(str(value) for value in self.errors)
@@ -378,6 +405,19 @@ class FC3ValidationReport:
             "checked_permutations",
             tuple(str(value) for value in self.checked_permutations),
         )
+        content_sha256 = self.source_fc3_content_sha256
+        if content_sha256 is not None:
+            from ._canonical import validate_sha256
+
+            content_sha256 = validate_sha256(
+                content_sha256,
+                name="source_fc3_content_sha256",
+            )
+        object.__setattr__(
+            self,
+            "source_fc3_content_sha256",
+            content_sha256,
+        )
 
     @property
     def passed(self) -> bool:
@@ -388,6 +428,7 @@ class FC3ValidationReport:
             and self.units_valid
             and self.mapping_valid
             and self.permutation_valid
+            and self.source_fc3_content_sha256 is not None
             and not self.errors
         )
 
@@ -409,7 +450,7 @@ class FC3ValidationReport:
 
 
 def _finite_numeric(array: Array) -> bool:
-    if array.dtype.kind not in "biufc":
+    if array.dtype.kind not in "iufc" or array.dtype.kind == "b":
         return False
     return bool(np.all(np.isfinite(array)))
 
@@ -540,6 +581,29 @@ def validate_fc3(
         "permutation_rtol": float(permutation_rtol),
     }
     values = np.asarray(data.values)
+
+    source_fc3_content_sha256: str | None = None
+    try:
+        from ._canonical import fc3_content_sha256, validate_sha256
+
+        source_fc3_content_sha256 = fc3_content_sha256(data)
+        declared_content_sha256 = data.provenance.get(
+            "source_fc3_content_sha256"
+        )
+        if declared_content_sha256 is None:
+            errors.append(
+                "FC3 provenance is missing source_fc3_content_sha256."
+            )
+        elif validate_sha256(
+            declared_content_sha256,
+            name="source_fc3_content_sha256",
+        ) != source_fc3_content_sha256:
+            errors.append(
+                "FC3 provenance source_fc3_content_sha256 does not match "
+                "the canonical FC3 content."
+            )
+    except (TypeError, ValueError) as exc:
+        errors.append(f"FC3 content identity failed: {exc}")
 
     dimension_valid = True
     ns: int | None = None
@@ -735,6 +799,7 @@ def validate_fc3(
         warnings=tuple(warnings),
         metrics=metrics,
         checked_permutations=checked_permutations,
+        source_fc3_content_sha256=source_fc3_content_sha256,
     )
 
 

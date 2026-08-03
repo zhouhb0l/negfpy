@@ -1,4 +1,4 @@
-r"""Dense cubic Born self-energy on a signed, uniform frequency grid.
+r"""Cubic Born self-energy on a signed, uniform frequency grid.
 
 The implementation follows Eq. (8) of Guo et al.,
 Phys. Rev. B 102, 195412 (2020), using the convention
@@ -35,12 +35,16 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import partial
 import os
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 
 from .grid import SignedFrequencyGrid
 from .types import DenseCubicVertex
+
+
+if TYPE_CHECKING:
+    from .sparse_cubic import SparseCubicVertex
 
 
 Array = np.ndarray
@@ -389,8 +393,28 @@ def _cubic_bubble_fft(
     )
 
 
+def cubic_vertex_support(
+    vertex: DenseCubicVertex | SparseCubicVertex,
+) -> Array:
+    """Return exact ordered nonzero cubic indices without densifying.
+
+    Dense vertices retain their historical row-major ``argwhere`` ordering;
+    sparse vertices are already required to use the same lexicographic order.
+    The returned sparse view is read-only, while the dense result is a new
+    array as before.
+    """
+
+    from .sparse_cubic import SparseCubicVertex
+
+    if isinstance(vertex, SparseCubicVertex):
+        return vertex.indices
+    if isinstance(vertex, DenseCubicVertex):
+        return np.argwhere(np.abs(vertex.values) > 0.0)
+    raise TypeError("vertex must be a DenseCubicVertex or SparseCubicVertex.")
+
+
 def cubic_lesser_greater(
-    vertex: DenseCubicVertex,
+    vertex: DenseCubicVertex | SparseCubicVertex,
     green_lesser: Array,
     green_greater: Array,
     grid: SignedFrequencyGrid,
@@ -398,7 +422,7 @@ def cubic_lesser_greater(
     backend: Backend = "serial",
     max_workers: int | None = None,
 ) -> tuple[Array, Array]:
-    """Return the dense cubic ``(Sigma_lesser, Sigma_greater)`` pair.
+    """Return the cubic ``(Sigma_lesser, Sigma_greater)`` pair.
 
     The rectangle-rule weight ``Delta omega / (2 pi)`` and the fixed ``i/2``
     diagrammatic prefactor are applied internally.  There is deliberately no
@@ -406,17 +430,34 @@ def cubic_lesser_greater(
     output-frequency slices while preserving the serial summation order within
     every slice.  ``backend="fft"`` uses a zero-padded linear convolution and
     is tested against the direct serial oracle.  The default remains
-    ``"serial"``.
+    ``"serial"``.  Exact sparse vertices dispatch to their direct kernel for
+    ``"serial"`` and ``"threaded"`` (threaded sparse contraction is not yet
+    enabled), and to their zero-padded implementation for ``"fft"``.
     """
 
-    if not isinstance(vertex, DenseCubicVertex):
-        raise TypeError("vertex must be a DenseCubicVertex.")
+    # The sparse module imports ``DenseCubicVertex`` for explicit conversion,
+    # so import its runtime type and implementation only at this dispatch
+    # boundary.
+    from .sparse_cubic import SparseCubicVertex, cubic_sparse_lesser_greater
+
+    if not isinstance(vertex, (DenseCubicVertex, SparseCubicVertex)):
+        raise TypeError("vertex must be a DenseCubicVertex or SparseCubicVertex.")
     if not isinstance(grid, SignedFrequencyGrid):
         raise TypeError("grid must be a SignedFrequencyGrid.")
     selected_backend, selected_workers = _validated_execution(
         backend,
         max_workers,
     )
+
+    if isinstance(vertex, SparseCubicVertex):
+        sparse_backend = "fft" if selected_backend == "fft" else "direct"
+        return cubic_sparse_lesser_greater(
+            vertex,
+            green_lesser,
+            green_greater,
+            grid,
+            backend=sparse_backend,
+        )
 
     lesser = _validated_green(
         green_lesser,
@@ -456,6 +497,7 @@ __all__ = [
     "FFT_ACTIVATION_MINIMUM_SPEEDUP",
     "cubic_fft_scratch_bytes",
     "cubic_lesser_greater",
+    "cubic_vertex_support",
     "cubic_worker_scratch_bytes",
     "resolved_worker_count",
 ]

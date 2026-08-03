@@ -483,9 +483,9 @@ def test_result_records_reproducible_numerical_and_input_provenance() -> None:
     assert metadata["temperature_left"] == 0.8
     assert metadata["retarded_strategy"] == "causal_hilbert"
     assert metadata["source_tree_sha256"]
-    assert metadata["package_version"] == "1.0.0"
-    assert metadata["declared_package_version"] == "1.0.0"
-    assert metadata["installed_package_version"] == "1.0.0"
+    assert metadata["package_version"] == "2.0.0.dev0"
+    assert metadata["declared_package_version"] == "2.0.0.dev0"
+    assert metadata["installed_package_version"] == "2.0.0.dev0"
     assert metadata["package_version_consistent"]
     assert metadata["git_dirty"] in (True, False, "unknown")
     hashes = metadata["input_hashes"]
@@ -519,8 +519,8 @@ def test_installed_wheel_metadata_is_the_version_declaration_without_pyproject(
     monkeypatch.setattr(Path, "is_file", without_project_file)
     provenance = code_provenance()
 
-    assert provenance["installed_package_version"] == "1.0.0"
-    assert provenance["declared_package_version"] == "1.0.0"
+    assert provenance["installed_package_version"] == "2.0.0.dev0"
+    assert provenance["declared_package_version"] == "2.0.0.dev0"
     assert provenance["package_version_consistent"] is True
 
 

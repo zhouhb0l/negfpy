@@ -64,10 +64,19 @@ def _cubic_execution_details(
     problem: CubicSCBAProblem,
     config: SCBAConfig,
 ) -> tuple[str, str, int]:
-    """Return the actual dense cubic kernel, backend, and worker count."""
+    """Return the actual cubic kernel, backend, and worker count."""
 
-    if not np.any(problem.vertex.values):
+    from .sparse_cubic import SparseCubicVertex, cubic_vertex_is_zero
+
+    if cubic_vertex_is_zero(problem.vertex):
         return "zero_vertex", "serial", 1
+    if isinstance(problem.vertex, SparseCubicVertex):
+        if config.backend == "fft":
+            return "sparse_zero_padded_fft", "fft", 1
+        # The first sparse integration deliberately routes a threaded request
+        # through the deterministic direct oracle.  Metadata records the
+        # effective serial execution rather than claiming unused workers.
+        return "sparse_grouped_direct", "serial", 1
     if problem.ndof == 1:
         return "scalar_np_convolve", "serial", 1
     if config.backend == "serial":
@@ -95,12 +104,22 @@ def _available_memory_bytes() -> int | None:
 
 
 def _guard_dense_memory(problem: CubicSCBAProblem, config: SCBAConfig) -> int:
-    """Apply the conservative dense-memory preflight from the release plan."""
+    """Apply the conservative full-state memory preflight."""
+
+    from .sparse_cubic import SparseCubicVertex
 
     stored_state = estimate_dense_memory_bytes(
         problem.grid.n_points,
         problem.ndof,
     )
+    if isinstance(problem.vertex, SparseCubicVertex):
+        # Green functions, contact spectra, and Dyson operators remain dense;
+        # only the cubic Hamiltonian storage changes.  Include its immutable
+        # canonical arrays explicitly without materializing D^3 storage.
+        stored_state += int(
+            problem.vertex.indices.nbytes
+            + problem.vertex.coefficients.nbytes
+        )
     _, _, workers = _cubic_execution_details(problem, config)
     contraction_scratch = (
         cubic_fft_scratch_bytes(problem.grid.n_points, problem.ndof)
@@ -126,8 +145,11 @@ def _guard_dense_memory(problem: CubicSCBAProblem, config: SCBAConfig) -> int:
     fraction = float(getattr(config, "max_memory_fraction", 0.70))
     allow = bool(getattr(config, "allow_memory_overcommit", False))
     if available is not None and predicted > fraction * available and not allow:
+        storage_label = (
+            "Sparse" if isinstance(problem.vertex, SparseCubicVertex) else "Dense"
+        )
         raise MemoryError(
-            "Dense SCBA preflight predicts "
+            f"{storage_label} SCBA preflight predicts "
             f"{predicted / 2**30:.2f} GiB, exceeding {fraction:.0%} of the "
             f"currently available {available / 2**30:.2f} GiB. "
             "Reduce the grid/device size or explicitly allow memory overcommit."
@@ -290,6 +312,12 @@ def _metadata(
     initialization_hash: str,
     predicted_memory_bytes: int,
 ) -> dict[str, Any]:
+    from .sparse_cubic import (
+        SparseCubicVertex,
+        cubic_vertex_is_zero,
+        cubic_vertex_max_abs,
+    )
+
     provenance = code_provenance()
     input_hashes = problem_input_hashes(problem)
     input_hashes["configuration"] = configuration_hash(config)
@@ -323,9 +351,12 @@ def _metadata(
             )
             for item in threadpool_info()
         )
-    return {
+    sparse_vertex = isinstance(problem.vertex, SparseCubicVertex)
+    metadata = {
         "formalism": "cubic_bubble_scba_guo_prb102_195412",
-        "certification_contract": "dense_v0.1",
+        "certification_contract": (
+            "sparse_v0.3_development" if sparse_vertex else "dense_v0.1"
+        ),
         "method": method,
         "initialization": initialization,
         "vertex_convention": "H3=(1/3!)*sum(Psi_abc*u_a*u_b*u_c)",
@@ -391,8 +422,8 @@ def _metadata(
         "current_scale": problem.scale.current_scale,
         "scale_metadata": dict(problem.scale.metadata),
         "vertex_metadata": dict(problem.vertex.metadata),
-        "vertex_nonzero": bool(np.any(problem.vertex.values != 0.0)),
-        "vertex_max_abs": float(np.max(np.abs(problem.vertex.values))),
+        "vertex_nonzero": not cubic_vertex_is_zero(problem.vertex),
+        "vertex_max_abs": cubic_vertex_max_abs(problem.vertex),
         "input_hashes": input_hashes,
         "predicted_peak_memory_bytes": predicted_memory_bytes,
         **provenance,
@@ -402,6 +433,22 @@ def _metadata(
         "python": platform.python_version(),
         "platform": platform.platform(),
     }
+    if sparse_vertex:
+        metadata.update(
+            {
+                "vertex_storage_kind": "sparse",
+                "vertex_nnz": problem.vertex.nnz,
+                "vertex_support_density": problem.vertex.support_density,
+                "vertex_physics_sha256": problem.vertex.cubic_physics_sha256,
+                "vertex_storage_sha256": problem.vertex.vertex_storage_sha256,
+                "sparse_threaded_execution": (
+                    "serial_direct_fallback"
+                    if config.backend == "threaded"
+                    else "not_requested"
+                ),
+            }
+        )
+    return metadata
 
 
 def _finalize_result(
@@ -447,6 +494,7 @@ def _finalize_result(
         and method == "scba"
         and diagnostics.release_certified
         and provisional.has_release_certifying_provenance
+        and provisional.metadata["certification_contract"] == "dense_v0.1"
     )
     return replace(
         provisional,
@@ -551,17 +599,88 @@ def solve_scba(
         config,
     )
 
+    # The v2 sparse-material checkpoint layer is private and context-local.
+    # Ordinary calls see ``None`` and retain the established dense/sparse
+    # execution path without adding checkpoint controls to this public API.
+    from ._checkpoint_v2 import (
+        SCBAContinuationState,
+        _active_solver_checkpoint_session,
+    )
+
+    checkpoint_session = _active_solver_checkpoint_session()
+    resume_state = (
+        None
+        if checkpoint_session is None
+        else checkpoint_session.begin(
+            problem,
+            config,
+            sigma_lesser,
+            sigma_greater,
+        )
+    )
+
     history: list[SCBAIteration] = []
     previous_green: KeldyshSpectrum | None = None
     previous_sigma_residual: float | None = None
     residual_increase_streak = 0
     mixing = config.mixing
     consecutive = 0
+    start_iteration = 1
+    if resume_state is not None:
+        sigma_lesser = np.array(
+            resume_state.sigma_lesser,
+            dtype=np.complex128,
+            copy=True,
+        )
+        sigma_greater = np.array(
+            resume_state.sigma_greater,
+            dtype=np.complex128,
+            copy=True,
+        )
+        history = list(resume_state.history)
+        continuation = resume_state.continuation
+        mixing = continuation.mixing
+        previous_sigma_residual = continuation.previous_sigma_residual
+        residual_increase_streak = continuation.residual_increase_streak
+        consecutive = continuation.consecutive_passes
+        start_iteration = len(history) + 1
+
+        if history:
+            # The persisted pair is the mixed input to the last durable
+            # iteration. Replaying only its deterministic Dyson/bubble work
+            # reconstructs the next mixed pair and previous Green function;
+            # the integrity-protected history remains authoritative and is not
+            # appended twice.
+            replay_green, _ = _solve_green(
+                problem,
+                left,
+                right,
+                sigma_lesser,
+                sigma_greater,
+                config,
+            )
+            replay_lesser, replay_greater = cubic_lesser_greater(
+                problem.vertex,
+                replay_green.lesser,
+                replay_green.greater,
+                problem.grid,
+                backend=config.backend,
+                max_workers=config.max_workers,
+            )
+            sigma_lesser = (
+                (1.0 - mixing) * sigma_lesser + mixing * replay_lesser
+            )
+            sigma_greater = (
+                (1.0 - mixing) * sigma_greater + mixing * replay_greater
+            )
+            previous_green = replay_green
+        checkpoint_session.replay_complete()
+
     final_green: KeldyshSpectrum | None = None
     final_sigma: KeldyshSpectrum | None = None
     final_currents: CurrentReport | None = None
 
-    for iteration in range(1, config.max_iterations + 1):
+    for iteration in range(start_iteration, config.max_iterations + 1):
         green, sigma_pp = _solve_green(
             problem,
             left,
@@ -725,7 +844,7 @@ def solve_scba(
         final_sigma = sigma_pp
         final_currents = currents
         if consecutive >= config.consecutive_passes:
-            return _finalize_result(
+            result = _finalize_result(
                 problem,
                 config,
                 method="scba",
@@ -739,6 +858,33 @@ def solve_scba(
                 initialization=initialization,
                 initialization_hash=initialization_hash,
                 predicted_memory_bytes=predicted,
+            )
+            if checkpoint_session is not None:
+                checkpoint_session.record_terminal(
+                    sigma_lesser=sigma_lesser,
+                    sigma_greater=sigma_greater,
+                    history=tuple(history),
+                    continuation=SCBAContinuationState(
+                        mixing=mixing,
+                        previous_sigma_residual=previous_sigma_residual,
+                        residual_increase_streak=residual_increase_streak,
+                        consecutive_passes=consecutive,
+                    ),
+                    status="completed",
+                )
+            return result
+
+        if checkpoint_session is not None and iteration < config.max_iterations:
+            checkpoint_session.record_iteration(
+                sigma_lesser=sigma_lesser,
+                sigma_greater=sigma_greater,
+                history=tuple(history),
+                continuation=SCBAContinuationState(
+                    mixing=mixing,
+                    previous_sigma_residual=previous_sigma_residual,
+                    residual_increase_streak=residual_increase_streak,
+                    consecutive_passes=consecutive,
+                ),
             )
 
         sigma_lesser = (
@@ -767,6 +913,23 @@ def solve_scba(
         initialization_hash=initialization_hash,
         predicted_memory_bytes=predicted,
     )
+    if checkpoint_session is not None:
+        checkpoint_session.record_terminal(
+            sigma_lesser=final_sigma.lesser,
+            sigma_greater=final_sigma.greater,
+            history=tuple(history),
+            continuation=SCBAContinuationState(
+                mixing=history[-1].mixing,
+                previous_sigma_residual=history[-1].sigma_residual,
+                residual_increase_streak=residual_increase_streak,
+                consecutive_passes=history[-1].consecutive_passes,
+            ),
+            status="scientific_failure",
+            error_type="SCBAConvergenceError",
+            error_message=(
+                "SCBA exhausted the identically hashed maximum iteration count."
+            ),
+        )
     if config.on_nonconvergence == "raise":
         last = history[-1]
         raise SCBAConvergenceError(

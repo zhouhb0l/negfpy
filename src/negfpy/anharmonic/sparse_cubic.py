@@ -20,6 +20,7 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
+from scipy import sparse as scipy_sparse
 
 from ._canonical import canonical_encode, digest_bytes, domain_digest
 from .grid import SignedFrequencyGrid
@@ -290,61 +291,299 @@ def _validated_green(values: Any, *, grid: SignedFrequencyGrid, ndof: int, name:
     return array
 
 
-def _first_leg_matrices(vertex: SparseCubicVertex) -> tuple[Array, Array]:
-    active = np.unique(vertex.indices[:, 0]) if vertex.nnz else np.empty(0, dtype=np.int64)
-    matrices = np.zeros((len(active), vertex.ndof, vertex.ndof), dtype=np.float64)
-    lookup = {int(index): position for position, index in enumerate(active)}
-    for (a, c, d), coefficient in zip(vertex.indices, vertex.coefficients, strict=True):
-        matrices[lookup[int(a)], int(c), int(d)] = coefficient
-    return active, matrices
+@dataclass(frozen=True, slots=True)
+class _SparseContractionSchedule:
+    """Compiled active-basis slices used throughout one cubic evaluation.
 
-
-def _sparse_pair_contraction(vertex: SparseCubicVertex, first: Array, second: Array) -> Array:
-    """Evaluate one frequency pair using active first-leg slices.
-
-    This grouped reference avoids a rank-six tensor and keeps inactive output
-    rows exactly zero.  It is intended as the storage-correct oracle; a later
-    profiled schedule may optimize the same algebra without changing support.
+    ``active`` maps the compact schedule basis back to device degrees of
+    freedom.  Exact permutation symmetry guarantees that every second- and
+    third-leg index is in this same set, so neither the local contractions nor
+    the flattened CSR operator need an inactive ``D`` dimension.
     """
 
-    active, matrices = _first_leg_matrices(vertex)
-    result = np.zeros((vertex.ndof, vertex.ndof), dtype=np.complex128)
-    if not len(active):
-        return result
-    transformed = np.einsum("ce,acd,df->aef", first, matrices, second, optimize=True)
-    block = np.einsum("aef,bef->ab", transformed, matrices, optimize=True)
-    result[np.ix_(active, active)] = block
-    return result
+    ndof: int
+    active: Array
+    row_indices: tuple[Array, ...]
+    column_indices: tuple[Array, ...]
+    local_matrices: tuple[Array, ...]
+    flattened_first_legs: scipy_sparse.csr_matrix
+
+    @property
+    def numeric_storage_bytes(self) -> int:
+        """Return exact numeric payload bytes, excluding Python headers."""
+
+        dense_arrays = (
+            self.active,
+            *self.row_indices,
+            *self.column_indices,
+            *self.local_matrices,
+        )
+        csr = self.flattened_first_legs
+        return int(
+            sum(array.nbytes for array in dense_arrays)
+            + csr.data.nbytes
+            + csr.indices.nbytes
+            + csr.indptr.nbytes
+        )
+
+    @property
+    def reconstructed_first_leg_bytes(self) -> int:
+        """Payload formerly rebuilt as ``n_active x D x D`` per pair."""
+
+        return int(
+            len(self.active)
+            * self.ndof**2
+            * np.dtype(np.float64).itemsize
+        )
+
+    @property
+    def pair_multiply_add_count(self) -> int:
+        """Deterministic multiply-add model for one frequency pair.
+
+        The count models the two dense local matrix products and the repeated
+        CSR matvecs.  It intentionally excludes indexing, allocation, and FFT
+        work, and counts dense zeros inside a local rectangular slice because
+        BLAS evaluates those entries too.
+        """
+
+        active_count = len(self.active)
+        local_products = sum(
+            active_count * len(rows) * len(columns)
+            + active_count**2 * min(len(rows), len(columns))
+            for rows, columns in zip(
+                self.row_indices,
+                self.column_indices,
+                strict=True,
+            )
+        )
+        csr_products = active_count * self.flattened_first_legs.nnz
+        return int(local_products + csr_products)
 
 
-def _sparse_bubble_direct(vertex: SparseCubicVertex, green: Array, grid: SignedFrequencyGrid) -> Array:
+def _compiled_sparse_schedule(
+    vertex: SparseCubicVertex,
+) -> _SparseContractionSchedule:
+    """Compile exact local slices once, without materializing ``D^3``.
+
+    For one active first leg ``a``, only rows ``C_a`` and columns ``D_a`` of
+    ``Psi[a, :, :]`` are stored.  The second contraction uses a CSR matrix of
+    all first-leg slices in the compact active basis.  This preserves the
+    exact algebra while avoiding the previous reconstruction of an
+    ``n_active x D x D`` array for every frequency pair.
+    """
+
+    active = (
+        np.unique(vertex.indices[:, 0])
+        if vertex.nnz
+        else np.empty(0, dtype=np.int64)
+    )
+    active = np.asarray(active, dtype=np.int64)
+    active.setflags(write=False)
+    row_indices: list[Array] = []
+    column_indices: list[Array] = []
+    local_matrices: list[Array] = []
+
+    if vertex.nnz:
+        # Permutation validation in ``SparseCubicVertex`` guarantees that all
+        # three legs occur as first legs.  Search in the sorted active array is
+        # therefore an exact, vectorized global-to-local mapping.
+        compact_indices = np.searchsorted(active, vertex.indices).astype(
+            np.int64,
+            copy=False,
+        )
+        first_counts = np.bincount(
+            compact_indices[:, 0],
+            minlength=len(active),
+        )
+        first_offsets = np.empty(len(active) + 1, dtype=np.int64)
+        first_offsets[0] = 0
+        np.cumsum(first_counts, out=first_offsets[1:])
+        flattened_columns = (
+            compact_indices[:, 1] * len(active) + compact_indices[:, 2]
+        )
+        flattened = scipy_sparse.csr_matrix(
+            (
+                np.array(vertex.coefficients, dtype=np.float64, copy=True),
+                flattened_columns,
+                first_offsets,
+            ),
+            shape=(len(active), len(active) ** 2),
+            dtype=np.float64,
+            copy=True,
+        )
+        flattened.sort_indices()
+    else:
+        compact_indices = np.empty((0, 3), dtype=np.int64)
+        first_offsets = np.zeros(1, dtype=np.int64)
+        flattened = scipy_sparse.csr_matrix(
+            (0, 0), dtype=np.float64
+        )
+
+    for first_position in range(len(active)):
+        start = int(first_offsets[first_position])
+        stop = int(first_offsets[first_position + 1])
+        pairs = compact_indices[start:stop, 1:]
+        coefficients = vertex.coefficients[start:stop]
+        rows = np.unique(pairs[:, 0])
+        columns = np.unique(pairs[:, 1])
+        rows = np.asarray(rows, dtype=np.int64)
+        columns = np.asarray(columns, dtype=np.int64)
+        local = np.zeros((len(rows), len(columns)), dtype=np.float64)
+        local[
+            np.searchsorted(rows, pairs[:, 0]),
+            np.searchsorted(columns, pairs[:, 1]),
+        ] = coefficients
+        for value in (rows, columns, local):
+            value.setflags(write=False)
+        row_indices.append(rows)
+        column_indices.append(columns)
+        local_matrices.append(local)
+
+    # A frozen schedule must not retain mutable sparse payload arrays.
+    for value in (flattened.data, flattened.indices, flattened.indptr):
+        value.setflags(write=False)
+
+    return _SparseContractionSchedule(
+        ndof=vertex.ndof,
+        active=active,
+        row_indices=tuple(row_indices),
+        column_indices=tuple(column_indices),
+        local_matrices=tuple(local_matrices),
+        flattened_first_legs=flattened,
+    )
+
+
+def _sparse_pair_contraction(
+    vertex: SparseCubicVertex,
+    schedule: _SparseContractionSchedule,
+    first: Array,
+    second: Array,
+) -> Array:
+    """Evaluate one frequency pair in the compact active-DOF basis.
+
+    This grouped reference avoids a rank-six tensor.  Inactive output rows are
+    inserted exactly once by the calling bubble operation.
+    """
+
+    if not len(schedule.active):
+        return np.zeros((0, 0), dtype=np.complex128)
+    block = np.empty(
+        (len(schedule.active), len(schedule.active)), dtype=np.complex128
+    )
+    for output_row, (rows, columns, local) in enumerate(
+        zip(
+            schedule.row_indices,
+            schedule.column_indices,
+            schedule.local_matrices,
+            strict=True,
+        )
+    ):
+        # T_a[e,f] = sum_cd G1[c,e] Psi[a,c,d] G2[d,f].
+        # Choose the smaller intermediate without changing operand order.
+        if len(rows) <= len(columns):
+            transformed = (
+                first[rows, :].T @ (local @ second[columns, :])
+            )
+        else:
+            transformed = (
+                (first[rows, :].T @ local) @ second[columns, :]
+            )
+        block[output_row] = np.asarray(
+            schedule.flattened_first_legs @ transformed.reshape(-1),
+            dtype=np.complex128,
+        )
+    return block
+
+
+def _sparse_bubble_direct(
+    vertex: SparseCubicVertex,
+    schedule: _SparseContractionSchedule,
+    green: Array,
+    grid: SignedFrequencyGrid,
+) -> Array:
     result = np.zeros((grid.n_points, vertex.ndof, vertex.ndof), dtype=np.complex128)
+    if not len(schedule.active):
+        return result
+    projected_green = green[
+        np.ix_(
+            np.arange(grid.n_points, dtype=np.int64),
+            schedule.active,
+            schedule.active,
+        )
+    ]
     zero = grid.zero_index
     for output in range(grid.n_points):
         start = max(0, output + zero - (grid.n_points - 1))
         stop = min(grid.n_points - 1, output + zero)
-        accumulated = np.zeros((vertex.ndof, vertex.ndof), dtype=np.complex128)
+        accumulated = np.zeros(
+            (len(schedule.active), len(schedule.active)),
+            dtype=np.complex128,
+        )
         for first_index in range(start, stop + 1):
             second_index = output - first_index + zero
-            accumulated += _sparse_pair_contraction(vertex, green[first_index], green[second_index])
-        result[output] = 0.5j * grid.integration_weight * accumulated
+            accumulated += _sparse_pair_contraction(
+                vertex,
+                schedule,
+                projected_green[first_index],
+                projected_green[second_index],
+            )
+        result[
+            output,
+            schedule.active[:, None],
+            schedule.active,
+        ] = 0.5j * grid.integration_weight * accumulated
     return result
 
 
-def _sparse_bubble_fft(vertex: SparseCubicVertex, green: Array, grid: SignedFrequencyGrid) -> Array:
+def _sparse_bubble_fft(
+    vertex: SparseCubicVertex,
+    schedule: _SparseContractionSchedule,
+    green: Array,
+    grid: SignedFrequencyGrid,
+) -> Array:
     n_frequency = grid.n_points
+    result = np.zeros(
+        (n_frequency, vertex.ndof, vertex.ndof),
+        dtype=np.complex128,
+    )
+    if not len(schedule.active):
+        return result
     padded = 1 << (2 * n_frequency - 2).bit_length()
-    transformed_green = np.fft.fft(green, n=padded, axis=0)
-    transformed_bubble = np.empty((padded, vertex.ndof, vertex.ndof), dtype=np.complex128)
+    projected_green = green[
+        np.ix_(
+            np.arange(n_frequency, dtype=np.int64),
+            schedule.active,
+            schedule.active,
+        )
+    ]
+    transformed_green = np.fft.fft(projected_green, n=padded, axis=0)
+    del projected_green
+    transformed_bubble = np.empty(
+        (padded, len(schedule.active), len(schedule.active)),
+        dtype=np.complex128,
+    )
     for index in range(padded):
         transformed_bubble[index] = _sparse_pair_contraction(
             vertex,
+            schedule,
             transformed_green[index],
             transformed_green[index],
         )
+    del transformed_green
     full = np.fft.ifft(transformed_bubble, axis=0)
     start = grid.zero_index
-    return 0.5j * grid.integration_weight * full[start : start + n_frequency]
+    result[
+        np.ix_(
+            np.arange(n_frequency, dtype=np.int64),
+            schedule.active,
+            schedule.active,
+        )
+    ] = (
+        0.5j
+        * grid.integration_weight
+        * full[start : start + n_frequency]
+    )
+    return result
 
 
 def cubic_sparse_lesser_greater(
@@ -369,8 +608,14 @@ def cubic_sparse_lesser_greater(
         raise ValueError("backend must be 'direct' or 'fft'.")
     lesser = _validated_green(green_lesser, grid=grid, ndof=vertex.ndof, name="green_lesser")
     greater = _validated_green(green_greater, grid=grid, ndof=vertex.ndof, name="green_greater")
-    operation = _sparse_bubble_direct if backend == "direct" else _sparse_bubble_fft
-    return operation(vertex, lesser, grid), operation(vertex, greater, grid)
+    schedule = _compiled_sparse_schedule(vertex)
+    operation = (
+        _sparse_bubble_direct if backend == "direct" else _sparse_bubble_fft
+    )
+    return (
+        operation(vertex, schedule, lesser, grid),
+        operation(vertex, schedule, greater, grid),
+    )
 
 
 __all__ = [

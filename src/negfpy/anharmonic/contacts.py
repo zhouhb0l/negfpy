@@ -7,6 +7,11 @@ from scipy.optimize import minimize_scalar
 
 from negfpy.core.types import LeadBlocks
 from ._harmonic import build_retarded_contacts
+from .acoustic_contacts import (
+    _build_acoustic_contact_descriptor,
+    _classify_lead_spectrum,
+    _reservoir_keldysh_from_retarded_acoustic,
+)
 from .grid import SignedFrequencyGrid
 from .types import CubicSCBAProblem, KeldyshSpectrum
 
@@ -255,25 +260,65 @@ def build_contact_spectra(
 ) -> tuple[KeldyshSpectrum, KeldyshSpectrum]:
     """Return signed-frequency Keldysh self-energies for both contacts."""
 
-    _require_resolved_lead_gap(problem.left.lead)
-    _require_resolved_lead_gap(problem.right.lead)
+    left_classification = _classify_lead_spectrum(problem.left.lead)
+    right_classification = _classify_lead_spectrum(problem.right.lead)
+    for side, classification in (
+        ("left", left_classification),
+        ("right", right_classification),
+    ):
+        if classification.classification not in {"gapped", "acoustic"}:
+            detail = "; ".join(classification.failure_reasons) or "unspecified failure"
+            raise ValueError(
+                f"{side.capitalize()} harmonic lead is classified as "
+                f"{classification.classification}: {detail}."
+            )
+
+    # Preserve the established v0.1 construction byte-for-byte when both
+    # reservoirs are gapped.  In particular this retains its independent gap
+    # guard, zero-broadening tolerance, and signed Bose path.
+    both_gapped = (
+        left_classification.classification == "gapped"
+        and right_classification.classification == "gapped"
+    )
+    if both_gapped:
+        _require_resolved_lead_gap(problem.left.lead)
+        _require_resolved_lead_gap(problem.right.lead)
     sigma_left_r, sigma_right_r = build_retarded_contacts(
         problem,
         eta_lead,
         surface_gf_method=surface_gf_method,
     )
-    left = reservoir_keldysh_from_retarded(
-        problem.grid,
-        sigma_left_r,
-        problem.left.temperature,
-        zero_gamma_atol=zero_gamma_atol,
-    )
-    right = reservoir_keldysh_from_retarded(
-        problem.grid,
-        sigma_right_r,
-        problem.right.temperature,
-        zero_gamma_atol=zero_gamma_atol,
-    )
+
+    def construct(side: str) -> KeldyshSpectrum:
+        reservoir = problem.left if side == "left" else problem.right
+        retarded = sigma_left_r if side == "left" else sigma_right_r
+        classification = (
+            left_classification if side == "left" else right_classification
+        )
+        if classification.classification == "gapped":
+            return reservoir_keldysh_from_retarded(
+                problem.grid,
+                retarded,
+                reservoir.temperature,
+                zero_gamma_atol=zero_gamma_atol,
+            )
+        descriptor = _build_acoustic_contact_descriptor(
+            reservoir,
+            side=side,
+            ndof=problem.ndof,
+            eta_lead=eta_lead,
+            surface_gf_method=surface_gf_method,
+            spectral_classification=classification,
+        )
+        return _reservoir_keldysh_from_retarded_acoustic(
+            problem.grid,
+            retarded,
+            reservoir.temperature,
+            descriptor,
+        )
+
+    left = construct("left")
+    right = construct("right")
     return left, right
 
 

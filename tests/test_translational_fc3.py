@@ -6,6 +6,11 @@ from types import MappingProxyType
 import numpy as np
 import pytest
 
+from negfpy.anharmonic._canonical import (
+    crystal_mapping_content_sha256,
+    fc3_content_sha256,
+    primitive_crystal_content_sha256,
+)
 from negfpy.anharmonic.crystal import CrystalCell, CrystalMapping
 from negfpy.anharmonic.fc3 import FC3Data, validate_fc3
 from negfpy.anharmonic.translational_fc3 import (
@@ -382,6 +387,15 @@ def test_compact_conversion_preserves_each_raw_and_shortest_vector_term() -> Non
     assert converted.provenance["fc3_nonzero_indices_applied"] is False
     assert converted.provenance["raw_atom_triplet_count"] == 4
     assert converted.provenance["expanded_term_count"] == 9
+    assert converted.provenance["source_fc3_content_sha256"] == (
+        fc3_content_sha256(data)
+    )
+    assert converted.provenance["primitive_crystal_content_sha256"] == (
+        primitive_crystal_content_sha256(mapping)
+    )
+    assert converted.provenance[
+        "fc3_crystal_mapping_content_sha256"
+    ] == crystal_mapping_content_sha256(mapping)
     assert {term.source_indices for term in converted.terms} == {
         (0, 0, 0),
         (0, 0, 1),

@@ -261,7 +261,7 @@ def test_zero_frequency_broadening_is_rejected_for_v1() -> None:
         reservoir_keldysh_from_retarded(grid, retarded, temperature=1.0)
 
 
-def test_v1_rejects_acoustic_lead_even_when_gamma_at_zero_vanishes() -> None:
+def test_acoustic_lead_uses_analytic_zero_frequency_limit() -> None:
     lead = LeadBlocks(d00=np.array([[2.0]]), d01=np.array([[-1.0]]))
     device = Device1D(onsite_blocks=[np.array([[2.0]])], coupling_blocks=[])
     problem = CubicSCBAProblem(
@@ -273,8 +273,18 @@ def test_v1_rejects_acoustic_lead_even_when_gamma_at_zero_vanishes() -> None:
     )
 
     assert abs(minimum_lead_frequency_squared(lead)) < 1.0e-14
-    with pytest.raises(ValueError, match="spectrally gapped"):
-        build_contact_spectra(problem, eta_lead=1.0e-6)
+    left, right = build_contact_spectra(
+        problem,
+        eta_lead=0.05,
+        surface_gf_method="analytic_diagonal",
+    )
+    zero = problem.grid.zero_index
+    assert np.all(np.isfinite(left.lesser))
+    assert np.all(np.isfinite(right.lesser))
+    assert left.lesser[zero, 0, 0].imag < 0.0
+    assert right.lesser[zero, 0, 0].imag < 0.0
+    np.testing.assert_allclose(left.lesser[zero], left.greater[zero])
+    np.testing.assert_allclose(right.lesser[zero], right.greater[zero])
 
 
 def test_gap_check_resolves_small_positive_pinning() -> None:

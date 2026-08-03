@@ -234,6 +234,8 @@ def _indices_token(values: Any) -> str:
 def problem_input_hashes(problem: CubicSCBAProblem) -> dict[str, str]:
     """Return SHA256 hashes for every numerical input family."""
 
+    from .sparse_cubic import SparseCubicVertex
+
     device_hash = _array_digest(
         (*problem.device.onsite_blocks, *problem.device.coupling_blocks),
         extra=(
@@ -269,10 +271,17 @@ def problem_input_hashes(problem: CubicSCBAProblem) -> dict[str, str]:
             f"indices={_indices_token(problem.right.device_indices)};"
         ),
     )
-    vertex_digest = hashlib.sha256()
-    _update_array(vertex_digest, problem.vertex.values)
-    _update_value(vertex_digest, problem.vertex.metadata)
-    vertex_hash = vertex_digest.hexdigest()
+    if isinstance(problem.vertex, SparseCubicVertex):
+        # The sparse storage digest already binds ndof, canonical indices,
+        # coefficients, physics identity, and immutable metadata.  Crucially,
+        # this path never materializes a dense D^3 tensor.
+        vertex_hash = problem.vertex.vertex_storage_sha256
+    else:
+        # Preserve the established v1 dense identity byte-for-byte.
+        vertex_digest = hashlib.sha256()
+        _update_array(vertex_digest, problem.vertex.values)
+        _update_value(vertex_digest, problem.vertex.metadata)
+        vertex_hash = vertex_digest.hexdigest()
     grid_hash = _array_digest(
         (problem.grid.values,),
         extra=f"step={problem.grid.step!r};n={problem.grid.n_positive};",
@@ -291,6 +300,9 @@ def problem_input_hashes(problem: CubicSCBAProblem) -> dict[str, str]:
         "frequency_grid": grid_hash,
         "solver_scale": scale_hash,
     }
+    if isinstance(problem.vertex, SparseCubicVertex):
+        parts["cubic_vertex_physics"] = problem.vertex.cubic_physics_sha256
+        parts["cubic_vertex_storage"] = problem.vertex.vertex_storage_sha256
     combined = hashlib.sha256()
     for name in sorted(parts):
         combined.update(name.encode("ascii"))

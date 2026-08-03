@@ -48,6 +48,10 @@ from .bulk_three_phonon import (
     compute_three_phonon_interactions,
     compute_three_phonon_linewidths,
 )
+from .acoustic_contacts import (
+    HarmonicLeadClassification,
+    classify_harmonic_lead,
+)
 from .contacts import (
     bose_occupation_signed,
     broadening,
@@ -123,6 +127,14 @@ from .layered_validation import (
     compare_layered_harmonic_models,
     validate_layered_device_mapping,
     validate_layered_harmonic_model,
+)
+from .mapped_fc3 import (
+    DeviceMappedFC3,
+    FC3DeviceMappingReport,
+    MassNormalizedTranslationalFC3,
+    map_fc3_to_device,
+    mass_normalize_translational_fc3,
+    scale_device_fc3,
 )
 from .momentum import (
     GRID_INDEX_ORDER,
@@ -241,6 +253,7 @@ __all__ = [
     "FC3ValidationReport",
     "GridAddress",
     "HarmonicReservoir",
+    "HarmonicLeadClassification",
     "HilbertBackend",
     "InteractionBlockComparison",
     "InteractionStrengthComparison",
@@ -254,6 +267,7 @@ __all__ = [
     "LinewidthComparison",
     "LinewidthSubspaceComparison",
     "MassNormalizedFC3",
+    "MassNormalizedTranslationalFC3",
     "MomentumTriplet",
     "PhaseSpaceComparison",
     "Phono3pyReferenceSchemaError",
@@ -271,6 +285,8 @@ __all__ = [
     "SolverScale",
     "SpatialCurrentReport",
     "SparseCubicVertex",
+    "DeviceMappedFC3",
+    "FC3DeviceMappingReport",
     "TranslationalFC3",
     "TranslationalFC3ValidationReport",
     "UniformBZMesh",
@@ -292,6 +308,7 @@ __all__ = [
     "compare_phase_space",
     "compare_primitive_mappings",
     "compare_silicon_reference",
+    "classify_harmonic_lead",
     "compute_bulk_group_velocities",
     "compute_bulk_phonons",
     "compute_cumulative_thermal_conductivity",
@@ -325,6 +342,8 @@ __all__ = [
     "keldysh_identity_residual",
     "keldysh_tail_ratio",
     "mass_normalize_fc3",
+    "mass_normalize_translational_fc3",
+    "map_fc3_to_device",
     "minimum_bz_reciprocal_vector",
     "minimum_lead_frequency_squared",
     "negative_frequency_residual",
@@ -346,6 +365,7 @@ __all__ = [
     "shortest_bz_address_images",
     "solve_one_shot_born",
     "solve_scba",
+    "scale_device_fc3",
     "spectral_function",
     "spectral_moment_residual",
     "summarize_three_phonon_linewidths",

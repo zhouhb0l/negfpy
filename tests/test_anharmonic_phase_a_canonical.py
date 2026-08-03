@@ -17,6 +17,7 @@ from negfpy.anharmonic._canonical import (
     enumerate_direct_reciprocal_cosets,
     fc2_content_sha256,
     fc2_provenance_sha256,
+    fc3_content_sha256,
     normalize_positive_zero,
     primitive_crystal_content_sha256,
     row_cosets_sha256,
@@ -24,6 +25,7 @@ from negfpy.anharmonic._canonical import (
 )
 from negfpy.anharmonic.crystal import CrystalCell, CrystalMapping
 from negfpy.anharmonic.fc2 import FC2Data
+from negfpy.anharmonic.fc3 import FC3Data
 
 
 def _metadata_preimage(value: object) -> bytes:
@@ -336,6 +338,53 @@ def test_fc2_content_rejects_a_numeric_conversion_that_is_not_exact() -> None:
 
     with pytest.raises(ValueError, match="changes a numerical value"):
         fc2_content_sha256(_full_fc2(values=values))
+
+
+def test_fc3_identity_is_endian_and_signed_zero_stable_but_sensitive() -> None:
+    little = np.zeros((1, 1, 1, 3, 3, 3), dtype="<f8")
+    big = little.astype(">f8")
+    little[0, 0, 0, 0, 0, 0] = -0.0
+    left = FC3Data(
+        values=little,
+        masses=np.array([28.0855], dtype="<f8"),
+        p2s_map=np.array([0], dtype="<i8"),
+        s2p_map=np.array([0], dtype="<i8"),
+        version="4.4.0",
+        fc3_nonzero_indices=np.ones((1, 1, 1), dtype=np.byte),
+    )
+    right = FC3Data(
+        values=big,
+        masses=np.array([28.0855], dtype=">f8"),
+        p2s_map=np.array([0], dtype=">i8"),
+        s2p_map=np.array([0], dtype=">i8"),
+        version="4.4.0",
+        fc3_nonzero_indices=np.ones((1, 1, 1), dtype=np.byte),
+    )
+    changed = np.array(little, copy=True)
+    changed[0, 0, 0, 0, 0, 1] = 1.0
+
+    assert fc3_content_sha256(left) == fc3_content_sha256(right)
+    assert left.provenance["source_fc3_content_sha256"] == (
+        fc3_content_sha256(left)
+    )
+    assert fc3_content_sha256(left) != fc3_content_sha256(
+        FC3Data(
+            values=changed,
+            masses=[28.0855],
+            p2s_map=[0],
+            s2p_map=[0],
+            version="4.4.0",
+            fc3_nonzero_indices=np.ones((1, 1, 1), dtype=np.byte),
+        )
+    )
+
+
+def test_fc3_content_rejects_a_numeric_conversion_that_is_not_exact() -> None:
+    values = np.zeros((1, 1, 1, 3, 3, 3), dtype=np.int64)
+    values[0, 0, 0, 0, 0, 0] = (1 << 53) + 1
+
+    with pytest.raises(ValueError, match="changes a numerical value"):
+        fc3_content_sha256(FC3Data(values=values, masses=[28.0855]))
 
 
 def test_fc2_provenance_identity_excludes_paths_and_checks_duplicate_fields() -> None:

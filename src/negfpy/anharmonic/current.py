@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .cubic import cubic_vertex_support
 from .grid import SignedFrequencyGrid
 from .types import (
     CubicSCBAProblem,
@@ -185,7 +186,7 @@ def _harmonic_bond_current_is_valid(problem: CubicSCBAProblem) -> bool:
         None,
     )
     npl = problem.device.dof_per_layer
-    support = np.argwhere(np.abs(problem.vertex.values) > 0.0)
+    support = cubic_vertex_support(problem.vertex)
     for first, second, third in support:
         layers = {int(first) // npl, int(second) // npl, int(third) // npl}
         if len(layers) != 1:

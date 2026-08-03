@@ -26,6 +26,7 @@ from .current import (
 )
 from .grid import SignedFrequencyGrid
 from .retarded import retarded_from_keldysh
+from .sparse_cubic import cubic_vertex_is_zero
 from .types import (
     AnharmonicResult,
     CubicSCBAProblem,
@@ -796,7 +797,7 @@ def check_solution(
         abs(problem.left.temperature - problem.right.temperature)
         <= 1.0e-14 * temperature_scale
     )
-    zero_vertex = _max_abs(problem.vertex.values) == 0.0
+    zero_vertex = cubic_vertex_is_zero(problem.vertex)
     interacting_retarded_passivity_applicable = (
         equal_temperature or zero_vertex
     )

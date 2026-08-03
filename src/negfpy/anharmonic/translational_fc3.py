@@ -29,6 +29,12 @@ from typing import Any, Literal
 
 import numpy as np
 
+from ._canonical import (
+    crystal_mapping_content_sha256,
+    fc3_content_sha256,
+    primitive_crystal_content_sha256,
+    validate_sha256,
+)
 from .crystal import CrystalMapping, validate_crystal_mapping
 from .fc3 import FC3Data, validate_fc3
 
@@ -966,6 +972,21 @@ def convert_fc3_to_translational(
         name="translation_rtol",
     )
     _verify_data_mapping(data, mapping)
+    source_fc3_sha256 = fc3_content_sha256(data)
+    declared_source_fc3_sha256 = data.provenance.get(
+        "source_fc3_content_sha256"
+    )
+    if declared_source_fc3_sha256 is None:
+        raise ValueError("FC3Data is missing source_fc3_content_sha256.")
+    if validate_sha256(
+        declared_source_fc3_sha256,
+        name="source_fc3_content_sha256",
+    ) != source_fc3_sha256:
+        raise ValueError(
+            "FC3Data source_fc3_content_sha256 conflicts with its content."
+        )
+    primitive_crystal_sha256 = primitive_crystal_content_sha256(mapping)
+    fc3_mapping_sha256 = crystal_mapping_content_sha256(mapping)
     all_shortest = (
         derive_phono3py_all_shortest(
             mapping,
@@ -1165,6 +1186,9 @@ def convert_fc3_to_translational(
         "symmetrized": False,
         "corrected": False,
         "truncated": False,
+        "source_fc3_content_sha256": source_fc3_sha256,
+        "primitive_crystal_content_sha256": primitive_crystal_sha256,
+        "fc3_crystal_mapping_content_sha256": fc3_mapping_sha256,
         "source_fc3_provenance": data.provenance,
         "source_mapping_provenance": mapping.provenance,
     }

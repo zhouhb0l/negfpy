@@ -23,6 +23,7 @@ import numpy as np
 
 from .crystal import CrystalMapping, validate_crystal_mapping
 from .fc2 import FC2Data, validate_fc2
+from .fc3 import FC3Data
 
 
 Array = np.ndarray
@@ -425,6 +426,56 @@ def fc2_content_sha256(fc2: FC2Data) -> str:
     return hashlib.sha256(preimage).hexdigest()
 
 
+def fc3_content_sha256(fc3: FC3Data) -> str:
+    """Return the authoritative canonical raw-FC3 content identity.
+
+    The identity covers every first-class field that can affect FC3
+    interpretation or a later physical conversion.  Filesystem paths and
+    descriptive HDF5 provenance are deliberately excluded; the source
+    container hash remains a separate identity.
+    """
+
+    if not isinstance(fc3, FC3Data):
+        raise TypeError("fc3 must be an FC3Data instance.")
+    values = _exact_float64_array(fc3.values, name="FC3 values")
+    masses = _exact_float64_array(fc3.masses, name="FC3 masses")
+    p2s = (
+        None
+        if fc3.p2s_map is None
+        else _exact_int64_array(fc3.p2s_map, name="FC3 p2s map")
+    )
+    s2p = (
+        None
+        if fc3.s2p_map is None
+        else _exact_int64_array(fc3.s2p_map, name="FC3 s2p map")
+    )
+    nonzero_indices = (
+        None
+        if fc3.fc3_nonzero_indices is None
+        else _exact_int64_array(
+            fc3.fc3_nonzero_indices,
+            name="FC3 nonzero indices",
+        )
+    )
+    preimage = b"".join(
+        (
+            b"NEGFPY-FC3-CONTENT\x00",
+            _u16(1),
+            canonical_encode(values),
+            canonical_encode(masses),
+            canonical_encode(bool(fc3.compact)),
+            canonical_encode(p2s),
+            canonical_encode(s2p),
+            canonical_encode(fc3.units),
+            canonical_encode(fc3.mass_units),
+            canonical_encode(fc3.version),
+            canonical_encode(nonzero_indices),
+            canonical_encode(fc3.fc3_cutoff),
+        )
+    )
+    return hashlib.sha256(preimage).hexdigest()
+
+
 _FC2_PROVENANCE_KEYS = (
     "format",
     "source_sha256",
@@ -775,6 +826,7 @@ __all__ = [
     "enumerate_direct_reciprocal_cosets",
     "fc2_content_sha256",
     "fc2_provenance_sha256",
+    "fc3_content_sha256",
     "normalize_positive_zero",
     "primitive_crystal_content_sha256",
     "row_cosets_sha256",
