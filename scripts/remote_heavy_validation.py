@@ -45,9 +45,18 @@ EXPECTED_KNOWN_HOSTS_FILE = (
 EXPECTED_ED25519_FINGERPRINT = (
     "SHA256:sJide2AQhTe8oH2XWtayraDdUsde/LV2HOfUeMeWd70"
 )
-EXPECTED_ENV_LOCK_SHA256 = (
+TOY_ENV_LOCK_SHA256 = (
     "aca1a3f7eb7675adb5982d571005cc5ae65ed442b4972ad835f2d4fdf6fa33c1"
 )
+PHONO3PY_ENV_LOCK_SHA256 = (
+    "6d8e017b6f1ead8be3ec9fb8abb1c8c1d02fe0de852aad9cbfc69d08ce341bfc"
+)
+# Backward-compatible name used by the toy-release tests and reports.
+EXPECTED_ENV_LOCK_SHA256 = TOY_ENV_LOCK_SHA256
+ENVIRONMENT_LOCK_PROFILES = {
+    TOY_ENV_LOCK_SHA256: "toy-scba",
+    PHONO3PY_ENV_LOCK_SHA256: "phono3py-material",
+}
 REMOTE_ROOT_RELATIVE = "negfpy-validation"
 REMOTE_TOOLS_BIN = "/home/hangbo/micromamba/envs/negf-tools/bin"
 REMOTE_MICROMAMBA = "/home/hangbo/.local/bin/micromamba"
@@ -243,6 +252,17 @@ def _validate_session(session: str) -> str:
             "tmux session may contain only letters, digits, '.', '_' and '-'"
         )
     return session
+
+
+def validate_environment_lock_sha256(digest: str) -> str:
+    """Return the immutable profile for an explicitly approved lock digest."""
+
+    try:
+        return ENVIRONMENT_LOCK_PROFILES[digest]
+    except KeyError as error:
+        raise RemoteValidationError(
+            f"environment lock SHA256 is not approved: {digest}"
+        ) from error
 
 
 def _remote_relative_dir(commit: str) -> str:

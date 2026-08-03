@@ -48,8 +48,10 @@ def prepare(
         print(f"would prepare {staging}")
         return staging
     try:
+        candidate_sha = core._sha256(lock)
+        lock_profile = core.validate_environment_lock_sha256(candidate_sha)
         lock_sha = remote_heavy_lock.validate_explicit_lock(
-            lock, expected_sha256=core.EXPECTED_ENV_LOCK_SHA256
+            lock, expected_sha256=candidate_sha
         )
     except ValueError as error:
         raise core.RemoteValidationError(str(error)) from error
@@ -68,6 +70,7 @@ def prepare(
         {
             "schema": "negfpy.remote_validation.environment.v2",
             "created_utc": core._utc_now(),
+            "profile": lock_profile,
             "explicit_lock_sha256": lock_sha,
             "source_lock": str(environment_lock),
             "preparation_python": platform.python_version(),
@@ -80,6 +83,7 @@ def prepare(
             "created_utc": core._utc_now(),
             "source": {"commit": commit, "tree": tree, "dirty": False},
             "environment": {
+                "profile": lock_profile,
                 "explicit_lock": "environment-explicit.lock",
                 "explicit_lock_sha256": lock_sha,
                 "remote_prefix": f"~/{core._remote_relative_dir(commit)}/environment",

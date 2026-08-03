@@ -227,6 +227,27 @@ def test_committed_lock_pins_one_openmpi_and_matching_mpi4py() -> None:
     assert "mpich" not in text.lower()
 
 
+def test_material_lock_is_explicitly_approved_and_pins_phono3py() -> None:
+    repository = pathlib.Path(__file__).parents[1]
+    lock = (
+        repository
+        / "validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64.lock"
+    )
+    text = lock.read_text(encoding="utf-8")
+    digest = core._sha256(lock)
+    assert digest == core.PHONO3PY_ENV_LOCK_SHA256
+    assert core.validate_environment_lock_sha256(digest) == "phono3py-material"
+    assert text.count("/phono3py-4.4.0-") == 1
+    assert text.count("/phonopy-4.4.0-") == 1
+    assert text.count("/openmpi-5.0.10-") == 1
+    assert text.count("/mpi4py-4.1.2-") == 1
+
+
+def test_unapproved_environment_lock_digest_is_rejected() -> None:
+    with pytest.raises(core.RemoteValidationError, match="not approved"):
+        core.validate_environment_lock_sha256("0" * 64)
+
+
 def test_remote_machine_probe_is_valid_and_complete_python() -> None:
     compile(explicit._MACHINE_PROGRAM, "<remote-machine-probe>", "exec")
     for field in (

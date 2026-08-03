@@ -51,16 +51,20 @@ def _remote_runtime_path(remote: str) -> str:
     )
 
 
-def _remote_bootstrap_command(commit: str) -> str:
+def _remote_bootstrap_command(
+    commit: str,
+    expected_lock_sha256: str = core.EXPECTED_ENV_LOCK_SHA256,
+) -> str:
     remote = core._remote_shell_dir(commit)
     runtime_path = _remote_runtime_path(remote)
+    core.validate_environment_lock_sha256(expected_lock_sha256)
     return " && ".join(
         (
             f"mkdir -p {remote}/incoming {remote}/artifacts",
             f"cd {remote}/incoming",
             "sha256sum -c SHA256SUMS",
             f"test \"$(sha256sum environment-explicit.lock | cut -d' ' -f1)\" = "
-            f"{core.EXPECTED_ENV_LOCK_SHA256}",
+            f"{expected_lock_sha256}",
             f"test ! -e {remote}/worktree",
             f"{core.REMOTE_GIT} clone --no-checkout negfpy.bundle {remote}/worktree",
             f"{core.REMOTE_GIT} -C {remote}/worktree checkout --detach {commit}",
@@ -92,8 +96,12 @@ def deploy(
         )
         if manifest.get("schema") != "negfpy.remote_validation.deployment.v2":
             raise core.RemoteValidationError("unsupported deployment manifest schema")
-        if manifest["environment"]["explicit_lock_sha256"] != core.EXPECTED_ENV_LOCK_SHA256:
-            raise core.RemoteValidationError("deployment explicit-lock hash mismatch")
+        lock_sha = manifest["environment"]["explicit_lock_sha256"]
+        profile = core.validate_environment_lock_sha256(lock_sha)
+        if manifest["environment"].get("profile") != profile:
+            raise core.RemoteValidationError(
+                "deployment environment profile/lock mismatch"
+            )
     commit = (
         core._validate_commit(manifest["source"]["commit"])
         if manifest is not None
@@ -115,7 +123,14 @@ def deploy(
             f"{core.SSH_ALIAS}:{remote}/incoming/",
         )
     )
-    runner.run(core.ssh_argv(_remote_bootstrap_command(commit)))
+    expected_lock_sha = (
+        core.EXPECTED_ENV_LOCK_SHA256
+        if manifest is None
+        else manifest["environment"]["explicit_lock_sha256"]
+    )
+    runner.run(
+        core.ssh_argv(_remote_bootstrap_command(commit, expected_lock_sha))
+    )
     return commit
 
 
@@ -211,10 +226,13 @@ def _record_remote_environment(
         )
     locked = _read_environment_lock(root)
     lock_sha = core._sha256(root / "incoming" / "environment-explicit.lock")
-    if lock_sha != core.EXPECTED_ENV_LOCK_SHA256:
-        raise core.RemoteValidationError("remote explicit-lock SHA256 mismatch")
+    profile = core.validate_environment_lock_sha256(lock_sha)
     if locked["explicit_lock_sha256"] != lock_sha:
         raise core.RemoteValidationError("environment manifest/lock mismatch")
+    if locked.get("profile") != profile:
+        raise core.RemoteValidationError(
+            "remote environment profile/lock mismatch"
+        )
     versions = {
         name: importlib.metadata.version(name)
         for name in core.REQUIREMENTS_DISTRIBUTIONS
