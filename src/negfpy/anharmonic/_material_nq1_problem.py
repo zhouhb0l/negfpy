@@ -15,7 +15,8 @@ obscure that orientation.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+import hashlib
 import math
 from typing import Any
 
@@ -41,6 +42,43 @@ from .types import CubicSCBAProblem, HarmonicReservoir, SolverScale
 
 
 Array = np.ndarray
+
+
+_PHASE_B_ARCHIVE_SCHEMA = "negfpy.sparse-nq1-phase-b-mapped-fc3.v1"
+_PHASE_B_VERTEX_SCHEMA = "negfpy.sparse-cubic-vertex.material.v1"
+_PHASE_B_METADATA_ENCODING = "negfpy.lossless-metadata-json.v1"
+_CERTIFIED_PHASE_B_ARCHIVE_SHA256 = (
+    "06b3294ecc81ddad5399f4ebe0ae226eab406c1c06c4fef277c76420a0865101"
+)
+_PHASE_B_N_DEVICE_LAYERS = 9
+_PHASE_B_N_PRINCIPAL_LAYER_DOFS = 24
+_PHASE_B_N_DEVICE_DOFS = 216
+_PHASE_B_CONTACT_LAYERS = (0, 8)
+_PHASE_B_INTERACTION_LAYERS = (2, 3, 4, 5, 6)
+_PHASE_B_OBSERVATION_LAYERS = (4,)
+_PHASE_B_REQUIRED_HALO_LAYERS = (2, 2)
+_PHASE_B_REQUIRED_CHECKS = frozenset(
+    {
+        "raw_file_sha256",
+        "canonical_fc3_sha256",
+        "raw_fc3_complete_validation",
+        "r0_average_enabled",
+        "nine_device_layers",
+        "silicon_principal_layer_dofs",
+        "silicon_total_device_dofs",
+        "contact_layers",
+        "interaction_layers",
+        "observation_layers",
+        "contact_layers_count_as_harmonic_buffers",
+        "range_certification",
+        "mapping_certification",
+        "permutation_support_complete",
+        "permutation_forward_error_bound",
+        "no_source_mutation_or_truncation",
+        "real_acoustic_lead",
+        "sparse_vertex_scaled",
+    }
+)
 
 
 class MaterialNQ1ProblemError(ValueError):
@@ -88,6 +126,43 @@ def _ordered_contiguous(values: Sequence[int], *, name: str) -> tuple[int, ...]:
             f"{name} must be nonempty, ordered, unique, and contiguous."
         )
     return result
+
+
+def _mapping(value: Any, *, name: str) -> Any:
+    if not isinstance(value, Mapping):
+        raise MaterialNQ1ProblemError(f"{name} must be a mapping.")
+    return value
+
+
+def _sha256(value: Any, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise MaterialNQ1ProblemError(
+            f"{name} must be a lowercase SHA256 digest."
+        )
+    return value
+
+
+def _array_sha256(values: Any) -> str:
+    from ._canonical import canonical_encode
+
+    return hashlib.sha256(canonical_encode(np.asarray(values))).hexdigest()
+
+
+def _exact_metadata_value(
+    metadata: Any,
+    key: str,
+    expected: Any,
+    *,
+    name: str,
+) -> None:
+    if key not in metadata or metadata[key] != expected:
+        raise MaterialNQ1ProblemError(
+            f"{name} {key!r} does not match the authenticated Phase-B value."
+        )
 
 
 def _validate_harmonic_model(model: LayeredHarmonicModel) -> int:
@@ -183,6 +258,417 @@ def _validate_harmonic_model(model: LayeredHarmonicModel) -> int:
             "Layered harmonic model physics identity does not reproduce."
         )
     return layer_dofs
+
+
+def _authenticate_phase_b_input(
+    harmonic_model: LayeredHarmonicModel,
+    sparse_vertex: SparseCubicVertex,
+    phase_b_archive: Mapping[str, Any],
+    *,
+    layer_dofs: int,
+) -> tuple[int, str, str, str]:
+    """Authenticate a script-loaded Phase-B archive without importing HDF5.
+
+    ``phase_b_archive`` is the verified mapping returned by the Phase-B
+    script's ``verify_phase_b_hdf5`` function and ``sparse_vertex`` is the
+    result of its lossless loader.  Keeping those file operations at the
+    script boundary lets ordinary package imports remain independent of
+    :mod:`h5py`; this function reproduces every identity needed to bind the
+    loaded solver coefficients to one exact layered harmonic model.
+    """
+
+    if not isinstance(sparse_vertex, SparseCubicVertex):
+        raise TypeError("sparse_vertex must be a SparseCubicVertex.")
+    archive = _mapping(phase_b_archive, name="phase_b_archive")
+    if archive.get("schema") != _PHASE_B_ARCHIVE_SCHEMA:
+        raise MaterialNQ1ProblemError("Phase-B archive schema is unsupported.")
+    archive_sha256 = _sha256(
+        archive.get("sha256"), name="phase_b_archive.sha256"
+    )
+    if archive_sha256 != _CERTIFIED_PHASE_B_ARCHIVE_SHA256:
+        raise MaterialNQ1ProblemError(
+            "Phase-B archive is not the exact certified mapped HDF5."
+        )
+    if archive.get("phase_b_certified") is not True:
+        raise MaterialNQ1ProblemError("Phase-B archive is not scientifically certified.")
+    if archive.get("release_certified") is not False:
+        raise MaterialNQ1ProblemError(
+            "Phase-B mapping evidence must not claim release certification."
+        )
+    if archive.get("scba_executed") is not False:
+        raise MaterialNQ1ProblemError(
+            "Phase-B mapping evidence must not claim SCBA execution."
+        )
+
+    metadata = _mapping(archive.get("metadata"), name="phase_b_archive.metadata")
+    if metadata.get("schema") != _PHASE_B_ARCHIVE_SCHEMA:
+        raise MaterialNQ1ProblemError("Phase-B metadata schema is unsupported.")
+    if metadata.get("phase_b_certified") is not True:
+        raise MaterialNQ1ProblemError("Phase-B metadata is not certified.")
+    if metadata.get("release_certified") is not False:
+        raise MaterialNQ1ProblemError(
+            "Phase-B metadata falsely claims release certification."
+        )
+    if metadata.get("scba_executed") is not False:
+        raise MaterialNQ1ProblemError(
+            "Phase-B metadata falsely claims SCBA execution."
+        )
+    if metadata.get("method") != "authenticated_r0_fc3_finite_mapping_preflight":
+        raise MaterialNQ1ProblemError("Phase-B mapping method is unsupported.")
+    if metadata.get("sparse_vertex_metadata_encoding") != _PHASE_B_METADATA_ENCODING:
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse metadata does not use the lossless encoding."
+        )
+    campaign_sha256 = _sha256(
+        metadata.get("campaign_manifest_sha256"),
+        name="phase_b campaign manifest",
+    )
+
+    checks = _mapping(metadata.get("checks"), name="phase_b checks")
+    missing_checks = sorted(_PHASE_B_REQUIRED_CHECKS.difference(checks))
+    if missing_checks:
+        raise MaterialNQ1ProblemError(
+            f"Phase-B archive lacks required checks: {missing_checks!r}."
+        )
+    failed_checks = sorted(name for name, passed in checks.items() if passed is not True)
+    if failed_checks:
+        raise MaterialNQ1ProblemError(
+            f"Phase-B archive contains failed checks: {failed_checks!r}."
+        )
+
+    configuration = _mapping(
+        metadata.get("configuration"), name="phase_b configuration"
+    )
+    dimensions = _mapping(metadata.get("dimensions"), name="phase_b dimensions")
+    identities = _mapping(metadata.get("identities"), name="phase_b identities")
+    array_hashes = _mapping(
+        metadata.get("array_hashes"), name="phase_b array hashes"
+    )
+    reports = _mapping(metadata.get("reports"), name="phase_b reports")
+    mapping_report = _mapping(
+        reports.get("device_mapping"), name="phase_b device mapping report"
+    )
+    acoustic_report = _mapping(
+        reports.get("acoustic_lead_classification"),
+        name="phase_b acoustic lead report",
+    )
+
+    try:
+        n_layers = int(dimensions["n_device_layers"])
+        archived_layer_dofs = int(dimensions["n_principal_layer_dofs"])
+        archived_ndof = int(dimensions["ndof"])
+        archived_nnz = int(dimensions["nnz"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MaterialNQ1ProblemError(
+            "Phase-B dimensions are incomplete or invalid."
+        ) from exc
+    if (
+        n_layers != _PHASE_B_N_DEVICE_LAYERS
+        or archived_layer_dofs != _PHASE_B_N_PRINCIPAL_LAYER_DOFS
+        or archived_ndof != _PHASE_B_N_DEVICE_DOFS
+        or archived_layer_dofs != layer_dofs
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B principal-layer dimensions do not match the harmonic model."
+        )
+    if archived_ndof != n_layers * layer_dofs or archived_ndof != sparse_vertex.ndof:
+        raise MaterialNQ1ProblemError(
+            "Phase-B device dimension does not match its vertex and harmonic model."
+        )
+    if archived_nnz != sparse_vertex.nnz:
+        raise MaterialNQ1ProblemError("Phase-B sparse support count does not match.")
+    if archive.get("ndof") != archived_ndof or archive.get("nnz") != archived_nnz:
+        raise MaterialNQ1ProblemError(
+            "Phase-B outer archive dimensions do not match its metadata."
+        )
+
+    try:
+        configured_layers = int(configuration["n_device_layers"])
+        configured_omega0 = float(configuration["omega0_rad_s"])
+        configured_hbar = float(configuration["hbar_j_s"])
+        contact_layers = tuple(int(value) for value in configuration["contact_layers"])
+        interaction_layers = _ordered_contiguous(
+            configuration["interaction_layers"], name="interaction_layers"
+        )
+        observation_layers = _ordered_contiguous(
+            configuration["observation_layers"], name="observation_layers"
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MaterialNQ1ProblemError(
+            "Phase-B geometry or scaling configuration is invalid."
+        ) from exc
+    if (
+        configured_layers != n_layers
+        or contact_layers != _PHASE_B_CONTACT_LAYERS
+        or interaction_layers != _PHASE_B_INTERACTION_LAYERS
+        or observation_layers != _PHASE_B_OBSERVATION_LAYERS
+    ):
+        raise MaterialNQ1ProblemError("Phase-B contact geometry does not reproduce.")
+    if configuration.get("make_r0_average") is not True:
+        raise MaterialNQ1ProblemError("Phase-B archive did not retain r0 averaging.")
+    if (
+        configured_omega0 != harmonic_model.scale.omega0
+        or configured_hbar != harmonic_model.scale.hbar
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B solver scale does not match the harmonic model."
+        )
+    if (
+        not set(observation_layers).issubset(interaction_layers)
+        or interaction_layers[0] <= 0
+        or interaction_layers[-1] >= n_layers - 1
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B interaction/observation crop is not interior."
+        )
+
+    expected_buffers = (
+        tuple(range(interaction_layers[0])),
+        tuple(range(interaction_layers[-1] + 1, n_layers)),
+    )
+    try:
+        report_contacts = tuple(int(value) for value in mapping_report["contact_layers"])
+        report_interactions = tuple(
+            int(value) for value in mapping_report["interaction_layers"]
+        )
+        report_observations = tuple(
+            int(value) for value in mapping_report["observation_layers"]
+        )
+        report_buffers = tuple(
+            tuple(int(value) for value in side)
+            for side in mapping_report["harmonic_buffer_layers"]
+        )
+        left_halo = int(mapping_report["required_left_halo_layers"])
+        right_halo = int(mapping_report["required_right_halo_layers"])
+        forward_error_ratio = float(
+            mapping_report["permutation_max_forward_error_ratio"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MaterialNQ1ProblemError(
+            "Phase-B device mapping geometry is incomplete."
+        ) from exc
+    if (
+        int(mapping_report.get("n_device_layers", -1)) != n_layers
+        or report_contacts != contact_layers
+        or report_interactions != interaction_layers
+        or report_observations != observation_layers
+        or report_buffers != expected_buffers
+        or (left_halo, right_halo) != _PHASE_B_REQUIRED_HALO_LAYERS
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B device mapping report and configuration disagree."
+        )
+    if (
+        left_halo < 0
+        or right_halo < 0
+        or len(expected_buffers[0]) < left_halo
+        or len(expected_buffers[1]) < right_halo
+        or observation_layers[0] - interaction_layers[0] < left_halo
+        or interaction_layers[-1] - observation_layers[-1] < right_halo
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B device mapping lacks its declared FC3 range padding."
+        )
+    forbidden_report_flags = (
+        "symmetrized",
+        "corrected",
+        "truncated",
+        "thresholded",
+    )
+    if (
+        mapping_report.get("certification_passed") is not True
+        or mapping_report.get("failure_codes") not in ([], ())
+        or mapping_report.get("permutation_missing_count") != 0
+        or mapping_report.get("permutation_tolerance_passed") is not True
+        or any(mapping_report.get(name) is not False for name in forbidden_report_flags)
+        or not math.isfinite(forward_error_ratio)
+        or forward_error_ratio < 0.0
+        or forward_error_ratio > 1.0
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B device mapping report does not reproduce its certification."
+        )
+    if (
+        acoustic_report.get("passed") is not True
+        or acoustic_report.get("classification") != "acoustic"
+        or acoustic_report.get("failure_reasons") not in ([], ())
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B harmonic lead did not pass the acoustic classification."
+        )
+
+    required_identities = (
+        "raw_fc3_sha256",
+        "canonical_fc3_sha256",
+        "source_translational_sha256",
+        "mass_normalized_fc3_sha256",
+        "device_mapped_fc3_sha256",
+        "mapping_report_sha256",
+        "cubic_physics_sha256_physical",
+        "sparse_vertex_storage_sha256",
+        "sparse_vertex_metadata_sha256",
+        "cubic_physics_sha256_solver",
+        "fc2_content_sha256",
+        "primitive_crystal_content_sha256",
+        "fc2_crystal_mapping_content_sha256",
+        "fc3_crystal_mapping_content_sha256",
+        "layered_geometry_sha256",
+    )
+    for name in required_identities:
+        _sha256(identities.get(name), name=f"phase_b identities[{name!r}]")
+    if mapping_report.get("report_sha256") != identities["mapping_report_sha256"]:
+        raise MaterialNQ1ProblemError(
+            "Phase-B device mapping report hash does not match its identity."
+        )
+    if (
+        mapping_report.get("cubic_physics_sha256")
+        != identities["cubic_physics_sha256_physical"]
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B physical cubic hash does not match its mapping report."
+        )
+    if identities["sparse_vertex_storage_sha256"] != sparse_vertex.vertex_storage_sha256:
+        raise MaterialNQ1ProblemError("Phase-B sparse vertex storage hash mismatch.")
+    if identities["sparse_vertex_metadata_sha256"] != sparse_vertex.metadata_sha256:
+        raise MaterialNQ1ProblemError("Phase-B sparse vertex metadata hash mismatch.")
+    if identities["cubic_physics_sha256_solver"] != sparse_vertex.cubic_physics_sha256:
+        raise MaterialNQ1ProblemError("Phase-B sparse vertex physics hash mismatch.")
+    if array_hashes.get("indices") != _array_sha256(sparse_vertex.indices):
+        raise MaterialNQ1ProblemError("Phase-B sparse index array hash mismatch.")
+    if array_hashes.get("solver_coefficients") != _array_sha256(
+        sparse_vertex.coefficients
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse coefficient array hash mismatch."
+        )
+    _sha256(array_hashes.get("values"), name="phase_b physical value array hash")
+
+    harmonic_identities = {
+        "fc2_content_sha256": harmonic_model.fc2_content_sha256,
+        "primitive_crystal_content_sha256": (
+            harmonic_model.primitive_crystal_content_sha256
+        ),
+        "fc2_crystal_mapping_content_sha256": (
+            harmonic_model.fc2_crystal_mapping_content_sha256
+        ),
+        "layered_geometry_sha256": harmonic_model.layered_geometry_sha256,
+    }
+    for name, expected in harmonic_identities.items():
+        if identities[name] != expected:
+            raise MaterialNQ1ProblemError(
+                f"Phase-B {name} does not match the harmonic model."
+            )
+
+    vertex_metadata = _mapping(
+        sparse_vertex.metadata, name="phase_b sparse vertex metadata"
+    )
+    if vertex_metadata.get("schema_version") != _PHASE_B_VERTEX_SCHEMA:
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse vertex is not an uncontinued material vertex."
+        )
+    if vertex_metadata.get("solver_scaled") is not True:
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse vertex is not pre-scaled to solver units."
+        )
+    if vertex_metadata.get("weights_applied") is not True:
+        raise MaterialNQ1ProblemError("Phase-B sparse vertex lacks FC3 weights.")
+    if any(vertex_metadata.get(name) is not False for name in forbidden_report_flags):
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse vertex metadata records a forbidden correction."
+        )
+    if any(
+        name in vertex_metadata
+        for name in (
+            "cubic_continuation_factor",
+            "cubic_continuation_applied_count",
+            "uncontinued_vertex_storage_sha256",
+        )
+    ):
+        raise MaterialNQ1ProblemError(
+            "Phase-B sparse vertex has already undergone coupling continuation."
+        )
+
+    vertex_identity_links = {
+        "source_fc3_content_sha256": "canonical_fc3_sha256",
+        "device_mapped_fc3_sha256": "device_mapped_fc3_sha256",
+        "mapping_report_sha256": "mapping_report_sha256",
+        "cubic_physics_sha256_physical": "cubic_physics_sha256_physical",
+        "fc2_content_sha256": "fc2_content_sha256",
+        "primitive_crystal_content_sha256": "primitive_crystal_content_sha256",
+        "fc2_crystal_mapping_content_sha256": (
+            "fc2_crystal_mapping_content_sha256"
+        ),
+        "fc3_crystal_mapping_content_sha256": (
+            "fc3_crystal_mapping_content_sha256"
+        ),
+        "layered_geometry_sha256": "layered_geometry_sha256",
+    }
+    for metadata_name, identity_name in vertex_identity_links.items():
+        _exact_metadata_value(
+            vertex_metadata,
+            metadata_name,
+            identities[identity_name],
+            name="Phase-B sparse vertex metadata",
+        )
+    _exact_metadata_value(
+        vertex_metadata,
+        "solver_scale_omega0",
+        harmonic_model.scale.omega0,
+        name="Phase-B sparse vertex metadata",
+    )
+    _exact_metadata_value(
+        vertex_metadata,
+        "solver_scale_hbar",
+        harmonic_model.scale.hbar,
+        name="Phase-B sparse vertex metadata",
+    )
+    expected_factor = (
+        math.sqrt(harmonic_model.scale.hbar)
+        / harmonic_model.scale.omega0**2.5
+    )
+    _exact_metadata_value(
+        vertex_metadata,
+        "cubic_vertex_to_solver_factor",
+        expected_factor,
+        name="Phase-B sparse vertex metadata",
+    )
+
+    if sparse_vertex.nnz:
+        active_layers = np.asarray(sparse_vertex.indices) // layer_dofs
+        if not np.all(np.isin(active_layers, np.asarray(interaction_layers))):
+            raise MaterialNQ1ProblemError(
+                "Phase-B sparse support escapes the authenticated interaction crop."
+            )
+
+    binding_sha256 = domain_digest(
+        "NEGFPY-PHASE-B-MATERIAL-NQ1-BINDING",
+        {
+            "schema_version": "negfpy.phase-b-material-nq1-binding.v1",
+            "archive_sha256": digest_bytes(archive_sha256),
+            "campaign_manifest_sha256": digest_bytes(campaign_sha256),
+            "harmonic_model_physics_sha256": digest_bytes(
+                harmonic_model.model_physics_sha256
+            ),
+            "sparse_vertex_storage_sha256": digest_bytes(
+                sparse_vertex.vertex_storage_sha256
+            ),
+            "device_mapped_fc3_sha256": digest_bytes(
+                identities["device_mapped_fc3_sha256"]
+            ),
+            "mapping_report_sha256": digest_bytes(
+                identities["mapping_report_sha256"]
+            ),
+            "n_device_layers": n_layers,
+            "n_principal_layer_dofs": layer_dofs,
+            "interaction_layers": interaction_layers,
+            "observation_layers": observation_layers,
+            "solver_scale": {
+                "omega0": harmonic_model.scale.omega0,
+                "hbar": harmonic_model.scale.hbar,
+            },
+        },
+    )
+    return n_layers, binding_sha256, archive_sha256, campaign_sha256
 
 
 def _validate_mapped_fc3(
@@ -360,6 +846,7 @@ def _continued_vertex(
     *,
     coupling_scale: float,
     assembly_sha256: str,
+    source_metadata: Mapping[str, Any] | None = None,
 ) -> SparseCubicVertex:
     coefficients = np.asarray(base.coefficients) * coupling_scale
     if not np.all(np.isfinite(coefficients)):
@@ -381,6 +868,7 @@ def _continued_vertex(
         coefficients=coefficients,
         metadata={
             **dict(base.metadata),
+            **({} if source_metadata is None else dict(source_metadata)),
             "schema_version": "negfpy.sparse-cubic-vertex.material-problem.v1",
             "uncontinued_vertex_storage_sha256": base.vertex_storage_sha256,
             "uncontinued_cubic_physics_sha256": base.cubic_physics_sha256,
@@ -391,24 +879,19 @@ def _continued_vertex(
     )
 
 
-def build_material_nq1_problem(
+def _build_problem_from_scaled_vertex(
     harmonic_model: LayeredHarmonicModel,
-    mapped_fc3: DeviceMappedFC3,
+    base_vertex: SparseCubicVertex,
     *,
+    n_layers: int,
+    layer_dofs: int,
     grid: SignedFrequencyGrid,
     mean_temperature: float,
-    temperature_bias: float = 0.0,
-    coupling_scale: float = 1.0,
+    temperature_bias: float,
+    coupling_scale: float,
+    source_identity: Mapping[str, Any],
+    source_metadata: Mapping[str, Any] | None = None,
 ) -> CubicSCBAProblem:
-    """Join certified FC2/FC3 stages into one solver-ready material problem.
-
-    Temperatures are in solver energy units.  ``temperature_bias`` is signed
-    and is defined as ``T_left - T_right`` around ``mean_temperature``.
-    ``coupling_scale`` is the nonnegative cubic continuation factor applied
-    once, after the physical mapped FC3 has been converted with the harmonic
-    model's :class:`SolverScale`.
-    """
-
     if not isinstance(grid, SignedFrequencyGrid):
         raise TypeError("grid must be a SignedFrequencyGrid.")
     mean = _finite_scalar(
@@ -428,31 +911,29 @@ def build_material_nq1_problem(
         raise ValueError(
             "temperature_bias makes at least one reservoir temperature negative."
         )
-
-    layer_dofs = _validate_harmonic_model(harmonic_model)
-    n_layers = _validate_mapped_fc3(
-        mapped_fc3,
-        harmonic_model,
-        layer_dofs=layer_dofs,
-    )
-    scale = harmonic_model.scale
-    base_vertex = scale_device_fc3(mapped_fc3, scale)
-    if base_vertex.ndof != mapped_fc3.ndof or not np.array_equal(
-        base_vertex.indices, mapped_fc3.indices
+    if (
+        not isinstance(base_vertex, SparseCubicVertex)
+        or base_vertex.ndof != n_layers * layer_dofs
     ):
         raise MaterialNQ1ProblemError(
-            "Scaled sparse vertex changed mapped FC3 indices or ndof."
+            "Pre-scaled cubic vertex does not match the harmonic device dimension."
         )
 
     assembly_sha256 = domain_digest(
         "NEGFPY-MATERIAL-NQ1-PROBLEM-ASSEMBLY",
         {
-            "schema_version": "negfpy.material-nq1-problem.v1",
+            "schema_version": "negfpy.material-nq1-problem.v2",
             "harmonic_model_physics_sha256": digest_bytes(
                 harmonic_model.model_physics_sha256
             ),
-            "device_mapped_fc3_sha256": digest_bytes(mapped_fc3.content_sha256),
-            "solver_scale": {"omega0": scale.omega0, "hbar": scale.hbar},
+            "base_vertex_storage_sha256": digest_bytes(
+                base_vertex.vertex_storage_sha256
+            ),
+            "source_identity": source_identity,
+            "solver_scale": {
+                "omega0": harmonic_model.scale.omega0,
+                "hbar": harmonic_model.scale.hbar,
+            },
             "n_device_layers": n_layers,
             "layer_dofs": layer_dofs,
             "left_device_to_lead": np.asarray(harmonic_model.d10),
@@ -470,6 +951,7 @@ def build_material_nq1_problem(
         base_vertex,
         coupling_scale=coupling,
         assembly_sha256=assembly_sha256,
+        source_metadata=source_metadata,
     )
 
     raw_device = harmonic_model.device(n_layers)
@@ -517,13 +999,126 @@ def build_material_nq1_problem(
         right=right,
         vertex=vertex,
         grid=grid,
-        scale=scale,
+        scale=harmonic_model.scale,
     )
-    if problem.ndof != mapped_fc3.ndof or problem.vertex.ndof != mapped_fc3.ndof:
+    if problem.ndof != base_vertex.ndof or problem.vertex.ndof != base_vertex.ndof:
         raise MaterialNQ1ProblemError(
             "Final harmonic and cubic problem dimensions do not agree."
         )
     return problem
 
 
-__all__ = ["MaterialNQ1ProblemError", "build_material_nq1_problem"]
+def build_material_nq1_problem(
+    harmonic_model: LayeredHarmonicModel,
+    mapped_fc3: DeviceMappedFC3,
+    *,
+    grid: SignedFrequencyGrid,
+    mean_temperature: float,
+    temperature_bias: float = 0.0,
+    coupling_scale: float = 1.0,
+) -> CubicSCBAProblem:
+    """Join certified FC2/FC3 stages into one solver-ready material problem.
+
+    Temperatures are in solver energy units.  ``temperature_bias`` is signed
+    and is defined as ``T_left - T_right`` around ``mean_temperature``.
+    ``coupling_scale`` is the nonnegative cubic continuation factor applied
+    once, after the physical mapped FC3 has been converted with the harmonic
+    model's :class:`SolverScale`.
+    """
+
+    layer_dofs = _validate_harmonic_model(harmonic_model)
+    n_layers = _validate_mapped_fc3(
+        mapped_fc3,
+        harmonic_model,
+        layer_dofs=layer_dofs,
+    )
+    scale = harmonic_model.scale
+    base_vertex = scale_device_fc3(mapped_fc3, scale)
+    if base_vertex.ndof != mapped_fc3.ndof or not np.array_equal(
+        base_vertex.indices, mapped_fc3.indices
+    ):
+        raise MaterialNQ1ProblemError(
+            "Scaled sparse vertex changed mapped FC3 indices or ndof."
+        )
+
+    return _build_problem_from_scaled_vertex(
+        harmonic_model,
+        base_vertex,
+        n_layers=n_layers,
+        layer_dofs=layer_dofs,
+        grid=grid,
+        mean_temperature=mean_temperature,
+        temperature_bias=temperature_bias,
+        coupling_scale=coupling_scale,
+        source_identity={
+            "kind": "device_mapped_fc3",
+            "device_mapped_fc3_sha256": digest_bytes(mapped_fc3.content_sha256),
+            "mapping_report_sha256": digest_bytes(
+                mapped_fc3.report.report_sha256
+            ),
+        },
+    )
+
+
+def build_material_nq1_problem_from_phase_b(
+    harmonic_model: LayeredHarmonicModel,
+    sparse_vertex: SparseCubicVertex,
+    phase_b_archive: Mapping[str, Any],
+    *,
+    grid: SignedFrequencyGrid,
+    mean_temperature: float,
+    temperature_bias: float = 0.0,
+    coupling_scale: float = 1.0,
+) -> CubicSCBAProblem:
+    """Assemble an exact problem from an authenticated Phase-B HDF5 load.
+
+    The HDF5 reader deliberately remains in the validation-script layer.  A
+    caller first uses ``verify_phase_b_hdf5`` and
+    ``load_phase_b_sparse_vertex`` from that script, then passes their
+    returned mappings here.  This path neither reads raw FC3 nor invokes
+    ``map_fc3_to_device`` or ``scale_device_fc3``; the archived coefficients
+    are already in solver units and receive only the explicit continuation
+    factor requested for this problem.
+    """
+
+    layer_dofs = _validate_harmonic_model(harmonic_model)
+    n_layers, binding, archive_sha256, campaign_sha256 = (
+        _authenticate_phase_b_input(
+            harmonic_model,
+            sparse_vertex,
+            phase_b_archive,
+            layer_dofs=layer_dofs,
+        )
+    )
+    return _build_problem_from_scaled_vertex(
+        harmonic_model,
+        sparse_vertex,
+        n_layers=n_layers,
+        layer_dofs=layer_dofs,
+        grid=grid,
+        mean_temperature=mean_temperature,
+        temperature_bias=temperature_bias,
+        coupling_scale=coupling_scale,
+        source_identity={
+            "kind": "authenticated_phase_b_archive",
+            "phase_b_binding_sha256": digest_bytes(binding),
+            "phase_b_archive_sha256": digest_bytes(archive_sha256),
+            "phase_b_campaign_manifest_sha256": digest_bytes(campaign_sha256),
+        },
+        source_metadata={
+            "phase_b_archive_schema": _PHASE_B_ARCHIVE_SCHEMA,
+            "phase_b_archive_sha256": archive_sha256,
+            "phase_b_campaign_manifest_sha256": campaign_sha256,
+            "phase_b_binding_sha256": binding,
+            "phase_b_input_authenticated": True,
+            "phase_b_fc3_remapped": False,
+            "phase_b_vertex_rescaled_to_solver_units": False,
+        },
+    )
+
+
+__all__ = [
+    "MaterialNQ1ProblemError",
+    "build_material_nq1_problem",
+    "build_material_nq1_problem_from_phase_b",
+]

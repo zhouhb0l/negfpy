@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from itertools import permutations
 
 import numpy as np
 import pytest
 
-from negfpy.anharmonic._canonical import digest_bytes, domain_digest
+from negfpy.anharmonic._canonical import canonical_encode, digest_bytes, domain_digest
+import negfpy.anharmonic._material_nq1_problem as material_problem
 from negfpy.anharmonic._material_nq1_problem import (
     MaterialNQ1ProblemError,
     build_material_nq1_problem,
+    build_material_nq1_problem_from_phase_b,
 )
 from negfpy.anharmonic.crystal import CrystalCell, CrystalMapping
 from negfpy.anharmonic.fc2 import FC2Data
@@ -23,12 +26,25 @@ from negfpy.anharmonic.mapped_fc3 import (
     FC3DeviceMappingReport,
     _cubic_physics_sha256,
     _report_payload,
+    scale_device_fc3,
 )
 from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
 from negfpy.anharmonic.types import SolverScale
 
 
 HBAR_SI = 1.0545718176461565e-34
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_phase_b_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep small algebra fixtures while production constants stay silicon-exact."""
+
+    monkeypatch.setattr(
+        material_problem, "_CERTIFIED_PHASE_B_ARCHIVE_SHA256", "3" * 64
+    )
+    monkeypatch.setattr(material_problem, "_PHASE_B_N_DEVICE_LAYERS", 9)
+    monkeypatch.setattr(material_problem, "_PHASE_B_N_PRINCIPAL_LAYER_DOFS", 3)
+    monkeypatch.setattr(material_problem, "_PHASE_B_N_DEVICE_DOFS", 27)
 
 
 def _chain_mapping() -> CrystalMapping:
@@ -250,6 +266,117 @@ def _replace_report(
     return result
 
 
+def _array_sha256(values: np.ndarray) -> str:
+    return hashlib.sha256(canonical_encode(np.asarray(values))).hexdigest()
+
+
+def _phase_b_archive(model, mapped, vertex) -> dict[str, object]:
+    report = mapped.report
+    checks = {
+        name: True for name in material_problem._PHASE_B_REQUIRED_CHECKS
+    }
+    identities = {
+        "raw_fc3_sha256": report.source_fc3_content_sha256,
+        "canonical_fc3_sha256": report.source_fc3_content_sha256,
+        "source_translational_sha256": report.source_translational_sha256,
+        "mass_normalized_fc3_sha256": report.mass_normalized_fc3_sha256,
+        "device_mapped_fc3_sha256": mapped.content_sha256,
+        "mapping_report_sha256": report.report_sha256,
+        "cubic_physics_sha256_physical": mapped.cubic_physics_sha256,
+        "sparse_vertex_storage_sha256": vertex.vertex_storage_sha256,
+        "sparse_vertex_metadata_sha256": vertex.metadata_sha256,
+        "cubic_physics_sha256_solver": vertex.cubic_physics_sha256,
+        "fc2_content_sha256": model.fc2_content_sha256,
+        "primitive_crystal_content_sha256": (
+            model.primitive_crystal_content_sha256
+        ),
+        "fc2_crystal_mapping_content_sha256": (
+            model.fc2_crystal_mapping_content_sha256
+        ),
+        "fc3_crystal_mapping_content_sha256": (
+            report.fc3_crystal_mapping_content_sha256
+        ),
+        "layered_geometry_sha256": model.layered_geometry_sha256,
+    }
+    metadata = {
+        "schema": material_problem._PHASE_B_ARCHIVE_SCHEMA,
+        "campaign_manifest_sha256": "2" * 64,
+        "phase_b_certified": True,
+        "release_certified": False,
+        "scba_executed": False,
+        "method": "authenticated_r0_fc3_finite_mapping_preflight",
+        "configuration": {
+            "transport_transform": np.eye(3, dtype=int).tolist(),
+            "omega0_rad_s": model.scale.omega0,
+            "hbar_j_s": model.scale.hbar,
+            "n_device_layers": report.n_device_layers,
+            "contact_layers": list(report.contact_layers),
+            "interaction_layers": list(report.interaction_layers),
+            "observation_layers": list(report.observation_layers),
+            "make_r0_average": True,
+        },
+        "dimensions": {
+            "n_device_layers": report.n_device_layers,
+            "n_principal_layer_dofs": model.mapping.n_principal_layer_dofs,
+            "ndof": vertex.ndof,
+            "nnz": vertex.nnz,
+            "support_density": vertex.support_density,
+        },
+        "array_hashes": {
+            "indices": _array_sha256(vertex.indices),
+            "values": _array_sha256(mapped.values),
+            "solver_coefficients": _array_sha256(vertex.coefficients),
+        },
+        "identities": identities,
+        "sparse_vertex_metadata_encoding": (
+            material_problem._PHASE_B_METADATA_ENCODING
+        ),
+        "sparse_vertex_metadata": {"loaded_by_script": True},
+        "reports": {
+            "device_mapping": {
+                "n_device_layers": report.n_device_layers,
+                "contact_layers": list(report.contact_layers),
+                "harmonic_buffer_layers": [
+                    list(side) for side in report.harmonic_buffer_layers
+                ],
+                "interaction_layers": list(report.interaction_layers),
+                "observation_layers": list(report.observation_layers),
+                "required_left_halo_layers": report.required_left_halo_layers,
+                "required_right_halo_layers": report.required_right_halo_layers,
+                "certification_passed": True,
+                "failure_codes": [],
+                "permutation_missing_count": 0,
+                "permutation_tolerance_passed": True,
+                "permutation_max_forward_error_ratio": (
+                    report.permutation_max_forward_error_ratio
+                ),
+                "report_sha256": report.report_sha256,
+                "cubic_physics_sha256": mapped.cubic_physics_sha256,
+                "symmetrized": False,
+                "corrected": False,
+                "truncated": False,
+                "thresholded": False,
+            },
+            "acoustic_lead_classification": {
+                "passed": True,
+                "classification": "acoustic",
+                "failure_reasons": [],
+            },
+        },
+        "checks": checks,
+    }
+    return {
+        "schema": material_problem._PHASE_B_ARCHIVE_SCHEMA,
+        "sha256": "3" * 64,
+        "ndof": vertex.ndof,
+        "nnz": vertex.nnz,
+        "phase_b_certified": True,
+        "release_certified": False,
+        "scba_executed": False,
+        "metadata": metadata,
+    }
+
+
 def test_builds_exact_device_contacts_sparse_vertex_and_run_inputs() -> None:
     model = _harmonic_model()
     mapped = _mapped_fc3(model)
@@ -437,4 +564,145 @@ def test_rejects_invalid_bias_coupling_and_stale_content_hash() -> None:
             mapped,
             grid=grid,
             mean_temperature=0.1,
+        )
+
+
+def test_builds_from_authenticated_phase_b_without_remapping_or_rescaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _harmonic_model()
+    mapped = _mapped_fc3(model)
+    archived_vertex = scale_device_fc3(mapped, model.scale)
+    archive = _phase_b_archive(model, mapped, archived_vertex)
+    monkeypatch.setattr(
+        material_problem,
+        "scale_device_fc3",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Phase-B assembly must not remap or rescale archived FC3"
+        ),
+    )
+
+    problem = build_material_nq1_problem_from_phase_b(
+        model,
+        archived_vertex,
+        archive,
+        grid=SignedFrequencyGrid(step=0.05, n_positive=8),
+        mean_temperature=0.5,
+        temperature_bias=0.2,
+        coupling_scale=0.25,
+    )
+
+    assert problem.device.n_layers == 9
+    assert problem.vertex.ndof == archived_vertex.ndof
+    np.testing.assert_array_equal(problem.vertex.indices, archived_vertex.indices)
+    np.testing.assert_array_equal(
+        problem.vertex.coefficients,
+        archived_vertex.coefficients * 0.25,
+    )
+    np.testing.assert_array_equal(
+        archived_vertex.coefficients,
+        scale_device_fc3(mapped, model.scale).coefficients,
+    )
+    assert problem.left.temperature == pytest.approx(0.6)
+    assert problem.right.temperature == pytest.approx(0.4)
+    np.testing.assert_array_equal(problem.left.device_to_lead, model.d10)
+    np.testing.assert_array_equal(problem.right.device_to_lead, model.d01)
+    assert problem.vertex.metadata["phase_b_input_authenticated"] is True
+    assert problem.vertex.metadata["phase_b_fc3_remapped"] is False
+    assert (
+        problem.vertex.metadata["phase_b_vertex_rescaled_to_solver_units"]
+        is False
+    )
+    assert problem.vertex.metadata["phase_b_archive_sha256"] == "3" * 64
+    assert problem.vertex.metadata["phase_b_campaign_manifest_sha256"] == "2" * 64
+    assert len(problem.vertex.metadata["phase_b_binding_sha256"]) == 64
+    assert (
+        problem.vertex.metadata["uncontinued_vertex_storage_sha256"]
+        == archived_vertex.vertex_storage_sha256
+    )
+    assert problem.vertex.metadata["cubic_continuation_factor"] == 0.25
+    assert problem.vertex.metadata["cubic_continuation_applied_count"] == 1
+
+    repeated = build_material_nq1_problem_from_phase_b(
+        model,
+        archived_vertex,
+        archive,
+        grid=SignedFrequencyGrid(step=0.05, n_positive=8),
+        mean_temperature=0.5,
+        temperature_bias=0.2,
+        coupling_scale=0.25,
+    )
+    assert repeated.vertex.vertex_storage_sha256 == problem.vertex.vertex_storage_sha256
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("fc2_identity", "fc2_content_sha256"),
+        ("coefficient_hash", "coefficient array hash"),
+        ("failed_check", "failed checks"),
+        ("solver_scale", "solver scale"),
+        ("outer_dimension", "outer archive dimensions"),
+        ("forward_ratio", "mapping report"),
+    ],
+)
+def test_phase_b_assembly_fails_closed_on_archive_mismatch(
+    mutation: str,
+    message: str,
+) -> None:
+    model = _harmonic_model()
+    mapped = _mapped_fc3(model)
+    vertex = scale_device_fc3(mapped, model.scale)
+    archive = _phase_b_archive(model, mapped, vertex)
+    metadata = archive["metadata"]
+    assert isinstance(metadata, dict)
+    if mutation == "fc2_identity":
+        metadata["identities"]["fc2_content_sha256"] = "f" * 64
+    elif mutation == "coefficient_hash":
+        metadata["array_hashes"]["solver_coefficients"] = "f" * 64
+    elif mutation == "failed_check":
+        metadata["checks"]["mapping_certification"] = False
+    elif mutation == "solver_scale":
+        metadata["configuration"]["omega0_rad_s"] *= 2.0
+    elif mutation == "outer_dimension":
+        archive["nnz"] = vertex.nnz + 1
+    elif mutation == "forward_ratio":
+        metadata["reports"]["device_mapping"][
+            "permutation_max_forward_error_ratio"
+        ] = 1.0000001
+    else:  # pragma: no cover - exhaustive parametrization guard
+        raise AssertionError(mutation)
+
+    with pytest.raises(MaterialNQ1ProblemError, match=message):
+        build_material_nq1_problem_from_phase_b(
+            model,
+            vertex,
+            archive,
+            grid=SignedFrequencyGrid(step=0.1, n_positive=2),
+            mean_temperature=0.5,
+        )
+
+
+def test_phase_b_assembly_rejects_an_already_continued_vertex() -> None:
+    model = _harmonic_model()
+    mapped = _mapped_fc3(model)
+    base = scale_device_fc3(mapped, model.scale)
+    continued = SparseCubicVertex(
+        ndof=base.ndof,
+        indices=base.indices,
+        coefficients=base.coefficients,
+        metadata={
+            **dict(base.metadata),
+            "cubic_continuation_factor": 0.5,
+            "cubic_continuation_applied_count": 1,
+        },
+    )
+    archive = _phase_b_archive(model, mapped, continued)
+    with pytest.raises(MaterialNQ1ProblemError, match="already undergone"):
+        build_material_nq1_problem_from_phase_b(
+            model,
+            continued,
+            archive,
+            grid=SignedFrequencyGrid(step=0.1, n_positive=2),
+            mean_temperature=0.5,
         )
