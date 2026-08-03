@@ -770,7 +770,7 @@ def run_phase_b(
             report.certification_passed and not report.failure_codes
         ),
         "permutation_support_complete": report.permutation_missing_count == 0,
-        "permutation_roundoff_bound": bool(
+        "permutation_forward_error_bound": bool(
             report.permutation_tolerance_passed
         ),
         "no_source_mutation_or_truncation": bool(
@@ -797,7 +797,13 @@ def run_phase_b(
             "maximum_roundoff_ratio": float(
                 report.permutation_max_roundoff_ratio
             ),
+            "maximum_forward_error_ratio": float(
+                report.permutation_max_forward_error_ratio
+            ),
             "roundoff_factor": float(report.permutation_roundoff_factor),
+            "source_translation_max_abs": float(
+                report.source_translation_max_abs
+            ),
         }
     }
     certified = all(checks.values())

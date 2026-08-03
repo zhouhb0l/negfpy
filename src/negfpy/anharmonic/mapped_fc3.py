@@ -186,6 +186,29 @@ def _translational_tolerances(fc3: TranslationalFC3) -> tuple[float, float]:
     return result
 
 
+def _translation_max_abs_residual(fc3: TranslationalFC3) -> float:
+    """Return the measured, authenticated raw translation residual.
+
+    The permitted translation tolerance is deliberately not used as an
+    uncertainty estimate: it can be many orders of magnitude larger than the
+    residual that was actually observed.
+    """
+
+    audit = fc3.provenance.get("redundant_translation_audit")
+    if not isinstance(audit, Mapping) or audit.get("passed") is not True:
+        raise ValueError(
+            "Full TranslationalFC3 requires a passing redundant translation "
+            "audit with a measured maximum absolute residual."
+        )
+    residual = float(audit.get("maximum_absolute_residual", float("nan")))
+    if not np.isfinite(residual) or residual < 0.0:
+        raise ValueError(
+            "Translation maximum absolute residual must be finite and "
+            "nonnegative."
+        )
+    return residual
+
+
 def _term_payload(term: FC3Term) -> Mapping[str, Any]:
     return {
         "primitive_indices": np.asarray(term.primitive_indices, dtype=np.int64),
@@ -290,11 +313,19 @@ class _MassNormalizedFC3Term:
     third_multiplicity: int
     anchor_weight: float
     multiplicity_weight: float
+    source_translation_abs_bound: float
     values: Array
 
     def __post_init__(self) -> None:
         if self.source_term_index < 0:
             raise ValueError("source_term_index must be nonnegative.")
+        if (
+            not np.isfinite(self.source_translation_abs_bound)
+            or self.source_translation_abs_bound < 0.0
+        ):
+            raise ValueError(
+                "source_translation_abs_bound must be finite and nonnegative."
+            )
         object.__setattr__(
             self, "values", _readonly(self.values, dtype=np.float64, name="values")
         )
@@ -325,6 +356,7 @@ class MassNormalizedTranslationalFC3:
     effective_symprec: float | None
     translation_atol: float
     translation_rtol: float
+    source_translation_max_abs: float
     force_constant_to_si_factor: float
     mass_to_si_factor: float
     source_fc3_content_sha256: str
@@ -373,6 +405,9 @@ def _normalized_payload(
                         )
                     ).items()
                 },
+                "source_translation_abs_bound": (
+                    term.source_translation_abs_bound
+                ),
             }
             for term in result.terms
         ),
@@ -389,6 +424,7 @@ def _normalized_payload(
         "effective_symprec": result.effective_symprec,
         "translation_atol": result.translation_atol,
         "translation_rtol": result.translation_rtol,
+        "source_translation_max_abs": result.source_translation_max_abs,
         "force_constant_to_si_factor": result.force_constant_to_si_factor,
         "mass_to_si_factor": result.mass_to_si_factor,
         "source_fc3_content_sha256": digest_bytes(
@@ -500,12 +536,28 @@ def mass_normalize_translational_fc3(
     ):
         raise ValueError("FC3 primitive masses must be positive finite SI values.")
 
+    source_translation_max_abs = _translation_max_abs_residual(fc3)
+
     normalized_terms: list[_MassNormalizedFC3Term] = []
     for source_index, term in enumerate(fc3.terms):
         values = np.array(term.values, dtype=np.float64, order="C", copy=True)
         values *= force_factor
+        source_translation_scale = abs(force_factor)
         for primitive_atom in term.primitive_indices:
-            values /= math.sqrt(float(primitive_masses_si[primitive_atom]))
+            root_mass = math.sqrt(float(primitive_masses_si[primitive_atom]))
+            values /= root_mass
+            source_translation_scale /= root_mass
+        source_translation_abs_bound = (
+            source_translation_max_abs * source_translation_scale
+        )
+        if source_translation_abs_bound:
+            # Inflate beyond the complete normalization/weight operation
+            # chain, then round upward.  This prevents the computed budget
+            # itself from understating the exact-real propagated residual.
+            source_translation_abs_bound = math.nextafter(
+                source_translation_abs_bound * (1.0 + _PERMUTATION_RTOL),
+                math.inf,
+            )
         values[values == 0.0] = 0.0
         normalized_terms.append(
             _MassNormalizedFC3Term(
@@ -522,6 +574,7 @@ def mass_normalize_translational_fc3(
                 third_multiplicity=term.third_multiplicity,
                 anchor_weight=term.anchor_weight,
                 multiplicity_weight=term.multiplicity_weight,
+                source_translation_abs_bound=source_translation_abs_bound,
                 values=values,
             )
         )
@@ -551,6 +604,7 @@ def mass_normalize_translational_fc3(
         "effective_symprec": fc3.symprec,
         "translation_atol": atol,
         "translation_rtol": rtol,
+        "source_translation_max_abs": source_translation_max_abs,
         "force_constant_to_si_factor": force_factor,
         "mass_to_si_factor": mass_factor,
         "source_fc3_content_sha256": source_hash,
@@ -568,6 +622,7 @@ def mass_normalize_translational_fc3(
                 "corrected": False,
                 "thresholded": False,
                 "translational_validation_passed": True,
+                "source_translation_max_abs": source_translation_max_abs,
             }
         ),
     }
@@ -594,6 +649,7 @@ class _EffectiveFC3Term:
     multiplicity_weight: float
     anchor_weight: float
     r0_leg_factor: float
+    source_translation_abs_bound: float
 
 
 def _effective_terms(
@@ -618,6 +674,9 @@ def _effective_terms(
                     multiplicity_weight=term.multiplicity_weight,
                     anchor_weight=term.anchor_weight,
                     r0_leg_factor=1.0,
+                    source_translation_abs_bound=(
+                        term.source_translation_abs_bound
+                    ),
                 )
             )
             continue
@@ -643,6 +702,7 @@ def _effective_terms(
                 multiplicity_weight=term.multiplicity_weight,
                 anchor_weight=term.anchor_weight,
                 r0_leg_factor=1.0 if flag else 1.0 / 3.0,
+                source_translation_abs_bound=term.source_translation_abs_bound,
             )
         )
         if flag:
@@ -664,6 +724,7 @@ def _effective_terms(
                 multiplicity_weight=term.multiplicity_weight,
                 anchor_weight=term.anchor_weight,
                 r0_leg_factor=1.0 / 3.0,
+                source_translation_abs_bound=term.source_translation_abs_bound,
             )
         )
         result.append(
@@ -683,6 +744,7 @@ def _effective_terms(
                 multiplicity_weight=term.multiplicity_weight,
                 anchor_weight=term.anchor_weight,
                 r0_leg_factor=1.0 / 3.0,
+                source_translation_abs_bound=term.source_translation_abs_bound,
             )
         )
     return tuple(
@@ -765,7 +827,8 @@ def _permutation_audit(
     indices: Array,
     values: Array,
     contribution_l1: Array,
-) -> tuple[float, int, bool, bool, float]:
+    translation_bounds: Array,
+) -> tuple[float, int, bool, bool, float, float]:
     """Audit an already lexicographically ordered sparse cubic vertex.
 
     A dictionary is deliberately not constructed here.  The compact output
@@ -775,8 +838,17 @@ def _permutation_audit(
 
     if contribution_l1.shape != values.shape:
         raise ValueError("Permutation contribution L1 norms must align with values.")
+    if translation_bounds.shape != values.shape:
+        raise ValueError("Permutation translation bounds must align with values.")
+    if (
+        not np.all(np.isfinite(translation_bounds))
+        or np.any(translation_bounds < 0.0)
+    ):
+        raise ValueError(
+            "Permutation translation bounds must be finite and nonnegative."
+        )
     if len(values) == 0:
-        return 0.0, 0, True, True, 0.0
+        return 0.0, 0, True, True, 0.0, 0.0
     keys = (
         (
             np.asarray(indices[:, 0], dtype=np.uint64) * np.uint64(ndof)
@@ -789,6 +861,7 @@ def _permutation_audit(
     missing = 0
     exact = True
     maximum_roundoff_ratio = 0.0
+    maximum_forward_error_ratio = 0.0
     epsilon = float(np.finfo(np.float64).eps)
     for ordinal, raw_key in enumerate(indices):
         key = tuple(int(value) for value in raw_key)
@@ -811,23 +884,42 @@ def _permutation_audit(
             difference = abs(reference - observed)
             maximum = max(maximum, difference)
             if difference:
-                l1_scale = epsilon * (
+                roundoff_bound = _PERMUTATION_ROUNDOFF_FACTOR * epsilon * (
                     float(contribution_l1[ordinal])
                     + float(contribution_l1[position])
                 )
-                ratio = difference / l1_scale if l1_scale else float("inf")
-                maximum_roundoff_ratio = max(maximum_roundoff_ratio, ratio)
+                arithmetic_scale = roundoff_bound / _PERMUTATION_ROUNDOFF_FACTOR
+                roundoff_ratio = (
+                    difference / arithmetic_scale
+                    if arithmetic_scale
+                    else float("inf")
+                )
+                maximum_roundoff_ratio = max(
+                    maximum_roundoff_ratio, roundoff_ratio
+                )
+                forward_bound = (
+                    roundoff_bound
+                    + float(translation_bounds[ordinal])
+                    + float(translation_bounds[position])
+                )
+                forward_error_ratio = (
+                    difference / forward_bound
+                    if forward_bound
+                    else float("inf")
+                )
+                maximum_forward_error_ratio = max(
+                    maximum_forward_error_ratio, forward_error_ratio
+                )
             if struct.pack("<d", observed) != reference_bytes:
                 exact = False
-    tolerance_passed = missing == 0 and maximum_roundoff_ratio <= (
-        _PERMUTATION_ROUNDOFF_FACTOR
-    )
+    tolerance_passed = missing == 0 and maximum_forward_error_ratio <= 1.0
     return (
         maximum,
         missing,
         tolerance_passed,
         exact,
         maximum_roundoff_ratio,
+        maximum_forward_error_ratio,
     )
 
 
@@ -855,7 +947,7 @@ def _compact_accumulation_preflight(
 ) -> _CompactAccumulationPreflight:
     """Return a no-allocation upper bound for the accumulator workspace.
 
-    The model covers the two compact contribution arrays, the stable-sort
+    The model covers the three compact contribution arrays, the stable-sort
     permutation and scratch space, compact group output, and final decoding.
     It intentionally does not estimate the immutable normalized FC3 input or
     the final returned vertex, which exist independently of accumulation.
@@ -873,12 +965,12 @@ def _compact_accumulation_preflight(
             "accumulator addressing."
         )
     maximum_final = min(count, key_space)
-    payload = count * (_UINT64_BYTES + _FLOAT64_BYTES)
+    payload = count * (_UINT64_BYTES + 2 * _FLOAT64_BYTES)
     stable_order = count * _INDEX_BYTES
     # NumPy's stable indirect sort may require one index-sized scratch array.
     stable_scratch = count * _INDEX_BYTES
     final_compact = maximum_final * (
-        _UINT64_BYTES + 2 * _FLOAT64_BYTES
+        _UINT64_BYTES + 3 * _FLOAT64_BYTES
     )
     sort_peak = payload + stable_order + stable_scratch
     accumulation_peak = payload + stable_order + final_compact
@@ -887,7 +979,7 @@ def _compact_accumulation_preflight(
     # copy, and one uint64 ufunc temporary per final entry.
     finalization_peak = payload + maximum_final * (
         _UINT64_BYTES  # compact final keys
-        + 2 * _FLOAT64_BYTES  # grouped value and contribution L1 result
+        + 3 * _FLOAT64_BYTES  # value, contribution L1, translation bound
         + 3 * int(np.dtype(np.int64).itemsize)  # decoded result indices
         + _UINT64_BYTES  # one decoding ufunc temporary
     )
@@ -921,8 +1013,8 @@ def _preflight_metadata(
 
 def _weighted_nonzero_components(
     term: _EffectiveFC3Term,
-) -> tuple[Array, Array]:
-    """Return C-order component ordinals and legacy-ordered weighted values."""
+) -> tuple[Array, Array, float]:
+    """Return ordinals, weighted values, and their translation error bound."""
 
     weighted = np.array(
         np.asarray(term.values, dtype=np.float64).reshape(-1),
@@ -935,8 +1027,14 @@ def _weighted_nonzero_components(
     weighted *= term.multiplicity_weight
     weighted *= term.anchor_weight
     weighted *= term.r0_leg_factor
+    translation_bound = term.source_translation_abs_bound
+    translation_bound *= abs(term.multiplicity_weight)
+    translation_bound *= abs(term.anchor_weight)
+    translation_bound *= abs(term.r0_leg_factor)
+    if translation_bound:
+        translation_bound = math.nextafter(translation_bound, math.inf)
     nonzero = np.flatnonzero(weighted != 0.0).astype(np.int64, copy=False)
-    return nonzero, weighted[nonzero]
+    return nonzero, weighted[nonzero], translation_bound
 
 
 def _record_ordered_effective_terms(
@@ -961,22 +1059,37 @@ def _record_ordered_effective_terms(
 def _accumulate_compact(
     output_keys: Array,
     contribution_values: Array,
+    contribution_translation_bounds: Array,
     *,
     ndof: int,
-) -> tuple[Array, Array, Array, int, int]:
+) -> tuple[Array, Array, Array, Array, int, int]:
     """Stably group compact records and apply one ``math.fsum`` per output."""
 
     count = int(len(output_keys))
     if contribution_values.shape != (count,):
         raise ValueError("Compact contribution keys and values must align.")
+    if contribution_translation_bounds.shape != (count,):
+        raise ValueError(
+            "Compact contribution translation bounds must align with values."
+        )
+    if (
+        not np.all(np.isfinite(contribution_translation_bounds))
+        or np.any(contribution_translation_bounds < 0.0)
+    ):
+        raise ValueError(
+            "Compact contribution translation bounds must be finite and "
+            "nonnegative."
+        )
     if count == 0:
         indices = np.empty((0, 3), dtype=np.int64)
         values = np.empty((0,), dtype=np.float64)
         contribution_l1 = np.empty((0,), dtype=np.float64)
+        translation_bounds = np.empty((0,), dtype=np.float64)
         indices.setflags(write=False)
         values.setflags(write=False)
         contribution_l1.setflags(write=False)
-        return indices, values, contribution_l1, 0, 0
+        translation_bounds.setflags(write=False)
+        return indices, values, contribution_l1, translation_bounds, 0, 0
 
     # The fill stream is in the legacy record-key order.  A stable indirect
     # sort by output therefore reproduces the old per-output tuple sort while
@@ -993,6 +1106,7 @@ def _accumulate_compact(
     final_keys = np.empty(group_count, dtype=np.uint64)
     final_values = np.empty(group_count, dtype=np.float64)
     final_l1 = np.empty(group_count, dtype=np.float64)
+    final_translation_bounds = np.empty(group_count, dtype=np.float64)
     cursor = 0
     write = 0
     cancellations = 0
@@ -1009,12 +1123,19 @@ def _accumulate_compact(
             abs(float(contribution_values[int(raw_ordinal)]))
             for raw_ordinal in order[cursor:end]
         )
+        translation_bound = math.fsum(
+            float(contribution_translation_bounds[int(raw_ordinal)])
+            for raw_ordinal in order[cursor:end]
+        )
+        if translation_bound:
+            translation_bound = math.nextafter(translation_bound, math.inf)
         if value == 0.0:
             cancellations += 1
         else:
             final_keys[write] = np.uint64(key)
             final_values[write] = value
             final_l1[write] = l1_norm
+            final_translation_bounds[write] = translation_bound
             write += 1
         cursor = end
 
@@ -1030,6 +1151,11 @@ def _accumulate_compact(
     result_l1 = np.array(final_l1[:write], dtype=np.float64, copy=True)
     result_l1.setflags(write=False)
     del final_l1
+    result_translation_bounds = np.array(
+        final_translation_bounds[:write], dtype=np.float64, copy=True
+    )
+    result_translation_bounds.setflags(write=False)
+    del final_translation_bounds
 
     result_indices = np.empty((write, 3), dtype=np.int64)
     keys = final_keys[:write]
@@ -1042,6 +1168,7 @@ def _accumulate_compact(
         result_indices,
         result_values,
         result_l1,
+        result_translation_bounds,
         duplicate_count,
         cancellations,
     )
@@ -1096,12 +1223,14 @@ class FC3DeviceMappingReport:
     observation_layers: tuple[int, ...]
     permutation_max_abs: float
     permutation_max_roundoff_ratio: float
+    permutation_max_forward_error_ratio: float
     permutation_roundoff_factor: float
     permutation_missing_count: int
     permutation_tolerance_passed: bool
     exact_permutation_equality: bool
     permutation_atol: float
     permutation_rtol: float
+    source_translation_max_abs: float
     source_fc3_content_sha256: str
     source_translational_sha256: str
     mass_normalized_fc3_sha256: str
@@ -1246,7 +1375,7 @@ def map_fc3_to_device(
     for term in effective:
         if not np.any(term.values != 0.0):
             continue
-        component_ordinals, _ = _weighted_nonzero_components(term)
+        component_ordinals, _, _ = _weighted_nonzero_components(term)
         component_count = int(len(component_ordinals))
         for representative in device_mapping.direct_coset_representatives:
             mapped = _mapped_geometry(term, representative, device_mapping)
@@ -1292,6 +1421,9 @@ def map_fc3_to_device(
     try:
         output_keys = np.empty(nonzero_contributions, dtype=np.uint64)
         contribution_values = np.empty(nonzero_contributions, dtype=np.float64)
+        contribution_translation_bounds = np.empty(
+            nonzero_contributions, dtype=np.float64
+        )
     except (MemoryError, ValueError) as exc:
         raise MemoryError(
             "Finite FC3 compact accumulation requires at most "
@@ -1319,7 +1451,9 @@ def map_fc3_to_device(
     for term in record_ordered:
         if not np.any(term.values != 0.0):
             continue
-        component_ordinals, weighted = _weighted_nonzero_components(term)
+        component_ordinals, weighted, translation_bound = (
+            _weighted_nonzero_components(term)
+        )
         if len(component_ordinals) == 0:
             continue
         alpha = component_ordinals // 9
@@ -1370,6 +1504,7 @@ def map_fc3_to_device(
                     + np.asarray(third, dtype=np.uint64)
                 )
                 contribution_values[write:stop] = weighted
+                contribution_translation_bounds[write:stop] = translation_bound
                 write = stop
     if write != nonzero_contributions:
         raise RuntimeError(
@@ -1377,10 +1512,18 @@ def map_fc3_to_device(
         )
 
     try:
-        indices, values, contribution_l1, duplicate_count, cancellation_count = (
+        (
+            indices,
+            values,
+            contribution_l1,
+            translation_bounds,
+            duplicate_count,
+            cancellation_count,
+        ) = (
             _accumulate_compact(
                 output_keys,
                 contribution_values,
+                contribution_translation_bounds,
                 ndof=ndof,
             )
         )
@@ -1390,7 +1533,7 @@ def map_fc3_to_device(
             f"modeled {workspace_preflight.estimated_peak_bytes}-byte peak "
             "workspace."
         ) from exc
-    del output_keys, contribution_values
+    del output_keys, contribution_values, contribution_translation_bounds
     physics_hash = _cubic_physics_sha256(ndof, indices, values)
     (
         permutation_max,
@@ -1398,8 +1541,11 @@ def map_fc3_to_device(
         permutation_passed,
         exact_permutation,
         permutation_max_roundoff_ratio,
-    ) = _permutation_audit(ndof, indices, values, contribution_l1)
-    del contribution_l1
+        permutation_max_forward_error_ratio,
+    ) = _permutation_audit(
+        ndof, indices, values, contribution_l1, translation_bounds
+    )
+    del contribution_l1, translation_bounds
 
     # The explicit contact device layers are harmonic-only, noninteracting
     # layers and therefore count toward the FC3 range halo.
@@ -1430,7 +1576,7 @@ def map_fc3_to_device(
         raw_blocks[key] = nonzero
 
     provisional = FC3DeviceMappingReport(
-        schema_version="negfpy.fc3-device-mapping.v2",
+        schema_version="negfpy.fc3-device-mapping.v3",
         raw_term_count=len(fc3.terms),
         nonzero_raw_block_count=sum(raw_blocks.values()),
         exact_zero_raw_block_count=len(raw_blocks) - sum(raw_blocks.values()),
@@ -1457,12 +1603,16 @@ def map_fc3_to_device(
         observation_layers=observations,
         permutation_max_abs=permutation_max,
         permutation_max_roundoff_ratio=permutation_max_roundoff_ratio,
+        permutation_max_forward_error_ratio=(
+            permutation_max_forward_error_ratio
+        ),
         permutation_roundoff_factor=_PERMUTATION_ROUNDOFF_FACTOR,
         permutation_missing_count=permutation_missing,
         permutation_tolerance_passed=permutation_passed,
         exact_permutation_equality=exact_permutation,
         permutation_atol=_PERMUTATION_ATOL,
         permutation_rtol=_PERMUTATION_RTOL,
+        source_translation_max_abs=fc3.source_translation_max_abs,
         source_fc3_content_sha256=fc3.source_fc3_content_sha256,
         source_translational_sha256=fc3.source_translational_sha256,
         mass_normalized_fc3_sha256=fc3.content_sha256,

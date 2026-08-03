@@ -222,7 +222,11 @@ def _patch_bounded_pipeline(
         permutation_max_roundoff_ratio=(
             0.0 if exact_permutation else (1.0 if mapping_certified else 64.0)
         ),
+        permutation_max_forward_error_ratio=(
+            0.0 if exact_permutation else (0.5 if mapping_certified else 2.0)
+        ),
         permutation_roundoff_factor=32.0,
+        source_translation_max_abs=0.0,
         symmetrized=False,
         corrected=False,
         truncated=False,
@@ -346,7 +350,7 @@ def test_roundoff_bounded_nonexact_permutation_scales_and_passes(
     assert outcome["phase_b_certified"]
     assert outcome["checks"]["mapping_certification"]
     assert outcome["checks"]["permutation_support_complete"]
-    assert outcome["checks"]["permutation_roundoff_bound"]
+    assert outcome["checks"]["permutation_forward_error_bound"]
     assert "permutation_exact" not in outcome["checks"]
     assert not outcome["diagnostics"]["permutation"]["exact_bitwise_equality"]
     assert outcome["array_hashes"]["solver_coefficients"] is not None
@@ -390,7 +394,7 @@ def test_failed_mapping_is_archived_without_sparse_scaling(
     assert outcome["checks"]["range_certification"]
     assert not outcome["checks"]["mapping_certification"]
     assert outcome["checks"]["permutation_support_complete"]
-    assert not outcome["checks"]["permutation_roundoff_bound"]
+    assert not outcome["checks"]["permutation_forward_error_bound"]
     assert not outcome["diagnostics"]["permutation"]["exact_bitwise_equality"]
     assert outcome["array_hashes"]["solver_coefficients"] is None
     assert outcome["identities"]["sparse_vertex_storage_sha256"] is None

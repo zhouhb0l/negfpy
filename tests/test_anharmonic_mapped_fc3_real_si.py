@@ -154,11 +154,10 @@ def test_real_si_r0_full_fc3_maps_on_the_minimum_nine_layer_crop() -> None:
     assert mapped.report.harmonic_buffer_layers == ((0, 1), (7, 8))
     assert mapped.report.permutation_tolerance_passed
     assert mapped.report.permutation_missing_count == 0
-    assert mapped.report.permutation_max_roundoff_ratio <= (
-        mapped.report.permutation_roundoff_factor
-    )
+    assert mapped.report.permutation_max_forward_error_ratio <= 1.0
     # Bitwise equality is diagnostic only: the r0 reference-leg paths have
-    # different, but rigorously roundoff-bounded, weighted decompositions.
+    # different weighted decompositions whose arithmetic and authenticated
+    # raw-translation uncertainties are bounded without modifying values.
     assert isinstance(mapped.report.exact_permutation_equality, bool)
     assert mapped.report.certification_passed
     assert mapped.report.failure_codes == ()

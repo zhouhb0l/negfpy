@@ -348,31 +348,110 @@ def test_roundoff_bounded_permutation_is_certified_without_modification() -> Non
     values[0] = np.nextafter(1.0, 2.0)
     original = np.array(values, copy=True)
     contribution_l1 = np.full(len(indices), 8.0, dtype=np.float64)
-    maximum, missing, passed, exact, ratio = _permutation_audit(
+    maximum, missing, passed, exact, ratio, forward_ratio = _permutation_audit(
         3,
         indices,
         values,
         contribution_l1,
+        np.zeros_like(values),
     )
     assert maximum == np.spacing(1.0)
     assert missing == 0
     assert passed
     assert not exact
     assert ratio < 1.0
+    assert forward_ratio < 1.0
     np.testing.assert_array_equal(values, original)
 
     asymmetric = np.array(values, copy=True)
     asymmetric[0] = 1.01
-    _maximum, missing, passed, exact, ratio = _permutation_audit(
+    _maximum, missing, passed, exact, ratio, forward_ratio = _permutation_audit(
         3,
         indices,
         asymmetric,
         contribution_l1,
+        np.zeros_like(values),
     )
     assert missing == 0
     assert not passed
     assert not exact
     assert ratio > 32.0
+    assert forward_ratio > 1.0
+
+
+def test_translation_uncertainty_is_separate_from_arithmetic_roundoff() -> None:
+    indices = np.asarray(sorted(itertools.permutations((0, 1, 2))), dtype=np.int64)
+    values = np.ones(len(indices), dtype=np.float64)
+    values[0] += 1.0e-12
+    contribution_l1 = np.ones(len(indices), dtype=np.float64)
+    translation_bounds = np.full(len(indices), 6.0e-13, dtype=np.float64)
+
+    _maximum, missing, passed, exact, arithmetic_ratio, forward_ratio = (
+        _permutation_audit(
+            3,
+            indices,
+            values,
+            contribution_l1,
+            translation_bounds,
+        )
+    )
+    assert missing == 0
+    assert not exact
+    assert arithmetic_ratio > 32.0
+    assert forward_ratio < 1.0
+    assert passed
+
+    insufficient = np.full(len(indices), 1.0e-14, dtype=np.float64)
+    _maximum, missing, passed, _exact, arithmetic_ratio, forward_ratio = (
+        _permutation_audit(
+            3,
+            indices,
+            values,
+            contribution_l1,
+            insufficient,
+        )
+    )
+    assert missing == 0
+    assert arithmetic_ratio > 32.0
+    assert forward_ratio > 1.0
+    assert not passed
+
+
+def test_measured_translation_residual_is_mass_normalized_not_tolerance_tuned() -> None:
+    translated, crystal, certification = _translational()
+    provenance = dict(translated.provenance)
+    audit = dict(provenance["redundant_translation_audit"])
+    audit["maximum_absolute_residual"] = 2.0e-14
+    provenance["redundant_translation_audit"] = audit
+    with_residual = TranslationalFC3(
+        terms=translated.terms,
+        n_primitive_atoms=translated.n_primitive_atoms,
+        n_supercell_atoms=translated.n_supercell_atoms,
+        units=translated.units,
+        mass_units=translated.mass_units,
+        source_layout=translated.source_layout,
+        phase_convention=translated.phase_convention,
+        anchor_convention=translated.anchor_convention,
+        make_r0_average=translated.make_r0_average,
+        all_shortest=translated.all_shortest,
+        symprec=translated.symprec,
+        provenance=provenance,
+    )
+    normalized = mass_normalize_translational_fc3(
+        with_residual,
+        crystal,
+        source_certification=certification,
+    )
+
+    assert normalized.source_translation_max_abs == 2.0e-14
+    assert all(
+        term.source_translation_abs_bound > 2.0e-14
+        for term in normalized.terms
+    )
+    assert all(
+        term.source_translation_abs_bound < normalized.translation_atol
+        for term in normalized.terms
+    )
 
 
 def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
@@ -403,8 +482,20 @@ def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
         [value for _output, _suffix, value in ordered],
         dtype=np.float64,
     )
-    indices, values, contribution_l1, duplicate_count, cancellation_count = (
-        _accumulate_compact(keys, contributions, ndof=ndof)
+    (
+        indices,
+        values,
+        contribution_l1,
+        translation_bounds,
+        duplicate_count,
+        cancellation_count,
+    ) = (
+        _accumulate_compact(
+            keys,
+            contributions,
+            np.zeros_like(contributions),
+            ndof=ndof,
+        )
     )
 
     legacy: dict[tuple[int, int, int], list[tuple[tuple[int, ...], float]]]
@@ -436,6 +527,7 @@ def test_compact_accumulator_is_bitwise_equal_to_legacy_record_lists() -> None:
         contribution_l1,
         np.asarray([expected_l1[tuple(index)] for index in indices]),
     )
+    np.testing.assert_array_equal(translation_bounds, np.zeros(len(indices)))
 
 
 def test_compact_accumulation_preflight_is_linear_and_allocation_free() -> None:
@@ -443,11 +535,11 @@ def test_compact_accumulation_preflight_is_linear_and_allocation_free() -> None:
     # allocating its arrays.  The compact workspace is hundreds of MB, not
     # the multi-GB Python tuple/list footprint of the former accumulator.
     preflight = _compact_accumulation_preflight(10_000_000, ndof=120)
-    assert preflight.compact_payload_bytes == 160_000_000
+    assert preflight.compact_payload_bytes == 240_000_000
     assert preflight.stable_order_bytes == 80_000_000
     assert preflight.stable_sort_scratch_bytes == 80_000_000
     assert preflight.maximum_final_entry_count == 120**3
-    assert preflight.estimated_peak_bytes == 320_000_000
+    assert preflight.estimated_peak_bytes == 400_000_000
     assert preflight.geometry_pass_count == 2
     assert preflight.retained_periodic_record_count == 0
     assert preflight.retained_python_contribution_record_count == 0

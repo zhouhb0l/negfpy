@@ -112,7 +112,7 @@ def _mapped_fc3(model) -> DeviceMappedFC3:
     values[3:] = 3.0
     physics_hash = _cubic_physics_sha256(ndof, indices, values)
     report = FC3DeviceMappingReport(
-        schema_version="negfpy.fc3-device-mapping.v2",
+        schema_version="negfpy.fc3-device-mapping.v3",
         raw_term_count=2,
         nonzero_raw_block_count=2,
         exact_zero_raw_block_count=0,
@@ -137,12 +137,14 @@ def _mapped_fc3(model) -> DeviceMappedFC3:
         observation_layers=(4,),
         permutation_max_abs=0.0,
         permutation_max_roundoff_ratio=0.0,
+        permutation_max_forward_error_ratio=0.0,
         permutation_roundoff_factor=32.0,
         permutation_missing_count=0,
         permutation_tolerance_passed=True,
         exact_permutation_equality=True,
         permutation_atol=0.0,
         permutation_rtol=float(32.0 * np.finfo(np.float64).eps),
+        source_translation_max_abs=0.0,
         source_fc3_content_sha256="a" * 64,
         source_translational_sha256="b" * 64,
         mass_normalized_fc3_sha256="c" * 64,
