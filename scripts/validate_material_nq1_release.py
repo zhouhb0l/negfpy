@@ -20,6 +20,7 @@ import validate_sparse_nq1_phase_c_scba as case
 from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
+    check_harmonic_embedding_buffer,
     measure_observation_mode_poles,
 )
 from negfpy.anharmonic._provenance import code_provenance
@@ -124,6 +125,32 @@ def _transport_current(outcome: Mapping[str, Any]) -> float:
     return 0.5 * (float(currents["left"]) - float(currents["right"]))
 
 
+def _material_preflight_passed(source: Mapping[str, Any]) -> bool:
+    try:
+        phase_b = source["phase_b"]["archive"]["metadata"]
+        checks = phase_b["checks"]
+        reports = phase_b["reports"]
+        dimensions = source["dimensions"]
+        memory = source["memory"]
+        schedule = source["sparse_schedule"]
+        return bool(
+            source["phase_b"]["phase_b_certified"] is True
+            and phase_b["phase_b_certified"] is True
+            and checks and all(value is True for value in checks.values())
+            and reports["raw_fc3_validation"]["errors"] == []
+            and reports["raw_fc3_validation"]["permutation_valid"] is True
+            and reports["device_mapping"]["certification_passed"] is True
+            and reports["acoustic_lead_classification"]["passed"] is True
+            and dimensions["ndof"] == 216
+            and dimensions["nnz"] == 406080
+            and memory["guard_passed"] is True
+            and schedule["active_dofs"] > 0
+            and schedule["fft_padding"] >= 2 * dimensions["n_frequency"] - 1
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _pole_records(
     fields: Path,
     mode_set: Any,
@@ -203,8 +230,24 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     archived_modes = mpi_driver._load_canonical(modes_path, "observation modes")
     if archived_modes != mode_set.as_dict():
         raise MaterialReleaseValidationError("observation mode manifest changed")
+    buffer_path = root / "harmonic-buffer-preflight.json"
+    archived_buffer = mpi_driver._load_canonical(
+        buffer_path, "harmonic buffer preflight"
+    )
+    recomputed_buffer = dict(check_harmonic_embedding_buffer(
+        problem,
+        frequencies=problem.grid.values[
+            (problem.grid.values > 0.0) & (problem.grid.values <= 2.4)
+        ],
+        eta_lead=base_task.eta_lead,
+    ))
+    if archived_buffer != recomputed_buffer:
+        raise MaterialReleaseValidationError(
+            "harmonic embedding-buffer preflight changed"
+        )
     input_hashes = case._source_hashes(identity) | {
         "observation_modes": mpi_driver._sha256(modes_path),
+        "harmonic_buffer_preflight": mpi_driver._sha256(buffer_path),
     }
     campaign = mpi_driver.build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
@@ -279,6 +322,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             and metadata.get("cubic_kernel") == "sparse_zero_padded_fft"
             and metadata.get("hilbert_backend") == "direct"
             and metadata.get("package_version_consistent") is True
+            and _material_preflight_passed(outcome.get("preflight_source", {}))
         )
         individual_passed = individual_passed and run_passed
         per_run[task.task_id] = {
@@ -291,6 +335,9 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             "collision_power_abs_w": collision_error,
             "sigma_pp_tail_ratio": tail,
             "weak_coupling_passed": weak_passed,
+            "material_preflight_passed": _material_preflight_passed(
+                outcome.get("preflight_source", {})
+            ),
             "mode_poles": list(pole),
             "provenance": provenance_record,
             "passed": run_passed,
@@ -381,6 +428,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "directional_refinements": refinement_passed,
         "bias_reversal_and_linear_conductance": bias_passed,
         "resolved_observation_modes_nonempty": bool(mode_set.subspaces),
+        "harmonic_embedding_buffer": archived_buffer.get("passed") is True,
         "nq1_scope_only": True,
     }
     release_certified = all(gates.values())
@@ -392,6 +440,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "environment_lock": lock,
         "campaign_manifest_sha256": campaign.manifest.manifest_sha256,
         "observation_modes": archived_modes,
+        "harmonic_buffer_preflight": archived_buffer,
         "per_run": per_run,
         "comparisons": {
             "zero_vs_born_fields": zero_born,

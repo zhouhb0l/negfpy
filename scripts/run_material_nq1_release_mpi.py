@@ -29,6 +29,7 @@ from negfpy.anharmonic._material_nq1_mpi import (
 )
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
+    check_harmonic_embedding_buffer,
 )
 from negfpy.anharmonic._mpi_tasks import TaskResult
 from negfpy.anharmonic._provenance import code_provenance
@@ -269,8 +270,25 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     modes_path = _atomic_json(
         campaign_root / "observation-modes.json", mode_set.as_dict()
     )
+    buffer_frequencies = base_problem.grid.values[
+        (base_problem.grid.values > 0.0)
+        & (base_problem.grid.values <= 2.4)
+    ]
+    buffer_report = dict(check_harmonic_embedding_buffer(
+        base_problem,
+        frequencies=buffer_frequencies,
+        eta_lead=base_task.eta_lead,
+    ))
+    if buffer_report["passed"] is not True:
+        raise MaterialCampaignError(
+            "harmonic embedding-buffer preflight failed before SCBA launch"
+        )
+    buffer_path = _atomic_json(
+        campaign_root / "harmonic-buffer-preflight.json", buffer_report
+    )
     input_hashes = case._source_hashes(identity) | {
         "observation_modes": _sha256(modes_path),
+        "harmonic_buffer_preflight": _sha256(buffer_path),
     }
     campaign = build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
@@ -407,6 +425,11 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             "sha256": _sha256(modes_path),
             "mode_set_sha256": mode_set.as_dict()["mode_set_sha256"],
             "resolved_subspace_count": len(mode_set.subspaces),
+        },
+        "harmonic_buffer_preflight": {
+            "path": buffer_path.name,
+            "sha256": _sha256(buffer_path),
+            "passed": buffer_report["passed"],
         },
         "statuses": dict(report.statuses),
         "complete": report.complete,

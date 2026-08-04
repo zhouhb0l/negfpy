@@ -63,3 +63,28 @@ def test_pole_refinement_checks_linewidth_and_shift_separately() -> None:
 
 def test_current_change_has_explicit_physical_floor() -> None:
     assert validation._scaled_change(0.0, 5.0e-12, 1.0e-10) == pytest.approx(0.05)
+
+
+def test_material_preflight_requires_every_phase_b_and_memory_gate() -> None:
+    source = {
+        "phase_b": {
+            "phase_b_certified": True,
+            "archive": {"metadata": {
+                "phase_b_certified": True,
+                "checks": {"mapping": True, "range": True},
+                "reports": {
+                    "raw_fc3_validation": {
+                        "errors": [], "permutation_valid": True,
+                    },
+                    "device_mapping": {"certification_passed": True},
+                    "acoustic_lead_classification": {"passed": True},
+                },
+            }},
+        },
+        "dimensions": {"n_frequency": 151, "ndof": 216, "nnz": 406080},
+        "memory": {"guard_passed": True},
+        "sparse_schedule": {"active_dofs": 120, "fft_padding": 320},
+    }
+    assert validation._material_preflight_passed(source)
+    source["memory"]["guard_passed"] = False
+    assert not validation._material_preflight_passed(source)
