@@ -79,6 +79,16 @@ def _write_parent(
         "environment_lock": {"sha256": ENVIRONMENT},
         "run_id": "parent",
         "coupling_scale": parent_scale,
+        "numerical_controls": {
+            "grid_step": float(problem.grid.step),
+            "grid_n_positive": int(problem.grid.n_positive),
+            "grid_cutoff": float(problem.grid.cutoff),
+            "eta_lead": float(config.eta_lead),
+            "mixing": float(config.mixing),
+            "temperature_bias": float(
+                problem.left.temperature - problem.right.temperature
+            ),
+        },
         "outputs": {"checkpoint": str(checkpoint.resolve())},
     }
     manifest_path = root / "campaign-manifest.json"
@@ -127,6 +137,7 @@ def test_completed_lower_coupling_campaign_seeds_and_binds_child(
         source_tree_sha256=SOURCE_TREE,
         environment_sha256=ENVIRONMENT,
         child_coupling_scale=0.02,
+        continuation_axis="coupling",
     )
 
     assert initial is not None and record is not None
@@ -155,6 +166,7 @@ def test_parent_coupling_must_be_strictly_lower(
             source_tree_sha256=SOURCE_TREE,
             environment_sha256=ENVIRONMENT,
             child_coupling_scale=0.02,
+            continuation_axis="coupling",
         )
 
 
@@ -171,6 +183,7 @@ def test_failed_or_tampered_parent_is_rejected(tmp_path: Path) -> None:
             source_tree_sha256=SOURCE_TREE,
             environment_sha256=ENVIRONMENT,
             child_coupling_scale=0.02,
+            continuation_axis="coupling",
         )
 
     good_problem, good_config = _write_parent(tmp_path / "tampered")
@@ -187,4 +200,46 @@ def test_failed_or_tampered_parent_is_rejected(tmp_path: Path) -> None:
             source_tree_sha256=SOURCE_TREE,
             environment_sha256=ENVIRONMENT,
             child_coupling_scale=0.02,
+            continuation_axis="coupling",
+        )
+
+
+def test_temperature_bias_continuation_allows_only_outward_same_branch(
+    tmp_path: Path,
+) -> None:
+    parent, config = _write_parent(tmp_path / "parent", parent_scale=0.01)
+    child = replace(
+        parent,
+        left=replace(parent.left, temperature=0.9),
+        right=replace(parent.right, temperature=0.5),
+    )
+    initial, record = driver._continuation_initial_state(
+        parent_artifacts=tmp_path / "parent",
+        identity=_identity(),
+        problem=child,
+        config=config,
+        source_tree_sha256=SOURCE_TREE,
+        environment_sha256=ENVIRONMENT,
+        child_coupling_scale=0.01,
+        continuation_axis="temperature_bias",
+    )
+    assert initial is not None
+    assert record is not None
+    assert record["continuation_axis"] == "temperature_bias"
+
+    opposite = replace(
+        parent,
+        left=replace(parent.left, temperature=0.5),
+        right=replace(parent.right, temperature=0.9),
+    )
+    with pytest.raises(driver.SCBACaseError, match="same branch"):
+        driver._continuation_initial_state(
+            parent_artifacts=tmp_path / "parent",
+            identity=_identity(),
+            problem=opposite,
+            config=config,
+            source_tree_sha256=SOURCE_TREE,
+            environment_sha256=ENVIRONMENT,
+            child_coupling_scale=0.01,
+            continuation_axis="temperature_bias",
         )

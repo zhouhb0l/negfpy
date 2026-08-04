@@ -252,11 +252,20 @@ def _continuation_initial_state(
     source_tree_sha256: str,
     environment_sha256: str,
     child_coupling_scale: float,
+    continuation_axis: str | None,
 ) -> tuple[Any | None, dict[str, Any] | None]:
     """Authenticate a completed lower-coupling campaign and load its state."""
 
     if parent_artifacts is None:
+        if continuation_axis is not None:
+            raise SCBACaseError(
+                "continuation_axis requires continuation parent artifacts"
+            )
         return None, None
+    if continuation_axis not in {"coupling", "temperature_bias"}:
+        raise SCBACaseError(
+            "a continuation parent requires axis 'coupling' or 'temperature_bias'"
+        )
     root = parent_artifacts.expanduser().resolve(strict=True)
     if not root.is_dir():
         raise SCBACaseError("continuation parent artifacts must be a directory")
@@ -319,11 +328,51 @@ def _continuation_initial_state(
         isinstance(parent_scale, bool)
         or not isinstance(parent_scale, (int, float))
         or not np.isfinite(parent_scale)
-        or not 0.0 < float(parent_scale) < child_coupling_scale
+        or not 0.0 < float(parent_scale) <= 1.0
     ):
-        raise SCBACaseError(
-            "continuation parent coupling must be positive and strictly below the child"
-        )
+        raise SCBACaseError("continuation parent coupling is invalid")
+    parent_controls = manifest.get("numerical_controls")
+    if not isinstance(parent_controls, dict):
+        raise SCBACaseError("continuation parent numerical controls are missing")
+    current_controls = {
+        "grid_step": float(problem.grid.step),
+        "grid_n_positive": int(problem.grid.n_positive),
+        "grid_cutoff": float(problem.grid.cutoff),
+        "eta_lead": float(config.eta_lead),
+        "mixing": float(config.mixing),
+        "temperature_bias": float(
+            problem.left.temperature - problem.right.temperature
+        ),
+    }
+    if set(parent_controls) != set(current_controls):
+        raise SCBACaseError("continuation parent numerical controls are incomplete")
+    if continuation_axis == "coupling":
+        if not float(parent_scale) < child_coupling_scale:
+            raise SCBACaseError(
+                "coupling-continuation parent must be strictly below the child"
+            )
+        if parent_controls != current_controls:
+            raise SCBACaseError(
+                "coupling continuation cannot change numerical or temperature controls"
+            )
+    else:
+        if float(parent_scale) != child_coupling_scale:
+            raise SCBACaseError(
+                "temperature-bias continuation cannot change cubic coupling"
+            )
+        for name in set(current_controls) - {"temperature_bias"}:
+            if parent_controls.get(name) != current_controls[name]:
+                raise SCBACaseError(
+                    f"temperature-bias continuation changed {name!r}"
+                )
+        parent_bias = float(parent_controls["temperature_bias"])
+        child_bias = current_controls["temperature_bias"]
+        if not abs(parent_bias) < abs(child_bias) or (
+            parent_bias != 0.0 and np.signbit(parent_bias) != np.signbit(child_bias)
+        ):
+            raise SCBACaseError(
+                "temperature-bias parent must be closer to zero on the same branch"
+            )
     if manifest.get("source_tree_sha256") != source_tree_sha256:
         raise SCBACaseError("continuation parent source-tree hash differs")
     if manifest.get("environment_lock", {}).get("sha256") != environment_sha256:
@@ -359,10 +408,9 @@ def _continuation_initial_state(
             )
     if parent_identity.grid_sha256 != current_hashes["frequency_grid"]:
         raise SCBACaseError("continuation parent frequency grid differs")
-    stable = (
-        "device", "left_reservoir", "right_reservoir", "frequency_grid",
-        "solver_scale",
-    )
+    stable = ["device", "frequency_grid", "solver_scale"]
+    if continuation_axis == "coupling":
+        stable.extend(("left_reservoir", "right_reservoir"))
     for name in stable:
         if parent_identity.problem_hashes.get(name) != current_hashes.get(name):
             raise SCBACaseError(
@@ -381,6 +429,7 @@ def _continuation_initial_state(
         "artifacts": str(root),
         "run_id": manifest.get("run_id"),
         "coupling_scale": float(parent_scale),
+        "continuation_axis": continuation_axis,
         "campaign_manifest_sha256": manifest_sha,
         "status_sha256": status_sha,
         "report_sha256": report_sha,
@@ -439,6 +488,7 @@ def preflight_scba_inputs(
     source_tree_sha256: str, environment_sha256: str, run_id: str,
     coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
+    continuation_axis: str | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
@@ -460,6 +510,7 @@ def preflight_scba_inputs(
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
         child_coupling_scale=coupling_scale,
+        continuation_axis=continuation_axis,
     )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -513,6 +564,7 @@ def run_scba_case(
     campaign_manifest_sha256: str, source_tree_sha256: str, environment_sha256: str,
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
+    continuation_axis: str | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
@@ -531,6 +583,7 @@ def run_scba_case(
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
         child_coupling_scale=coupling_scale,
+        continuation_axis=continuation_axis,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
@@ -598,6 +651,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--coupling-scale", type=float, default=1.0)
     parser.add_argument("--continuation-parent-artifacts", type=Path)
+    parser.add_argument(
+        "--continuation-axis", choices=("coupling", "temperature_bias")
+    )
     parser.add_argument("--grid-step", type=float)
     parser.add_argument("--grid-n-positive", type=int)
     parser.add_argument("--eta-lead", type=float)
@@ -618,6 +674,7 @@ def main() -> int:
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
+                continuation_axis=args.continuation_axis,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 temperature_bias=args.temperature_bias,
@@ -632,6 +689,7 @@ def main() -> int:
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
+                continuation_axis=args.continuation_axis,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 temperature_bias=args.temperature_bias,
