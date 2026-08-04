@@ -13,13 +13,14 @@ from negfpy.anharmonic._material_nq1_campaign import (
 
 def test_release_task_graph_is_complete_topological_and_preregistered() -> None:
     tasks = silicon_nq1_release_tasks()
-    assert len(tasks) == 18
-    assert [task.task_id for task in tasks[:8]] == [
-        "coupling-g001", "coupling-g0025", "coupling-g005", "coupling-g010",
+    assert len(tasks) == 19
+    assert [task.task_id for task in tasks[:9]] == [
+        "coupling-g0001", "coupling-g001", "coupling-g0025",
+        "coupling-g005", "coupling-g010",
         "coupling-g025", "coupling-g050", "coupling-g075", "coupling-g100",
     ]
-    assert [task.coupling_scale for task in tasks[:8]] == [
-        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0,
+    assert [task.coupling_scale for task in tasks[:9]] == [
+        0.001, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0,
     ]
     by_id = {task.task_id: task for task in tasks}
     for index, task in enumerate(tasks):
@@ -78,7 +79,7 @@ def test_campaign_manifest_hashes_all_tasks_inputs_and_acceptance() -> None:
     second = silicon_nq1_release_manifest(**kwargs)
     assert first == second
     assert len(first["campaign_sha256"]) == 64
-    assert len(first["tasks"]) == 18
+    assert len(first["tasks"]) == 19
     assert first["acceptance"]["refinement_rtol"] == 5.0e-3
     changed = silicon_nq1_release_manifest(
         **{**kwargs, "input_hashes": {"fc2": "e" * 64, "fc3": "d" * 64}}

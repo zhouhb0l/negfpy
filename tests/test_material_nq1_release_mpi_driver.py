@@ -29,7 +29,7 @@ def _fixture(tmp_path: Path):
         environment_sha256="b" * 64,
         input_hashes={"fc2": "c" * 64, "fc3": "d" * 64},
     )
-    scientific = campaign.task("coupling-g001")
+    scientific = campaign.task("coupling-g0001")
     spec = campaign.manifest.task(scientific.task_id)
     receipt_path = tmp_path / "000000-0123456789abcdef.json"
     data = receipt_path.with_suffix(".data")
@@ -91,7 +91,7 @@ def _fixture(tmp_path: Path):
 def test_material_receipt_authenticates_entire_terminal_tree(tmp_path: Path) -> None:
     receipt, spec, _scba, _checkpoint = _fixture(tmp_path)
     evidence = driver._receipt_evidence(receipt, spec)
-    assert evidence["task_id"] == "coupling-g001"
+    assert evidence["task_id"] == "coupling-g0001"
     assert evidence["state"] == "passed"
 
 

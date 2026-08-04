@@ -60,7 +60,7 @@ def main() -> int:
         execution_id=args.execution_id,
     )
     if MPI.COMM_WORLD.Get_rank() == 0:
-        if report is None or not report.complete or len(report.statuses) != 18:
+        if report is None or not report.complete or len(report.statuses) != 19:
             raise RuntimeError("MPI material smoke campaign is incomplete")
         print(json.dumps(dict(report.statuses), sort_keys=True))
     return 0

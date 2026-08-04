@@ -165,7 +165,8 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
     tasks: list[MaterialSCBATask] = []
     previous: str | None = None
     for token, coupling in (
-        ("001", 0.01), ("0025", 0.025), ("005", 0.05), ("010", 0.1),
+        ("0001", 0.001), ("001", 0.01), ("0025", 0.025),
+        ("005", 0.05), ("010", 0.1),
         ("025", 0.25), ("050", 0.5), ("075", 0.75), ("100", 1.0),
     ):
         task_id = f"coupling-g{token}"

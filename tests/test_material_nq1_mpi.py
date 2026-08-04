@@ -28,19 +28,21 @@ def _validator(path, task):
 
 def test_material_mpi_waves_preserve_dependencies_and_fanout() -> None:
     campaign = _campaign()
-    assert len(campaign.scientific_tasks) == 18
-    assert len(campaign.waves) == 10
-    assert campaign.waves[:8] == tuple(
+    assert len(campaign.scientific_tasks) == 19
+    assert len(campaign.waves) == 11
+    assert campaign.waves[:9] == tuple(
         (f"coupling-g{token}",)
-        for token in ("001", "0025", "005", "010", "025", "050", "075", "100")
+        for token in (
+            "0001", "001", "0025", "005", "010", "025", "050", "075", "100"
+        )
     )
-    assert set(campaign.waves[8]) == {
+    assert set(campaign.waves[9]) == {
         "bias-positive-half", "bias-negative-half", "endpoint-zero-start",
         "endpoint-born-start", "refinement-half-spacing",
         "refinement-larger-cutoff", "refinement-half-eta",
         "refinement-mixing-010",
     }
-    assert campaign.waves[9] == ("bias-positive-full", "bias-negative-full")
+    assert campaign.waves[10] == ("bias-positive-full", "bias-negative-full")
     assert task_dependencies(campaign.task("endpoint-zero-start")) == (
         "coupling-g100",
     )
@@ -70,9 +72,9 @@ def test_serial_material_task_campaign_merges_in_canonical_order(
         execution_id="serial-test",
     )
     assert report is not None and report.complete
-    assert seen == [task.task_id for task in campaign.scientific_tasks[:8]] + list(
-        campaign.waves[8]
-    ) + list(campaign.waves[9])
+    assert seen == [task.task_id for task in campaign.scientific_tasks[:9]] + list(
+        campaign.waves[9]
+    ) + list(campaign.waves[10])
     assert list(report.statuses) == [
         task.task_id for task in campaign.scientific_tasks
     ]
