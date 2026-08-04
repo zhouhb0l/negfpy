@@ -62,3 +62,32 @@ def test_failed_qualification_attempts_are_append_only(tmp_path: Path) -> None:
     assert (tmp_path / "failure.log").is_file()
     assert (tmp_path / "failure-attempt-002.log").is_file()
     assert len(list(tmp_path.glob("failure*.receipt.json"))) == 2
+
+
+def test_passed_receipt_rejects_runtime_package_identity_drift(
+    tmp_path: Path,
+) -> None:
+    command = [sys.executable, "-c", "print('runtime-bound')"]
+    first_environment = _environment() | {
+        "NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64
+    }
+    qualification._run(
+        command,
+        cwd=tmp_path,
+        environment=first_environment,
+        log=tmp_path / "runtime.log",
+        label="runtime check",
+    )
+    changed_environment = _environment() | {
+        "NEGFPY_QUALIFICATION_RUNTIME_SHA256": "b" * 64
+    }
+    with pytest.raises(
+        qualification.QualificationError, match="different identity"
+    ):
+        qualification._run(
+            command,
+            cwd=tmp_path,
+            environment=changed_environment,
+            log=tmp_path / "runtime.log",
+            label="runtime check",
+        )

@@ -58,6 +58,7 @@ def _run(
             "PYTHONHASHSEED", "PYTHONPATH", "OMP_NUM_THREADS",
             "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
             "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+            "NEGFPY_QUALIFICATION_RUNTIME_SHA256",
         )
     }
     identity_payload = {
@@ -170,6 +171,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
 
     evidence: dict[str, Any] = {}
     versions: dict[str, str] = {}
+    runtime_environments: dict[str, dict[str, str]] = {}
     for label, executable in interpreters.items():
         version = subprocess.run(
             [str(executable), "-c", "import sys; print(sys.version.split()[0])"],
@@ -182,10 +184,42 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         expected_minor = "3.10." if label == "python310" else "3.12."
         if not versions[label].startswith(expected_minor):
             raise QualificationError(f"{label} has wrong version {versions[label]!r}")
+        packages = subprocess.run(
+            [str(executable), "-m", "pip", "freeze", "--all"],
+            cwd=repo,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if packages.returncode != 0 or not packages.stdout:
+            raise QualificationError(f"{label} package manifest is unavailable")
+        packages_sha = hashlib.sha256(packages.stdout).hexdigest()
+        package_path = evidence_root / f"{label}-packages-{packages_sha[:16]}.txt"
+        package_record = _publish_log(package_path, packages.stdout)
+        executable_sha = release._sha256(executable)
+        runtime_payload = {
+            "schema": "negfpy.material-nq1-python-runtime.v1",
+            "label": label,
+            "version": versions[label],
+            "executable": str(executable),
+            "executable_sha256": executable_sha,
+            "packages_sha256": packages_sha,
+        }
+        runtime_sha = hashlib.sha256(
+            release._canonical(runtime_payload)
+        ).hexdigest()
+        runtime_environment = dict(environment)
+        runtime_environment["NEGFPY_QUALIFICATION_RUNTIME_SHA256"] = runtime_sha
+        runtime_environments[label] = runtime_environment
+        evidence[f"{label}_runtime"] = runtime_payload | {
+            "runtime_sha256": runtime_sha,
+            "package_manifest": package_record,
+        }
         evidence[f"{label}_pytest"] = _run(
             [str(executable), "-m", "pytest", "-q", *QUALIFICATION_TEST_TARGETS],
             cwd=repo,
-            environment=environment,
+            environment=runtime_environment,
             log=evidence_root / f"{label}-pytest.log",
             label=f"full {label} test suite",
         )
@@ -204,7 +238,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
                     "--execution-id", f"qualification-ranks-{ranks}",
                 ],
                 cwd=repo,
-                environment=environment,
+                environment=runtime_environments["python312"],
                 log=evidence_root / f"mpi-ranks-{ranks}.log",
                 label=f"{ranks}-rank MPI smoke test",
             )
