@@ -37,7 +37,11 @@ from negfpy.anharmonic._checkpoint_v2 import (
 from negfpy.anharmonic._material_nq1_problem import (
     build_material_nq1_problem_from_phase_b,
 )
-from negfpy.anharmonic._provenance import configuration_hash, problem_input_hashes
+from negfpy.anharmonic._provenance import (
+    configuration_hash,
+    initial_self_energy_hash,
+    problem_input_hashes,
+)
 from negfpy.anharmonic.exceptions import SCBAConvergenceError
 from negfpy.anharmonic._checkpoint import CheckpointDependencyError
 
@@ -65,6 +69,17 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _load_canonical_json(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = path.read_bytes()
+        value = json.loads(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise SCBACaseError(f"{label} is not readable strict JSON") from error
+    if not isinstance(value, dict) or payload != _canonical(value):
+        raise SCBACaseError(f"{label} is not a canonical JSON object")
+    return value
 
 
 def _array_sha256(value: Any) -> str:
@@ -135,15 +150,30 @@ def _config() -> SCBAConfig:
     )
 
 
-def _source_hashes(identity: Mapping[str, Any]) -> dict[str, str]:
+def _source_hashes(
+    identity: Mapping[str, Any],
+    continuation_parent: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     phase_b = identity["phase_b"]
-    return {
+    result = {
         "phase_a_fixture": identity["fixture"]["fixture_manifest_sha256"],
         "raw_fc3": identity["fc3_full"]["raw_sha256"],
         "phase_b_artifact_set": phase_b["artifact_set_sha256"],
         "phase_b_mapped_hdf5": phase_b["archive"]["sha256"],
         "phase_b_campaign_manifest": phase_b["campaign_manifest_sha256"],
     }
+    if continuation_parent is not None:
+        result.update({
+            "continuation_parent_campaign_manifest": continuation_parent[
+                "campaign_manifest_sha256"
+            ],
+            "continuation_parent_checkpoint": continuation_parent[
+                "checkpoint_sha256"
+            ],
+            "continuation_parent_report": continuation_parent["report_sha256"],
+            "continuation_parent_status": continuation_parent["status_sha256"],
+        })
+    return result
 
 
 def authenticate_scba_inputs(
@@ -183,35 +213,103 @@ def authenticate_scba_inputs(
 
 def _continuation_initial_state(
     *,
-    checkpoint: Path | None,
+    parent_artifacts: Path | None,
     identity: Mapping[str, Any],
     problem: Any,
     config: SCBAConfig,
     source_tree_sha256: str,
     environment_sha256: str,
+    child_coupling_scale: float,
 ) -> tuple[Any | None, dict[str, Any] | None]:
-    """Validate and load a completed coupling-continuation parent.
+    """Authenticate a completed lower-coupling campaign and load its state."""
 
-    A parent is allowed to differ only in its cubic vertex/problem hash.  The
-    device, contacts, grid, solver scale, configuration, source files,
-    environment, and source revision must be identical.  This prevents a
-    convenient-looking warm start from silently crossing a physical or
-    numerical boundary.
-    """
-
-    if checkpoint is None:
+    if parent_artifacts is None:
         return None, None
-    source = checkpoint.expanduser().resolve()
+    root = parent_artifacts.expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise SCBACaseError("continuation parent artifacts must be a directory")
+    manifest_path = root / "campaign-manifest.json"
+    status_path = root / "status.json"
+    report_path = root / "scba-report.json"
+    checkpoint_path = root / "checkpoint" / "sigma-pp.h5"
+    for path, label in (
+        (manifest_path, "campaign manifest"),
+        (status_path, "terminal status"),
+        (report_path, "SCBA report"),
+        (checkpoint_path, "checkpoint"),
+    ):
+        if not path.is_file() or path.is_symlink():
+            raise SCBACaseError(
+                f"continuation parent {label} is missing or is not a regular file"
+            )
+
+    manifest = _load_canonical_json(manifest_path, "continuation parent manifest")
+    status = _load_canonical_json(status_path, "continuation parent status")
+    report = _load_canonical_json(report_path, "continuation parent report")
+    manifest_sha = _sha256_file(manifest_path)
+    status_sha = _sha256_file(status_path)
+    report_sha = _sha256_file(report_path)
+    checkpoint_sha_before = _sha256_file(checkpoint_path)
+
+    if manifest.get("schema") != "negfpy.sparse-nq1-phase-c-scba-campaign.v1":
+        raise SCBACaseError("continuation parent campaign schema is invalid")
+    if status.get("schema") != "negfpy.sparse-nq1-phase-c-scba-status.v1":
+        raise SCBACaseError("continuation parent status schema is invalid")
+    if report.get("schema") != "negfpy.sparse-nq1-phase-c-scba-report.v1":
+        raise SCBACaseError("continuation parent report schema is invalid")
+    if (
+        status.get("state") != "passed"
+        or status.get("scba_converged") is not True
+        or report.get("state") != "passed"
+        or report.get("scba_converged") is not True
+    ):
+        raise SCBACaseError(
+            "continuation parent is not a completed converged campaign"
+        )
+    if (
+        status.get("campaign_manifest_sha256") != manifest_sha
+        or report.get("campaign_manifest_sha256") != manifest_sha
+    ):
+        raise SCBACaseError("continuation parent records do not bind one manifest")
+    if status.get("report_sha256") != report_sha:
+        raise SCBACaseError("continuation parent status does not bind its report")
+    if report.get("checkpoint_sha256") != checkpoint_sha_before:
+        raise SCBACaseError("continuation parent report does not bind its checkpoint")
+    declared_checkpoint = manifest.get("outputs", {}).get("checkpoint")
+    if not isinstance(declared_checkpoint, str) or Path(
+        declared_checkpoint
+    ).expanduser().resolve() != checkpoint_path:
+        raise SCBACaseError(
+            "continuation parent manifest checkpoint path is inconsistent"
+        )
+    parent_scale = manifest.get("coupling_scale")
+    if (
+        isinstance(parent_scale, bool)
+        or not isinstance(parent_scale, (int, float))
+        or not np.isfinite(parent_scale)
+        or not 0.0 < float(parent_scale) < child_coupling_scale
+    ):
+        raise SCBACaseError(
+            "continuation parent coupling must be positive and strictly below the child"
+        )
+    if manifest.get("source_tree_sha256") != source_tree_sha256:
+        raise SCBACaseError("continuation parent source-tree hash differs")
+    if manifest.get("environment_lock", {}).get("sha256") != environment_sha256:
+        raise SCBACaseError("continuation parent environment hash differs")
+
     try:
-        parent = load_scba_checkpoint_v2_self_validating(source)
+        parent = load_scba_checkpoint_v2_self_validating(checkpoint_path)
     except Exception as error:
         raise SCBACaseError(
-            f"continuation parent checkpoint is invalid: {source}: {error}"
+            f"continuation parent checkpoint is invalid: {checkpoint_path}: {error}"
         ) from error
-    if parent.status != "completed":
+    checkpoint_sha_after = _sha256_file(checkpoint_path)
+    if checkpoint_sha_after != checkpoint_sha_before:
+        raise SCBACaseError("continuation parent checkpoint changed during authentication")
+    if parent.status != "completed":  # also enforced by checkpoint_initial_sigma_v2
         raise SCBACaseError(
             "continuation parents must be completed checkpoints; "
-            f"{source} has status {parent.status!r}"
+            f"{checkpoint_path} has status {parent.status!r}"
         )
     parent_identity = parent.identity
     current_hashes = problem_input_hashes(problem)
@@ -222,8 +320,11 @@ def _continuation_initial_state(
         raise SCBACaseError("continuation parent environment hash differs")
     if parent_identity.configuration_sha256 != configuration_hash(config):
         raise SCBACaseError("continuation parent SCBA configuration differs")
-    if parent_identity.source_hashes != current_sources:
-        raise SCBACaseError("continuation parent material/source hashes differ")
+    for name, digest in current_sources.items():
+        if parent_identity.source_hashes.get(name) != digest:
+            raise SCBACaseError(
+                f"continuation parent material/source hash differs for {name!r}"
+            )
     if parent_identity.grid_sha256 != current_hashes["frequency_grid"]:
         raise SCBACaseError("continuation parent frequency grid differs")
     stable = (
@@ -245,10 +346,15 @@ def _continuation_initial_state(
     except CheckpointDependencyError as error:  # defensive; status checked above
         raise SCBACaseError(str(error)) from error
     return initial, {
-        "path": str(source),
-        "sha256": _sha256_file(source),
-        "identity_sha256": parent_identity.identity_sha256,
-        "status": parent.status,
+        "artifacts": str(root),
+        "run_id": manifest.get("run_id"),
+        "coupling_scale": float(parent_scale),
+        "campaign_manifest_sha256": manifest_sha,
+        "status_sha256": status_sha,
+        "report_sha256": report_sha,
+        "checkpoint_sha256": checkpoint_sha_after,
+        "checkpoint_identity_sha256": parent_identity.identity_sha256,
+        "initial_sigma_sha256": initial_self_energy_hash(problem, initial),
     }
 
 
@@ -299,7 +405,8 @@ def preflight_scba_inputs(
     *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     source_tree_sha256: str, environment_sha256: str, run_id: str,
-    coupling_scale: float = 1.0, initial_checkpoint: Path | None = None,
+    coupling_scale: float = 1.0,
+    continuation_parent_artifacts: Path | None = None,
 ) -> dict[str, Any]:
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
         if path.exists() or path.is_symlink():
@@ -309,9 +416,11 @@ def preflight_scba_inputs(
         coupling_scale=coupling_scale,
     )
     initial_sigma_pp, parent = _continuation_initial_state(
-        checkpoint=initial_checkpoint, identity=identity, problem=problem,
+        parent_artifacts=continuation_parent_artifacts,
+        identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
+        child_coupling_scale=coupling_scale,
     )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +430,8 @@ def preflight_scba_inputs(
     checkpoint_identity = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
         initial_sigma_pp=initial_sigma_pp,
-        source_hashes=_source_hashes(identity), source_tree_sha256=source_tree_sha256,
+        source_hashes=_source_hashes(identity, parent),
+        source_tree_sha256=source_tree_sha256,
     )
     predicted = int(problem.grid.n_points * problem.ndof * problem.ndof * 288)
     return {
@@ -353,22 +463,25 @@ def run_scba_case(
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     campaign_manifest_sha256: str, source_tree_sha256: str, environment_sha256: str,
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
-    initial_checkpoint: Path | None = None,
+    continuation_parent_artifacts: Path | None = None,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
     )
     initial_sigma_pp, parent = _continuation_initial_state(
-        checkpoint=initial_checkpoint, identity=identity, problem=problem,
+        parent_artifacts=continuation_parent_artifacts,
+        identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
+        child_coupling_scale=coupling_scale,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
         initial_sigma_pp=initial_sigma_pp,
-        source_hashes=_source_hashes(identity), source_tree_sha256=source_tree_sha256,
+        source_hashes=_source_hashes(identity, parent),
+        source_tree_sha256=source_tree_sha256,
     )
     start = time.perf_counter()
     result = None
@@ -376,7 +489,8 @@ def run_scba_case(
     try:
         result = solve_sparse_scba_checkpointed(
             problem, config, checkpoint_path=checkpoint, run_id=run_id,
-            environment_sha256=environment_sha256, source_hashes=_source_hashes(identity),
+            environment_sha256=environment_sha256,
+            source_hashes=_source_hashes(identity, parent),
             source_tree_sha256=source_tree_sha256, resume=resume,
             initial_sigma_pp=initial_sigma_pp,
         )
@@ -398,7 +512,9 @@ def run_scba_case(
         "schema": ARCHIVE_SCHEMA, "campaign_manifest_sha256": campaign_manifest_sha256,
         "checkpoint_identity_sha256": expected.identity_sha256,
         "problem_sha256": identity["problem_input_hashes"]["problem"],
-        "configuration_sha256": configuration_hash(config), "result": summary,
+        "configuration_sha256": configuration_hash(config),
+        "continuation_parent": parent,
+        "result": summary,
         "timings_seconds": {"total": time.perf_counter() - start},
         "scba_executed": True, "release_certified": False,
     }
@@ -425,7 +541,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--environment-sha256", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--coupling-scale", type=float, default=1.0)
-    parser.add_argument("--initial-checkpoint", type=Path)
+    parser.add_argument("--continuation-parent-artifacts", type=Path)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
@@ -440,7 +556,7 @@ def main() -> int:
                 checkpoint=args.checkpoint, output_json=args.output_json, output_hdf5=args.output_hdf5,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
-                initial_checkpoint=args.initial_checkpoint,
+                continuation_parent_artifacts=args.continuation_parent_artifacts,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -451,7 +567,7 @@ def main() -> int:
                 campaign_manifest_sha256=args.campaign_manifest_sha256,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
-                initial_checkpoint=args.initial_checkpoint,
+                continuation_parent_artifacts=args.continuation_parent_artifacts,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2
