@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,58 @@ def _run(
     log: Path,
     label: str,
 ) -> dict[str, Any]:
+    selected_environment = {
+        name: environment.get(name)
+        for name in (
+            "PYTHONHASHSEED", "PYTHONPATH", "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+            "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+        )
+    }
+    identity_payload = {
+        "schema": "negfpy.material-nq1-qualification-check-identity.v1",
+        "label": label,
+        "command": list(command),
+        "cwd": str(cwd.resolve()),
+        "environment": selected_environment,
+    }
+    identity_sha256 = hashlib.sha256(
+        release._canonical(identity_payload)
+    ).hexdigest()
+    stem = log.stem
+    suffix = log.suffix
+    prior_receipts = sorted(log.parent.glob(f"{stem}*.receipt.json"))
+    for receipt_path in prior_receipts:
+        receipt = release._load_canonical(
+            receipt_path, f"qualification receipt for {label}"
+        )
+        if receipt.get("identity_sha256") != identity_sha256:
+            raise QualificationError(
+                f"existing {label} evidence has a different identity"
+            )
+        archived_log = log.parent / str(receipt.get("log_path"))
+        if (
+            not archived_log.is_file()
+            or release._sha256(archived_log) != receipt.get("log_sha256")
+        ):
+            raise QualificationError(f"existing {label} evidence is corrupt")
+        if receipt.get("returncode") == 0:
+            return {
+                "command": list(command),
+                "returncode": 0,
+                "path": archived_log.name,
+                "sha256": receipt["log_sha256"],
+                "size": archived_log.stat().st_size,
+                "receipt_path": receipt_path.name,
+                "receipt_sha256": release._sha256(receipt_path),
+                "reused": True,
+            }
+    attempt = len(prior_receipts) + 1
+    attempt_log = (
+        log if attempt == 1
+        else log.with_name(f"{stem}-attempt-{attempt:03d}{suffix}")
+    )
+    receipt_path = attempt_log.with_suffix(".receipt.json")
     completed = subprocess.run(
         list(command),
         cwd=cwd,
@@ -59,13 +112,28 @@ def _run(
         stderr=subprocess.STDOUT,
         check=False,
     )
-    record = _publish_log(log, completed.stdout)
+    record = _publish_log(attempt_log, completed.stdout)
     record.update({
         "command": list(command),
         "returncode": int(completed.returncode),
     })
+    receipt = {
+        "schema": "negfpy.material-nq1-qualification-check.v1",
+        "identity": identity_payload,
+        "identity_sha256": identity_sha256,
+        "attempt": attempt,
+        "log_path": attempt_log.name,
+        "log_sha256": record["sha256"],
+        "returncode": int(completed.returncode),
+    }
+    release._atomic_json(receipt_path, receipt)
+    record.update({
+        "receipt_path": receipt_path.name,
+        "receipt_sha256": release._sha256(receipt_path),
+        "reused": False,
+    })
     if completed.returncode != 0:
-        raise QualificationError(f"{label} failed; see {log}")
+        raise QualificationError(f"{label} failed; see {attempt_log}")
     return record
 
 
