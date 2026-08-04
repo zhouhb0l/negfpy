@@ -1186,6 +1186,23 @@ def restore_scba_checkpoint_result_v2(
     )
 
 
+def checkpoint_initial_sigma_v2(checkpoint: SCBACheckpointV2) -> KeldyshSpectrum:
+    """Return a completed checkpoint's lesser/greater pair for continuation."""
+
+    if not isinstance(checkpoint, SCBACheckpointV2):
+        raise TypeError("checkpoint must be an SCBACheckpointV2.")
+    if checkpoint.status != "completed":
+        raise CheckpointDependencyError(
+            "only a completed SCBA checkpoint may seed a coupling continuation."
+        )
+    shape = checkpoint.sigma_lesser.shape
+    return KeldyshSpectrum(
+        retarded=np.zeros(shape, dtype=np.complex128),
+        lesser=checkpoint.sigma_lesser,
+        greater=checkpoint.sigma_greater,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _SolverResumeState:
     sigma_lesser: Array
@@ -1518,6 +1535,7 @@ __all__ = [
     "SCBACheckpointIdentityV2",
     "SCBACheckpointV2",
     "SCBAContinuationState",
+    "checkpoint_initial_sigma_v2",
     "SparseSCBACheckpoint",
     "SparseSCBACheckpointIdentity",
     "load_scba_checkpoint_v2",

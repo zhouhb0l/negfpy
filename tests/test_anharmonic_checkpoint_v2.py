@@ -18,11 +18,13 @@ from negfpy.anharmonic import (
 )
 from negfpy.anharmonic._checkpoint import (
     CheckpointCorruptionError,
+    CheckpointDependencyError,
     CheckpointMismatchError,
 )
 from negfpy.anharmonic._checkpoint_v2 import (
     SCBACheckpointV2,
     SCBAContinuationState,
+    checkpoint_initial_sigma_v2,
     load_scba_checkpoint_v2,
     make_scba_checkpoint_identity_v2,
     solve_sparse_scba_checkpointed,
@@ -214,6 +216,27 @@ def test_terminal_round_trip_stores_only_restart_state_and_recomputes(
     assert restored.diagnostics.metrics == original.diagnostics.metrics
     assert restored.diagnostics.failures == original.diagnostics.failures
     assert restored.diagnostics.passed == original.diagnostics.passed
+
+
+def test_only_completed_checkpoint_can_seed_continuation(tmp_path: Path) -> None:
+    problem = _problem()
+    config = _config()
+    path = tmp_path / "continuation.h5"
+    _run(path, problem, config)
+    checkpoint = load_scba_checkpoint_v2(path, expected_identity=_identity(problem, config))
+    initial = checkpoint_initial_sigma_v2(checkpoint)
+    np.testing.assert_array_equal(initial.lesser, checkpoint.sigma_lesser)
+    np.testing.assert_array_equal(initial.greater, checkpoint.sigma_greater)
+    assert np.count_nonzero(initial.retarded) == 0
+
+    failed_config = _config(failure=True)
+    failed_path = tmp_path / "failed.h5"
+    _run(failed_path, problem, failed_config)
+    failed = load_scba_checkpoint_v2(
+        failed_path, expected_identity=_identity(problem, failed_config)
+    )
+    with pytest.raises(CheckpointDependencyError, match="completed SCBA checkpoint"):
+        checkpoint_initial_sigma_v2(failed)
 
 
 def test_infrastructure_interruption_exactly_resumes_iteration_history(
