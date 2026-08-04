@@ -102,12 +102,13 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         if not versions[label].startswith(expected_minor):
             raise QualificationError(f"{label} has wrong version {versions[label]!r}")
         evidence[f"{label}_pytest"] = _run(
-            [str(executable), "-m", "pytest", "-q"],
+            [str(executable), "-m", "pytest", "-q", "tests"],
             cwd=repo,
             environment=environment,
             log=evidence_root / f"{label}-pytest.log",
             label=f"full {label} test suite",
         )
+        evidence[f"{label}_pytest"]["scope"] = "tests/"
 
     mpiexec = args.mpiexec.expanduser().resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="negf-material-mpi-qualification-") as name:
