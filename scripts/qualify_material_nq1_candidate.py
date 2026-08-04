@@ -33,11 +33,6 @@ QUALIFICATION_TEST_TARGETS = (
     "tests",
     "docs/validation/bulk-rta-report/tests",
 )
-PYTHON310_TEST_EXCLUSIONS = (
-    "test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes",
-)
-
-
 def _publish_log(path: Path, payload: bytes) -> dict[str, Any]:
     common._publish_once(path, payload)
     return {
@@ -219,26 +214,15 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
             "runtime_sha256": runtime_sha,
             "package_manifest": package_record,
         }
-        pytest_command = [
-            str(executable), "-m", "pytest", "-q", *QUALIFICATION_TEST_TARGETS,
-        ]
-        if label == "python310":
-            pytest_command.extend([
-                "-k", " and ".join(
-                    f"not {name}" for name in PYTHON310_TEST_EXCLUSIONS
-                ),
-            ])
         evidence[f"{label}_pytest"] = _run(
-            pytest_command,
+            [str(executable), "-m", "pytest", "-q", *QUALIFICATION_TEST_TARGETS],
             cwd=repo,
             environment=runtime_environment,
             log=evidence_root / f"{label}-pytest.log",
             label=f"full {label} test suite",
         )
         evidence[f"{label}_pytest"]["scope"] = list(QUALIFICATION_TEST_TARGETS)
-        evidence[f"{label}_pytest"]["excluded_tests"] = (
-            list(PYTHON310_TEST_EXCLUSIONS) if label == "python310" else []
-        )
+        evidence[f"{label}_pytest"]["excluded_tests"] = []
 
     mpiexec = args.mpiexec.expanduser().resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="negf-material-mpi-qualification-") as name:
