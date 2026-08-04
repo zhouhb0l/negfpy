@@ -26,6 +26,7 @@ from negfpy.anharmonic._checkpoint_v2 import (
     SCBAContinuationState,
     checkpoint_initial_sigma_v2,
     load_scba_checkpoint_v2,
+    load_scba_checkpoint_v2_self_validating,
     make_scba_checkpoint_identity_v2,
     solve_sparse_scba_checkpointed,
     write_scba_checkpoint_v2,
@@ -237,6 +238,18 @@ def test_only_completed_checkpoint_can_seed_continuation(tmp_path: Path) -> None
     )
     with pytest.raises(CheckpointDependencyError, match="completed SCBA checkpoint"):
         checkpoint_initial_sigma_v2(failed)
+
+
+def test_self_validating_loader_rechecks_the_stored_identity(tmp_path: Path) -> None:
+    problem = _problem()
+    config = _config()
+    path = tmp_path / "self-validating.h5"
+    _run(path, problem, config)
+    checkpoint = load_scba_checkpoint_v2_self_validating(path)
+    assert checkpoint.status == "completed"
+    assert checkpoint.identity.identity_sha256 == _identity(
+        problem, config
+    ).identity_sha256
 
 
 def test_infrastructure_interruption_exactly_resumes_iteration_history(
