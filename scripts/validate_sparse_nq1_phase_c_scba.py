@@ -130,10 +130,10 @@ def _publish_once(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _config() -> SCBAConfig:
+def _config(*, eta_lead: float | None = None, mixing: float | None = None) -> SCBAConfig:
     # These controls are intentionally explicit and immutable for this case.
     return SCBAConfig(
-        eta_lead=phase_c.ETA_LEAD,
+        eta_lead=phase_c.ETA_LEAD if eta_lead is None else float(eta_lead),
         eta_device=0.0,
         retarded_strategy="causal_hilbert",
         hilbert_backend="direct",
@@ -142,7 +142,7 @@ def _config() -> SCBAConfig:
         max_iterations=200,
         min_iterations=3,
         consecutive_passes=3,
-        mixing=0.2,
+        mixing=0.2 if mixing is None else float(mixing),
         mixing_floor=0.01,
         on_nonconvergence="raise",
         max_memory_fraction=phase_c.MEMORY_FRACTION,
@@ -179,13 +179,45 @@ def _source_hashes(
 def authenticate_scba_inputs(
     *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
     coupling_scale: float = 1.0,
+    grid_step: float | None = None,
+    grid_n_positive: int | None = None,
+    eta_lead: float | None = None,
+    mixing: float | None = None,
+    temperature_bias: float | None = None,
 ) -> tuple[dict[str, Any], Any, SCBAConfig]:
     if not np.isfinite(coupling_scale) or coupling_scale <= 0.0 or coupling_scale > 1.0:
         raise SCBACaseError("coupling_scale must be finite and in (0, 1]")
+    resolved_step = phase_c.GRID_STEP if grid_step is None else float(grid_step)
+    resolved_n_positive = (
+        phase_c.GRID_N_POSITIVE if grid_n_positive is None else int(grid_n_positive)
+    )
+    resolved_eta = phase_c.ETA_LEAD if eta_lead is None else float(eta_lead)
+    resolved_mixing = 0.2 if mixing is None else float(mixing)
+    resolved_bias = (
+        phase_c.TEMPERATURE_BIAS
+        if temperature_bias is None else float(temperature_bias)
+    )
+    if not np.isfinite(resolved_step) or resolved_step <= 0.0:
+        raise SCBACaseError("grid_step must be finite and positive")
+    if resolved_n_positive < 1:
+        raise SCBACaseError("grid_n_positive must be a positive integer")
+    if not np.isfinite(resolved_eta) or resolved_eta <= 0.0:
+        raise SCBACaseError("eta_lead must be finite and positive")
+    if not np.isfinite(resolved_mixing) or not 0.0 < resolved_mixing <= 1.0:
+        raise SCBACaseError("mixing must be finite and in (0, 1]")
+    if not np.isfinite(resolved_bias):
+        raise SCBACaseError("temperature_bias must be finite")
     identity, problem, _born_config = phase_c.authenticate_phase_c_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts
     )
-    if coupling_scale != 1.0:
+    controls_changed = (
+        coupling_scale != 1.0
+        or resolved_step != phase_c.GRID_STEP
+        or resolved_n_positive != phase_c.GRID_N_POSITIVE
+        or resolved_eta != phase_c.ETA_LEAD
+        or resolved_bias != phase_c.TEMPERATURE_BIAS
+    )
+    if controls_changed:
         # Reuse the authenticated Phase-B source and harmonic model, changing
         # only the explicitly recorded continuation factor.  This is a new
         # problem identity, never a mutation of the certified archive.
@@ -196,17 +228,17 @@ def authenticate_scba_inputs(
             model,
             vertex,
             phase_b_set["archive"],
-            grid=SignedFrequencyGrid(step=phase_c.GRID_STEP, n_positive=phase_c.GRID_N_POSITIVE),
+            grid=SignedFrequencyGrid(step=resolved_step, n_positive=resolved_n_positive),
             mean_temperature=phase_c.MEAN_TEMPERATURE,
-            temperature_bias=phase_c.TEMPERATURE_BIAS,
+            temperature_bias=resolved_bias,
             coupling_scale=coupling_scale,
         )
         identity = dict(identity)
         identity["problem_input_hashes"] = problem_input_hashes(problem)
-    config = _config()
+    config = _config(eta_lead=resolved_eta, mixing=resolved_mixing)
     # The Phase-C assembly is the authenticated source of the material
     # problem.  Only the SCBA iteration controls differ from the Born gate.
-    if problem.grid.n_points != phase_c.GRID_N_POINTS or problem.ndof != phase_c.N_DEVICE_DOFS:
+    if problem.ndof != phase_c.N_DEVICE_DOFS:
         raise SCBACaseError("authenticated material dimensions changed")
     return identity, problem, config
 
@@ -407,6 +439,11 @@ def preflight_scba_inputs(
     source_tree_sha256: str, environment_sha256: str, run_id: str,
     coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
+    grid_step: float | None = None,
+    grid_n_positive: int | None = None,
+    eta_lead: float | None = None,
+    mixing: float | None = None,
+    temperature_bias: float | None = None,
 ) -> dict[str, Any]:
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
         if path.exists() or path.is_symlink():
@@ -414,6 +451,8 @@ def preflight_scba_inputs(
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
+        grid_step=grid_step, grid_n_positive=grid_n_positive,
+        eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
     )
     initial_sigma_pp, parent = _continuation_initial_state(
         parent_artifacts=continuation_parent_artifacts,
@@ -449,6 +488,16 @@ def preflight_scba_inputs(
         "outputs": {"json": str(output_json.resolve()), "hdf5": str(output_hdf5.resolve())},
         "dimensions": {"n_frequency": problem.grid.n_points, "ndof": problem.ndof, "nnz": problem.vertex.nnz},
         "predicted_peak_memory_bytes": predicted,
+        "numerical_controls": {
+            "grid_step": float(problem.grid.step),
+            "grid_n_positive": int(problem.grid.n_positive),
+            "grid_cutoff": float(problem.grid.cutoff),
+            "eta_lead": float(config.eta_lead),
+            "mixing": float(config.mixing),
+            "temperature_bias": float(
+                problem.left.temperature - problem.right.temperature
+            ),
+        },
         "controls": _plain(config),
         "fixed_controls_no_retuning": True,
         "resume_exact_identity": True,
@@ -464,10 +513,17 @@ def run_scba_case(
     campaign_manifest_sha256: str, source_tree_sha256: str, environment_sha256: str,
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
+    grid_step: float | None = None,
+    grid_n_positive: int | None = None,
+    eta_lead: float | None = None,
+    mixing: float | None = None,
+    temperature_bias: float | None = None,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
+        grid_step=grid_step, grid_n_positive=grid_n_positive,
+        eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
     )
     initial_sigma_pp, parent = _continuation_initial_state(
         parent_artifacts=continuation_parent_artifacts,
@@ -542,6 +598,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--coupling-scale", type=float, default=1.0)
     parser.add_argument("--continuation-parent-artifacts", type=Path)
+    parser.add_argument("--grid-step", type=float)
+    parser.add_argument("--grid-n-positive", type=int)
+    parser.add_argument("--eta-lead", type=float)
+    parser.add_argument("--mixing", type=float)
+    parser.add_argument("--temperature-bias", type=float)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
@@ -557,6 +618,9 @@ def main() -> int:
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
+                grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
+                eta_lead=args.eta_lead, mixing=args.mixing,
+                temperature_bias=args.temperature_bias,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -568,6 +632,9 @@ def main() -> int:
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
+                grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
+                eta_lead=args.eta_lead, mixing=args.mixing,
+                temperature_bias=args.temperature_bias,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2
