@@ -91,3 +91,26 @@ def test_passed_receipt_rejects_runtime_package_identity_drift(
             log=tmp_path / "runtime.log",
             label="runtime check",
         )
+
+
+def test_passed_receipt_rejects_tool_path_identity_drift(tmp_path: Path) -> None:
+    command = [sys.executable, "-c", "print('tool-path-bound')"]
+    first_environment = _environment() | {"PATH": "/validated/tools:/usr/bin"}
+    qualification._run(
+        command,
+        cwd=tmp_path,
+        environment=first_environment,
+        log=tmp_path / "tool-path.log",
+        label="tool path check",
+    )
+    changed_environment = _environment() | {"PATH": "/usr/bin"}
+    with pytest.raises(
+        qualification.QualificationError, match="different identity"
+    ):
+        qualification._run(
+            command,
+            cwd=tmp_path,
+            environment=changed_environment,
+            log=tmp_path / "tool-path.log",
+            label="tool path check",
+        )

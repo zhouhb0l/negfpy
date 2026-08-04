@@ -57,6 +57,7 @@ def _run(
             "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
             "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
             "NEGFPY_QUALIFICATION_RUNTIME_SHA256",
+            "PATH",
         )
     }
     identity_payload = {
