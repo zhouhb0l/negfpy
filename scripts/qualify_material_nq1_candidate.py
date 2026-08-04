@@ -82,6 +82,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
     for name in (
         "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
     ):
         environment[name] = "1"
     environment["PYTHONHASHSEED"] = "0"
@@ -210,6 +211,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
             environment[name] == "1" for name in (
                 "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
             )
         ),
     }
