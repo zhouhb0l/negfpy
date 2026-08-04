@@ -48,7 +48,7 @@ def _source_hash() -> str:
 
 def _manifest(
     *, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path,
-    expected_commit: str, environment_lock: Path, run_id: str,
+    expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float,
 ) -> dict[str, Any]:
     repo = repo.resolve()
     artifacts = artifacts.resolve()
@@ -61,6 +61,7 @@ def _manifest(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b,
         checkpoint=checkpoint, output_json=output_json, output_hdf5=output_hdf5,
         source_tree_sha256=_source_hash(), environment_sha256=lock["sha256"], run_id=run_id,
+        coupling_scale=coupling_scale,
     )
     driver = repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"
     if not driver.is_file():
@@ -74,6 +75,7 @@ def _manifest(
         "driver": {"relative_path": "scripts/validate_sparse_nq1_phase_c_scba.py", "sha256": _sha256(driver)},
         "preflight": preflight,
         "run_id": run_id,
+        "coupling_scale": coupling_scale,
         "fixed_controls_no_retuning": True,
         "restart": {"checkpoint_schema": case.CHECKPOINT_SCHEMA, "resume_exact_identity": True, "automatic_retry": False},
         "watchdog": {"wall_limit_seconds": common.WALL_LIMIT_SECONDS, "rss_limit_bytes": common.RSS_LIMIT_BYTES, "term_grace_seconds": common.TERM_GRACE_SECONDS, "automatic_retry": False},
@@ -142,7 +144,7 @@ def _infrastructure_failure(artifacts: Path, manifest_path: Path, log_path: Path
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, resume: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, resume: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
@@ -162,16 +164,18 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
             raise common.CampaignError("environment lock changed during SCBA resume")
         if manifest.get("driver", {}).get("sha256") != _sha256(repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"):
             raise common.CampaignError("SCBA driver changed during resume")
+        if manifest.get("coupling_scale") != coupling_scale:
+            raise common.CampaignError("coupling scale changed during SCBA resume")
     else:
         if any(artifacts.iterdir()):
             raise common.CampaignError("nonempty artifact directory has no manifest; refusing overwrite")
-        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id)
+        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale)
         common._publish_once(manifest_path, _canonical(manifest))
     manifest_sha = _sha256(manifest_path)
     if not running_path.exists():
         common._publish_once(running_path, _canonical({"schema": STATUS_SCHEMA, "campaign_manifest_sha256": manifest_sha, "state": "running", "automatic_retry": False, "release_certified": False}))
     output = manifest["outputs"]
-    command = (sys.executable, str(repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"), "--fixture", str(fixture.resolve()), "--fc3-full", str(fc3_full.resolve()), "--phase-b-artifacts", str(phase_b.resolve()), "--checkpoint", str(Path(output["checkpoint"]).resolve()), "--output-json", str(Path(output["json"]).resolve()), "--output-hdf5", str(Path(output["hdf5"]).resolve()), "--campaign-manifest-sha256", manifest_sha, "--source-tree-sha256", manifest["source_tree_sha256"], "--environment-sha256", manifest["environment_lock"]["sha256"], "--run-id", manifest["run_id"])
+    command = (sys.executable, str(repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"), "--fixture", str(fixture.resolve()), "--fc3-full", str(fc3_full.resolve()), "--phase-b-artifacts", str(phase_b.resolve()), "--checkpoint", str(Path(output["checkpoint"]).resolve()), "--output-json", str(Path(output["json"]).resolve()), "--output-hdf5", str(Path(output["hdf5"]).resolve()), "--campaign-manifest-sha256", manifest_sha, "--source-tree-sha256", manifest["source_tree_sha256"], "--environment-sha256", manifest["environment_lock"]["sha256"], "--run-id", manifest["run_id"], "--coupling-scale", str(manifest["coupling_scale"]),)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_path = log_path.with_suffix(".stdout.tmp")
     stderr_path = log_path.with_suffix(".stderr.tmp")
@@ -194,15 +198,16 @@ def main() -> int:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--environment-lock", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--coupling-scale", type=float, required=True)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, resume=args.resume)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, resume=args.resume)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if status.get("state") == "passed" else 2
     except Exception as error:

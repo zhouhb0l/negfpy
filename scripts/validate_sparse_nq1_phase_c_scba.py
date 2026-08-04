@@ -26,12 +26,16 @@ from typing import Any, Mapping
 import numpy as np
 
 import validate_sparse_nq1_phase_c_born as phase_c
-from negfpy.anharmonic import SCBAConfig
+import validate_sparse_nq1_phase_b as phase_b
+from negfpy.anharmonic import SCBAConfig, SignedFrequencyGrid
 from negfpy.anharmonic._checkpoint_v2 import (
     load_scba_checkpoint_v2,
     solve_sparse_scba_checkpointed,
 )
-from negfpy.anharmonic._provenance import configuration_hash
+from negfpy.anharmonic._material_nq1_problem import (
+    build_material_nq1_problem_from_phase_b,
+)
+from negfpy.anharmonic._provenance import configuration_hash, problem_input_hashes
 from negfpy.anharmonic.exceptions import SCBAConvergenceError
 
 
@@ -140,11 +144,32 @@ def _source_hashes(identity: Mapping[str, Any]) -> dict[str, str]:
 
 
 def authenticate_scba_inputs(
-    *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path
+    *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
+    coupling_scale: float = 1.0,
 ) -> tuple[dict[str, Any], Any, SCBAConfig]:
+    if not np.isfinite(coupling_scale) or coupling_scale <= 0.0 or coupling_scale > 1.0:
+        raise SCBACaseError("coupling_scale must be finite and in (0, 1]")
     identity, problem, _born_config = phase_c.authenticate_phase_c_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts
     )
+    if coupling_scale != 1.0:
+        # Reuse the authenticated Phase-B source and harmonic model, changing
+        # only the explicitly recorded continuation factor.  This is a new
+        # problem identity, never a mutation of the certified archive.
+        model = phase_c._load_harmonic_model(fixture)
+        phase_b_set = phase_c.verify_phase_b_artifact_set(phase_b_artifacts)
+        vertex = phase_b.load_phase_b_sparse_vertex(Path(phase_b_set["hdf5_path"]))
+        problem = build_material_nq1_problem_from_phase_b(
+            model,
+            vertex,
+            phase_b_set["archive"],
+            grid=SignedFrequencyGrid(step=phase_c.GRID_STEP, n_positive=phase_c.GRID_N_POSITIVE),
+            mean_temperature=phase_c.MEAN_TEMPERATURE,
+            temperature_bias=phase_c.TEMPERATURE_BIAS,
+            coupling_scale=coupling_scale,
+        )
+        identity = dict(identity)
+        identity["problem_input_hashes"] = problem_input_hashes(problem)
     config = _config()
     # The Phase-C assembly is the authenticated source of the material
     # problem.  Only the SCBA iteration controls differ from the Born gate.
@@ -200,12 +225,14 @@ def preflight_scba_inputs(
     *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     source_tree_sha256: str, environment_sha256: str, run_id: str,
+    coupling_scale: float = 1.0,
 ) -> dict[str, Any]:
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
         if path.exists() or path.is_symlink():
             raise SCBACaseError(f"{label} already exists; refusing overwrite")
     identity, problem, config = authenticate_scba_inputs(
-        fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts
+        fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
+        coupling_scale=coupling_scale,
     )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +248,7 @@ def preflight_scba_inputs(
         "schema": PREFLIGHT_SCHEMA,
         "source": identity,
         "run_id": run_id,
+        "coupling_scale": coupling_scale,
         "source_tree_sha256": source_tree_sha256,
         "environment_sha256": environment_sha256,
         "configuration_sha256": configuration_hash(config),
@@ -243,10 +271,11 @@ def run_scba_case(
     *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     campaign_manifest_sha256: str, source_tree_sha256: str, environment_sha256: str,
-    run_id: str, resume: bool = True,
+    run_id: str, resume: bool = True, coupling_scale: float = 1.0,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
-        fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts
+        fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
+        coupling_scale=coupling_scale,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
@@ -305,6 +334,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-tree-sha256", required=True)
     parser.add_argument("--environment-sha256", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--coupling-scale", type=float, default=1.0)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
@@ -318,7 +348,7 @@ def main() -> int:
                 fixture=args.fixture, fc3_full=args.fc3_full, phase_b_artifacts=args.phase_b_artifacts,
                 checkpoint=args.checkpoint, output_json=args.output_json, output_hdf5=args.output_hdf5,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
-                run_id=args.run_id,
+                run_id=args.run_id, coupling_scale=args.coupling_scale,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -328,7 +358,7 @@ def main() -> int:
                 checkpoint=args.checkpoint, output_json=args.output_json, output_hdf5=args.output_hdf5,
                 campaign_manifest_sha256=args.campaign_manifest_sha256,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
-                run_id=args.run_id, resume=not args.no_resume,
+                run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2
