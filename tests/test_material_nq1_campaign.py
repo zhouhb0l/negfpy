@@ -49,6 +49,11 @@ def test_every_release_grid_covers_three_harmonic_bounds() -> None:
     assert by_id["refinement-half-spacing"].grid_step == pytest.approx(0.05)
     assert by_id["refinement-half-spacing"].grid_cutoff == pytest.approx(7.5)
     assert by_id["refinement-larger-cutoff"].grid_cutoff == pytest.approx(9.0)
+    assert all(
+        task.temperature_bias_kelvin == pytest.approx(20.0)
+        for task in silicon_nq1_release_tasks()
+        if task.role == "numerical-refinement"
+    )
 
 
 def test_physical_bias_conversion_and_reservoir_temperatures_are_explicit() -> None:

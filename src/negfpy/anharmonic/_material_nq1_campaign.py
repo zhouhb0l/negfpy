@@ -216,22 +216,34 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
         MaterialSCBATask(
             task_id="refinement-half-spacing", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "grid_step": 0.05, "grid_n_positive": 150},
+            **{
+                **base, "grid_step": 0.05, "grid_n_positive": 150,
+                "temperature_bias_kelvin": 20.0,
+            },
         ),
         MaterialSCBATask(
             task_id="refinement-larger-cutoff", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "grid_n_positive": 90},
+            **{
+                **base, "grid_n_positive": 90,
+                "temperature_bias_kelvin": 20.0,
+            },
         ),
         MaterialSCBATask(
             task_id="refinement-half-eta", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "eta_lead": 0.0125},
+            **{
+                **base, "eta_lead": 0.0125,
+                "temperature_bias_kelvin": 20.0,
+            },
         ),
         MaterialSCBATask(
             task_id="refinement-mixing-010", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "mixing": 0.1},
+            **{
+                **base, "mixing": 0.1,
+                "temperature_bias_kelvin": 20.0,
+            },
         ),
     ))
     result = tuple(tasks)
