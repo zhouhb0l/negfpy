@@ -63,7 +63,9 @@ def _problem_pair(*, cubic: float) -> tuple[CubicSCBAProblem, CubicSCBAProblem]:
     return dense_problem, sparse_problem
 
 
-def _config(*, backend: str = "serial") -> SCBAConfig:
+def _config(
+    *, backend: str = "serial", hilbert_backend: str = "direct"
+) -> SCBAConfig:
     return SCBAConfig(
         eta_lead=1.0e-4,
         max_iterations=50,
@@ -76,6 +78,7 @@ def _config(*, backend: str = "serial") -> SCBAConfig:
         current_rtol=1.0e-3,
         current_atol=1.0e-8,
         backend=backend,  # type: ignore[arg-type]
+        hilbert_backend=hilbert_backend,  # type: ignore[arg-type]
         max_workers=2 if backend == "threaded" else None,
     )
 
@@ -173,6 +176,24 @@ def test_dense_sparse_converged_scba_full_fields() -> None:
     )
     _assert_full_fields_equal(dense, sparse)
     _assert_currents_equal(dense, sparse)
+
+
+def test_sparse_scba_fft_hilbert_matches_direct_full_fields() -> None:
+    _, sparse_problem = _problem_pair(cubic=0.002)
+    direct = solve_scba(
+        sparse_problem,
+        _config(backend="fft", hilbert_backend="direct"),
+    )
+    accelerated = solve_scba(
+        sparse_problem,
+        _config(backend="fft", hilbert_backend="fft"),
+    )
+
+    assert direct.converged and accelerated.converged
+    _assert_full_fields_equal(direct, accelerated)
+    _assert_currents_equal(direct, accelerated)
+    assert direct.metadata["hilbert_backend"] == "direct"
+    assert accelerated.metadata["hilbert_backend"] == "fft"
 
 
 def test_sparse_zero_vertex_matches_dense_exactly() -> None:

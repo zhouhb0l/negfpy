@@ -137,7 +137,7 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None) -> SC
         eta_lead=phase_c.ETA_LEAD if eta_lead is None else float(eta_lead),
         eta_device=0.0,
         retarded_strategy="causal_hilbert",
-        hilbert_backend="direct",
+        hilbert_backend="fft",
         backend="fft",
         max_workers=1,
         max_iterations=200,

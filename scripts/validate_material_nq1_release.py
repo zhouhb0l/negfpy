@@ -327,7 +327,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             and metadata.get("dtype") == "complex128"
             and metadata.get("effective_backend") == "fft"
             and metadata.get("cubic_kernel") == "sparse_zero_padded_fft"
-            and metadata.get("hilbert_backend") == "direct"
+            and metadata.get("hilbert_backend") == "fft"
             and metadata.get("package_version_consistent") is True
             and _material_preflight_passed(outcome.get("preflight_source", {}))
         )
