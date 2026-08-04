@@ -236,7 +236,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         frequencies=problem.grid.values[
             (problem.grid.values > 0.0) & (problem.grid.values <= 2.4)
         ],
-        eta_lead=base.eta_lead,
+        eta_lead=1.0e-8,
     ))
     if not buffer["passed"]:
         raise QualificationError("harmonic embedding-buffer preflight failed")

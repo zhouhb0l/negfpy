@@ -316,7 +316,10 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     buffer_report = dict(check_harmonic_embedding_buffer(
         base_problem,
         frequencies=buffer_frequencies,
-        eta_lead=base_task.eta_lead,
+        # This is a conservative harmonic embedding identity check.  Use a
+        # near-zero surface regulator so the test is not measuring the finite
+        # lead broadening used by the SCBA campaign itself.
+        eta_lead=1.0e-8,
     ))
     if buffer_report["passed"] is not True:
         raise MaterialCampaignError(

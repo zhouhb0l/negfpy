@@ -245,7 +245,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         frequencies=problem.grid.values[
             (problem.grid.values > 0.0) & (problem.grid.values <= 2.4)
         ],
-        eta_lead=base_task.eta_lead,
+        eta_lead=1.0e-8,
     ))
     if archived_buffer != recomputed_buffer:
         raise MaterialReleaseValidationError(
