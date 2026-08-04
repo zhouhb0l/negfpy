@@ -29,17 +29,8 @@ class QualificationError(RuntimeError):
 
 
 QUALIFICATION_TEST_TARGETS = (
-    "tests/test_material_nq1_campaign.py",
-    "tests/test_material_nq1_validation.py",
-    "tests/test_material_nq1_release_validation.py",
-    "tests/test_material_nq1_mpi.py",
-    "tests/test_material_nq1_release_mpi_driver.py",
-    "tests/test_anharmonic_checkpoint_v2.py",
-    "tests/test_anharmonic_sparse_cubic.py",
-    "tests/test_anharmonic_sparse_solver.py",
-    "tests/test_material_nq1_problem.py",
-    "tests/test_sparse_nq1_phase_c_continuation.py",
-    "tests/test_sparse_nq1_phase_c_scba_campaign.py",
+    "tests",
+    "docs/validation/bulk-rta-report/tests",
 )
 
 
@@ -215,8 +206,12 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
     final_source = common._source_identity(repo, args.expected_commit)
     checks = {
         "source_clean_and_unchanged": final_source == source,
-        "python_310_full_suite": evidence["python310_pytest"]["returncode"] == 0,
-        "python_312_full_suite": evidence["python312_pytest"]["returncode"] == 0,
+        "python_310_full_suite": (
+            evidence["python310_pytest"]["returncode"] == 0
+        ),
+        "python_312_full_suite": (
+            evidence["python312_pytest"]["returncode"] == 0
+        ),
         "mpi_two_rank_smoke": evidence["mpi_ranks_2"]["returncode"] == 0,
         "mpi_four_rank_smoke": evidence["mpi_ranks_4"]["returncode"] == 0,
         "material_inputs_authenticated": bool(case._source_hashes(identity)),
