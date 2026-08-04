@@ -10,6 +10,7 @@ import pytest
 
 from negfpy.anharmonic import CubicSCBAProblem, HarmonicReservoir, SignedFrequencyGrid
 from negfpy.anharmonic._checkpoint_v2 import solve_sparse_scba_checkpointed
+from negfpy.anharmonic._born_initial import write_born_initial_state
 from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
 from negfpy.anharmonic.toy import pinned_scalar_chain
 
@@ -242,4 +243,45 @@ def test_temperature_bias_continuation_allows_only_outward_same_branch(
             environment_sha256=ENVIRONMENT,
             child_coupling_scale=0.01,
             continuation_axis="temperature_bias",
+        )
+
+
+def test_case_driver_authenticates_born_initialization_and_excludes_parent(
+    tmp_path: Path,
+) -> None:
+    problem = _problem(0.001)
+    config = driver._config()
+    born = tmp_path / "born.h5"
+    write_born_initial_state(
+        born,
+        problem,
+        config,
+        source_tree_sha256=SOURCE_TREE,
+        environment_sha256=ENVIRONMENT,
+        source_hashes=driver._source_hashes(_identity()),
+    )
+    initial, parent, record = driver._authenticated_initial_state(
+        continuation_parent_artifacts=None,
+        continuation_axis=None,
+        born_initial_hdf5=born,
+        identity=_identity(),
+        problem=problem,
+        config=config,
+        source_tree_sha256=SOURCE_TREE,
+        environment_sha256=ENVIRONMENT,
+        coupling_scale=1.0,
+    )
+    assert initial is not None and parent is None and record is not None
+    assert record["file_sha256"]
+    assert driver._source_hashes(_identity(), None, record)[
+        "born_initial_file"
+    ] == record["file_sha256"]
+    with pytest.raises(driver.SCBACaseError, match="mutually exclusive"):
+        driver._authenticated_initial_state(
+            continuation_parent_artifacts=tmp_path,
+            continuation_axis="coupling",
+            born_initial_hdf5=born,
+            identity=_identity(), problem=problem, config=config,
+            source_tree_sha256=SOURCE_TREE,
+            environment_sha256=ENVIRONMENT, coupling_scale=1.0,
         )

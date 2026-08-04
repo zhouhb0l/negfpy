@@ -28,6 +28,7 @@ import numpy as np
 import validate_sparse_nq1_phase_c_born as phase_c
 import validate_sparse_nq1_phase_b as phase_b
 from negfpy.anharmonic import SCBAConfig, SignedFrequencyGrid
+from negfpy.anharmonic._born_initial import load_born_initial_state
 from negfpy.anharmonic._checkpoint_v2 import (
     checkpoint_initial_sigma_v2,
     load_scba_checkpoint_v2_self_validating,
@@ -153,6 +154,7 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None) -> SC
 def _source_hashes(
     identity: Mapping[str, Any],
     continuation_parent: Mapping[str, Any] | None = None,
+    born_initial: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     phase_b = identity["phase_b"]
     result = {
@@ -172,6 +174,13 @@ def _source_hashes(
             ],
             "continuation_parent_report": continuation_parent["report_sha256"],
             "continuation_parent_status": continuation_parent["status_sha256"],
+        })
+    if born_initial is not None:
+        result.update({
+            "born_initial_file": born_initial["file_sha256"],
+            "born_initial_identity": born_initial["identity_sha256"],
+            "born_initial_manifest": born_initial["manifest_sha256"],
+            "born_initial_state": born_initial["initial_state_sha256"],
         })
     return result
 
@@ -439,6 +448,50 @@ def _continuation_initial_state(
     }
 
 
+def _authenticated_initial_state(
+    *,
+    continuation_parent_artifacts: Path | None,
+    continuation_axis: str | None,
+    born_initial_hdf5: Path | None,
+    identity: Mapping[str, Any],
+    problem: Any,
+    config: SCBAConfig,
+    source_tree_sha256: str,
+    environment_sha256: str,
+    coupling_scale: float,
+) -> tuple[Any | None, dict[str, Any] | None, dict[str, Any] | None]:
+    if continuation_parent_artifacts is not None and born_initial_hdf5 is not None:
+        raise SCBACaseError(
+            "continuation and Born initial states are mutually exclusive"
+        )
+    if born_initial_hdf5 is not None:
+        if continuation_axis is not None:
+            raise SCBACaseError("Born initialization cannot name a continuation axis")
+        try:
+            initial, born_record = load_born_initial_state(
+                born_initial_hdf5,
+                problem,
+                config,
+                source_tree_sha256=source_tree_sha256,
+                environment_sha256=environment_sha256,
+                source_hashes=_source_hashes(identity),
+            )
+        except Exception as error:
+            raise SCBACaseError(f"Born initial-state artifact is invalid: {error}") from error
+        return initial, None, born_record
+    initial, parent = _continuation_initial_state(
+        parent_artifacts=continuation_parent_artifacts,
+        identity=identity,
+        problem=problem,
+        config=config,
+        source_tree_sha256=source_tree_sha256,
+        environment_sha256=environment_sha256,
+        child_coupling_scale=coupling_scale,
+        continuation_axis=continuation_axis,
+    )
+    return initial, parent, None
+
+
 def _result_arrays(result: Any) -> dict[str, np.ndarray]:
     arrays = {"grid/omega": np.asarray(result.grid.values)}
     for spectrum_name in ("green", "sigma_pp", "sigma_left", "sigma_right"):
@@ -489,6 +542,7 @@ def preflight_scba_inputs(
     coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
@@ -504,13 +558,14 @@ def preflight_scba_inputs(
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
     )
-    initial_sigma_pp, parent = _continuation_initial_state(
-        parent_artifacts=continuation_parent_artifacts,
+    initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
+        continuation_parent_artifacts=continuation_parent_artifacts,
+        continuation_axis=continuation_axis,
+        born_initial_hdf5=born_initial_hdf5,
         identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
-        child_coupling_scale=coupling_scale,
-        continuation_axis=continuation_axis,
+        coupling_scale=coupling_scale,
     )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -520,7 +575,7 @@ def preflight_scba_inputs(
     checkpoint_identity = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
         initial_sigma_pp=initial_sigma_pp,
-        source_hashes=_source_hashes(identity, parent),
+        source_hashes=_source_hashes(identity, parent, born_initial),
         source_tree_sha256=source_tree_sha256,
     )
     predicted = int(problem.grid.n_points * problem.ndof * problem.ndof * 288)
@@ -530,6 +585,7 @@ def preflight_scba_inputs(
         "run_id": run_id,
         "coupling_scale": coupling_scale,
         "continuation_parent": parent,
+        "born_initial": born_initial,
         "source_tree_sha256": source_tree_sha256,
         "environment_sha256": environment_sha256,
         "configuration_sha256": configuration_hash(config),
@@ -565,6 +621,7 @@ def run_scba_case(
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
@@ -577,19 +634,20 @@ def run_scba_case(
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
     )
-    initial_sigma_pp, parent = _continuation_initial_state(
-        parent_artifacts=continuation_parent_artifacts,
+    initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
+        continuation_parent_artifacts=continuation_parent_artifacts,
+        continuation_axis=continuation_axis,
+        born_initial_hdf5=born_initial_hdf5,
         identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
-        child_coupling_scale=coupling_scale,
-        continuation_axis=continuation_axis,
+        coupling_scale=coupling_scale,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
         initial_sigma_pp=initial_sigma_pp,
-        source_hashes=_source_hashes(identity, parent),
+        source_hashes=_source_hashes(identity, parent, born_initial),
         source_tree_sha256=source_tree_sha256,
     )
     start = time.perf_counter()
@@ -599,7 +657,7 @@ def run_scba_case(
         result = solve_sparse_scba_checkpointed(
             problem, config, checkpoint_path=checkpoint, run_id=run_id,
             environment_sha256=environment_sha256,
-            source_hashes=_source_hashes(identity, parent),
+            source_hashes=_source_hashes(identity, parent, born_initial),
             source_tree_sha256=source_tree_sha256, resume=resume,
             initial_sigma_pp=initial_sigma_pp,
         )
@@ -623,6 +681,7 @@ def run_scba_case(
         "problem_sha256": identity["problem_input_hashes"]["problem"],
         "configuration_sha256": configuration_hash(config),
         "continuation_parent": parent,
+        "born_initial": born_initial,
         "result": summary,
         "timings_seconds": {"total": time.perf_counter() - start},
         "scba_executed": True, "release_certified": False,
@@ -633,6 +692,7 @@ def run_scba_case(
         "preflight_source": identity, "checkpoint": str(checkpoint.resolve()),
         "checkpoint_sha256": _sha256_file(checkpoint), "checkpoint_status": load_scba_checkpoint_v2(checkpoint, expected_identity=expected).status,
         "continuation_parent": parent,
+        "born_initial": born_initial,
         "result": summary, "hdf5": {"path": str(output_hdf5.resolve()), "sha256": hdf5_sha, "schema": ARCHIVE_SCHEMA},
         "scba_executed": True, "release_certified": False,
         "not_certified": ["converged material conductance", "0.3.0 release", "transverse SCBA"],
@@ -654,6 +714,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--continuation-axis", choices=("coupling", "temperature_bias")
     )
+    parser.add_argument("--born-initial-hdf5", type=Path)
     parser.add_argument("--grid-step", type=float)
     parser.add_argument("--grid-n-positive", type=int)
     parser.add_argument("--eta-lead", type=float)
@@ -675,6 +736,7 @@ def main() -> int:
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
                 continuation_axis=args.continuation_axis,
+                born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 temperature_bias=args.temperature_bias,
@@ -690,6 +752,7 @@ def main() -> int:
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
                 continuation_axis=args.continuation_axis,
+                born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 temperature_bias=args.temperature_bias,

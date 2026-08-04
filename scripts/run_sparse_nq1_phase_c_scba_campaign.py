@@ -51,6 +51,7 @@ def _manifest(
     expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
@@ -71,6 +72,7 @@ def _manifest(
         coupling_scale=coupling_scale,
         continuation_parent_artifacts=continuation_parent_artifacts,
         continuation_axis=continuation_axis,
+        born_initial_hdf5=born_initial_hdf5,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
     )
@@ -89,6 +91,7 @@ def _manifest(
         "coupling_scale": coupling_scale,
         "continuation_parent": preflight["continuation_parent"],
         "continuation_axis": continuation_axis,
+        "born_initial": preflight["born_initial"],
         "numerical_controls": preflight["numerical_controls"],
         "fixed_controls_no_retuning": True,
         "restart": {"checkpoint_schema": case.CHECKPOINT_SCHEMA, "resume_exact_identity": True, "automatic_retry": False},
@@ -202,7 +205,7 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
@@ -264,10 +267,26 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
             )
         if manifest.get("continuation_parent") != supplied_parent:
             raise common.CampaignError("continuation parent changed during SCBA resume")
+        if born_initial_hdf5 is None:
+            supplied_born = None
+        else:
+            _initial, _parent, supplied_born = case._authenticated_initial_state(
+                continuation_parent_artifacts=None,
+                continuation_axis=None,
+                born_initial_hdf5=born_initial_hdf5,
+                identity=_resume_identity,
+                problem=_resume_problem,
+                config=_resume_config,
+                source_tree_sha256=manifest["source_tree_sha256"],
+                environment_sha256=manifest["environment_lock"]["sha256"],
+                coupling_scale=coupling_scale,
+            )
+        if manifest.get("born_initial") != supplied_born:
+            raise common.CampaignError("Born initial-state artifact changed during SCBA resume")
     else:
         if any(artifacts.iterdir()):
             raise common.CampaignError("nonempty artifact directory has no manifest; refusing overwrite")
-        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale, continuation_parent_artifacts=continuation_parent_artifacts, continuation_axis=continuation_axis, grid_step=grid_step, grid_n_positive=grid_n_positive, eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias)
+        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale, continuation_parent_artifacts=continuation_parent_artifacts, continuation_axis=continuation_axis, born_initial_hdf5=born_initial_hdf5, grid_step=grid_step, grid_n_positive=grid_n_positive, eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias)
         common._publish_once(manifest_path, _canonical(manifest))
     manifest_sha = _sha256(manifest_path)
     if not running_path.exists():
@@ -288,6 +307,11 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         command_parts.extend([
             "--continuation-parent-artifacts", str(parent["artifacts"]),
             "--continuation-axis", str(manifest["continuation_axis"]),
+        ])
+    born_initial = manifest.get("born_initial")
+    if born_initial is not None:
+        command_parts.extend([
+            "--born-initial-hdf5", str(born_initial["path"])
         ])
     command = tuple(command_parts)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,6 +353,7 @@ def main() -> int:
     parser.add_argument(
         "--continuation-axis", choices=("coupling", "temperature_bias")
     )
+    parser.add_argument("--born-initial-hdf5", type=Path)
     parser.add_argument("--grid-step", type=float)
     parser.add_argument("--grid-n-positive", type=int)
     parser.add_argument("--eta-lead", type=float)
@@ -339,10 +364,10 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias, resume=args.resume)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias, resume=args.resume)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if status.get("state") == "passed" else 2
     except Exception as error:
