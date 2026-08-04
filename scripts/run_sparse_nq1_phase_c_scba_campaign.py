@@ -112,7 +112,8 @@ def _publish_report(artifacts: Path, manifest_path: Path, running_path: Path, lo
     }
     report_path = artifacts / "scba-report.json"
     common._ensure_exact(report_path, _canonical(report))
-    files = (manifest_path, running_path, log_path, output_json, output_hdf5, checkpoint, report_path)
+    prior_failure = artifacts / "infrastructure-failure.json"
+    files = (manifest_path, running_path, log_path, output_json, output_hdf5, checkpoint, report_path) + ((prior_failure,) if prior_failure.exists() else ())
     sums = common._write_checksums(artifacts, files)
     status = {
         "schema": STATUS_SCHEMA, "campaign_manifest_sha256": manifest_sha, "state": state,
@@ -129,21 +130,30 @@ def _infrastructure_failure(artifacts: Path, manifest_path: Path, log_path: Path
     failure = {"schema": "negfpy.sparse-nq1-phase-c-scba-infrastructure-failure.v1", "campaign_manifest_sha256": manifest_sha, "classification": "infrastructure-failure", "detail": detail, "supervision": dict(supervision), "automatic_retry": False, "controls_changed": False}
     failure_path = artifacts / "infrastructure-failure.json"
     common._publish_once(failure_path, _canonical(failure))
-    sums = common._write_checksums(artifacts, (manifest_path, log_path, failure_path))
-    status = {"schema": STATUS_SCHEMA, "campaign_manifest_sha256": manifest_sha, "state": "infrastructure-failure", "failure_sha256": _sha256(failure_path), "sha256sums_sha256": common._sha256_bytes(sums), "automatic_retry": False, "release_certified": False}
-    common._publish_once(artifacts / "status.json", _canonical(status))
+    interrupted_sums_path = artifacts / "SHA256SUMS.infrastructure-failure"
+    sums_content = "".join(
+        f"{_sha256(path)}  {path.relative_to(artifacts).as_posix()}\n"
+        for path in sorted((manifest_path, log_path, failure_path), key=lambda item: item.relative_to(artifacts).as_posix())
+    ).encode("ascii")
+    common._publish_once(interrupted_sums_path, sums_content)
+    # No terminal status is published: the immutable checkpoint remains
+    # resumable.  A later invocation must explicitly pass ``--resume``.
+    status = {"schema": STATUS_SCHEMA, "campaign_manifest_sha256": manifest_sha, "state": "infrastructure-interrupted", "failure_sha256": _sha256(failure_path), "sha256sums_sha256": common._sha256_bytes(sums_content), "automatic_retry": False, "resume_required": True, "release_certified": False}
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, resume: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
     status_path = artifacts / "status.json"
+    interruption_path = artifacts / "infrastructure-failure.json"
     running_path = artifacts / "status-running.json"
     log_path = artifacts / "logs" / "scba.json"
     if status_path.exists():
         return _load_json(status_path, "terminal SCBA status")
+    if interruption_path.exists() and not resume:
+        raise common.CampaignError("an infrastructure interruption is archived; pass --resume to continue the identical checkpoint")
     if manifest_path.exists():
         manifest = _load_json(manifest_path, "SCBA campaign manifest")
         if manifest.get("source") != common._source_identity(repo, expected_commit):
@@ -185,13 +195,14 @@ def main() -> int:
     parser.add_argument("--environment-lock", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     args = parser.parse_args()
     try:
         if args.preflight_only:
             manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, resume=args.resume)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if status.get("state") == "passed" else 2
     except Exception as error:
