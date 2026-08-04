@@ -5,6 +5,7 @@ import pytest
 
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
+    check_harmonic_embedding_buffer,
     measure_observation_mode_poles,
 )
 from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
@@ -83,3 +84,42 @@ def test_mode_poles_project_complete_degenerate_subspace() -> None:
     assert measured[0].linewidths == pytest.approx((0.02,))
     assert measured[-1].shifts == pytest.approx((0.02,))
     assert measured[-1].linewidths == pytest.approx((0.02,))
+
+
+def test_uniform_harmonic_embedding_is_invariant_to_lead_like_padding() -> None:
+    spring = 0.4
+    onsite = np.asarray([[2.0 * spring]], dtype=np.complex128)
+    coupling = np.asarray([[-spring]], dtype=np.complex128)
+    device = Device1D([onsite.copy() for _ in range(3)], [coupling.copy()] * 2)
+    lead = LeadBlocks(onsite, coupling)
+    reservoir = HarmonicReservoir(
+        lead=lead,
+        temperature=0.5,
+        device_to_lead=coupling,
+        device_indices=np.asarray([0]),
+    )
+    vertex = SparseCubicVertex(
+        ndof=3,
+        indices=np.empty((0, 3), dtype=np.int64),
+        coefficients=np.empty(0, dtype=np.float64),
+    )
+    problem = CubicSCBAProblem(
+        device=device,
+        left=reservoir,
+        right=HarmonicReservoir(
+            lead=lead,
+            temperature=0.5,
+            device_to_lead=coupling.conj().T,
+            device_indices=np.asarray([2]),
+        ),
+        vertex=vertex,
+        grid=SignedFrequencyGrid(step=0.05, n_positive=40),
+    )
+    report = check_harmonic_embedding_buffer(
+        problem,
+        frequencies=np.asarray([0.2, 0.5, 0.8]),
+        eta_lead=1.0e-5,
+        rtol=1.0e-8,
+        atol=1.0e-10,
+    )
+    assert report["passed"]

@@ -13,6 +13,8 @@ import numpy as np
 
 from ._harmonic import assemble_device_dynamical_matrix
 from .types import CubicSCBAProblem
+from negfpy.core.negf import transmission
+from negfpy.core.types import Device1D
 
 
 Array = np.ndarray
@@ -266,10 +268,100 @@ def measure_observation_mode_poles(
     return tuple(results)
 
 
+def check_harmonic_embedding_buffer(
+    problem: CubicSCBAProblem,
+    *,
+    frequencies: Any,
+    eta_lead: float,
+    added_layers_each_side: int = 1,
+    rtol: float = 1.0e-8,
+    atol: float = 1.0e-10,
+) -> Mapping[str, Any]:
+    """Compare coherent transmission before and after lead-like padding."""
+
+    if not isinstance(problem, CubicSCBAProblem):
+        raise TypeError("problem must be a CubicSCBAProblem")
+    if (
+        isinstance(added_layers_each_side, bool)
+        or not isinstance(added_layers_each_side, int)
+        or added_layers_each_side < 1
+    ):
+        raise ValueError("added_layers_each_side must be a positive integer")
+    omega = np.asarray(frequencies, dtype=np.float64)
+    if (
+        omega.ndim != 1 or omega.size == 0 or not np.all(np.isfinite(omega))
+        or np.any(omega <= 0.0) or np.any(np.diff(omega) <= 0.0)
+    ):
+        raise ValueError("frequencies must be finite, positive, and increasing")
+    eta = float(eta_lead)
+    if not math.isfinite(eta) or eta <= 0:
+        raise ValueError("eta_lead must be finite and positive")
+
+    device = problem.device
+    reference_onsite = np.asarray(device.onsite_blocks[0])
+    reference_coupling = np.asarray(device.coupling_blocks[0])
+    if any(
+        not np.array_equal(np.asarray(block), reference_onsite)
+        for block in device.onsite_blocks
+    ) or any(
+        not np.array_equal(np.asarray(block), reference_coupling)
+        for block in device.coupling_blocks
+    ):
+        raise ValueError("embedding-buffer gate requires an exactly repeated device")
+    extended_layers = device.n_layers + 2 * added_layers_each_side
+    extended = Device1D(
+        onsite_blocks=[reference_onsite.copy() for _ in range(extended_layers)],
+        coupling_blocks=[
+            reference_coupling.copy() for _ in range(extended_layers - 1)
+        ],
+    )
+
+    def spectrum(selected: Device1D) -> np.ndarray:
+        npl = selected.dof_per_layer
+        ndof = selected.n_layers * npl
+        return np.asarray([
+            transmission(
+                value,
+                selected,
+                problem.left.lead,
+                problem.right.lead,
+                eta=eta,
+                eta_device=0.0,
+                device_to_lead_left=problem.left.device_to_lead,
+                device_to_lead_right=problem.right.device_to_lead,
+                contact_left_indices=np.arange(npl, dtype=np.int64),
+                contact_right_indices=np.arange(ndof - npl, ndof, dtype=np.int64),
+            )
+            for value in omega
+        ], dtype=np.float64)
+
+    reference = spectrum(device)
+    padded = spectrum(extended)
+    allowed = atol + rtol * np.maximum(np.abs(reference), np.abs(padded))
+    error = np.abs(reference - padded)
+    maximum_ratio = float(np.max(error / allowed))
+    return MappingProxyType({
+        "schema": "negfpy.material-nq1-harmonic-buffer.v1",
+        "original_layers": device.n_layers,
+        "extended_layers": extended_layers,
+        "added_layers_each_side": added_layers_each_side,
+        "eta_lead": eta,
+        "frequencies": omega.tolist(),
+        "reference_transmission": reference.tolist(),
+        "extended_transmission": padded.tolist(),
+        "rtol": rtol,
+        "atol": atol,
+        "maximum_absolute_error": float(np.max(error)),
+        "maximum_allowed_ratio": maximum_ratio,
+        "passed": maximum_ratio <= 1.0,
+    })
+
+
 __all__ = [
     "ObservationModeSet",
     "ObservationSubspace",
     "PoleSubspaceMeasurement",
     "build_observation_mode_set",
+    "check_harmonic_embedding_buffer",
     "measure_observation_mode_poles",
 ]
