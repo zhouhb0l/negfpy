@@ -44,7 +44,9 @@ def test_every_release_grid_covers_three_harmonic_bounds() -> None:
         assert task.grid_cutoff >= 3.0 * HARMONIC_CONSERVATIVE_BOUND
     by_id = {task.task_id: task for task in silicon_nq1_release_tasks()}
     assert by_id["coupling-g100"].grid_cutoff == pytest.approx(7.5)
-    assert by_id["refinement-half-spacing"].grid_step == pytest.approx(0.15)
+    assert by_id["coupling-g100"].grid_step == pytest.approx(0.1)
+    assert 10.0 * by_id["coupling-g100"].grid_step < HARMONIC_CONSERVATIVE_BOUND
+    assert by_id["refinement-half-spacing"].grid_step == pytest.approx(0.05)
     assert by_id["refinement-half-spacing"].grid_cutoff == pytest.approx(7.5)
     assert by_id["refinement-larger-cutoff"].grid_cutoff == pytest.approx(9.0)
 
@@ -84,8 +86,8 @@ def test_invalid_continuation_and_negative_temperature_fail_closed() -> None:
         "task_id": "invalid",
         "role": "test",
         "coupling_scale": 0.1,
-        "grid_step": 0.3,
-        "grid_n_positive": 25,
+        "grid_step": 0.1,
+        "grid_n_positive": 75,
         "eta_lead": 0.025,
         "mixing": 0.2,
         "mean_temperature_kelvin": 1.0,

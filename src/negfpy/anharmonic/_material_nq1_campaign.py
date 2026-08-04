@@ -152,8 +152,11 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
     """Return the preregistered material gate in canonical dependency order."""
 
     base = {
-        "grid_step": 0.3,
-        "grid_n_positive": 25,
+        # The earlier 0.3 screening spacing cannot certify weak coupling:
+        # 10*Delta-omega exceeds the complete silicon harmonic band.  The
+        # release grid therefore resolves a nonempty, preregistered mode set.
+        "grid_step": 0.1,
+        "grid_n_positive": 75,
         "eta_lead": 0.025,
         "mixing": 0.2,
         "mean_temperature_kelvin": 300.0,
@@ -213,12 +216,12 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
         MaterialSCBATask(
             task_id="refinement-half-spacing", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "grid_step": 0.15, "grid_n_positive": 50},
+            **{**base, "grid_step": 0.05, "grid_n_positive": 150},
         ),
         MaterialSCBATask(
             task_id="refinement-larger-cutoff", role="numerical-refinement",
             coupling_scale=1.0, initialization="born",
-            **{**base, "grid_n_positive": 30},
+            **{**base, "grid_n_positive": 90},
         ),
         MaterialSCBATask(
             task_id="refinement-half-eta", role="numerical-refinement",

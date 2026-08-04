@@ -19,10 +19,16 @@ from negfpy.anharmonic._born_initial import (
     load_born_initial_state,
     write_born_initial_state,
 )
-from negfpy.anharmonic._material_nq1_campaign import MaterialSCBATask
+from negfpy.anharmonic._material_nq1_campaign import (
+    MaterialSCBATask,
+    silicon_nq1_release_tasks,
+)
 from negfpy.anharmonic._material_nq1_mpi import (
     build_material_nq1_mpi_campaign,
     execute_material_nq1_mpi_campaign,
+)
+from negfpy.anharmonic._material_nq1_validation import (
+    build_observation_mode_set,
 )
 from negfpy.anharmonic._mpi_tasks import TaskResult
 from negfpy.anharmonic._provenance import code_provenance
@@ -236,21 +242,42 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     source_tree = code_provenance().get("source_tree_sha256")
     if not isinstance(source_tree, str) or len(source_tree) != 64:
         raise MaterialCampaignError("source tree SHA256 is unavailable")
+    campaign_root = args.artifacts.expanduser().resolve()
+    campaign_root.mkdir(parents=True, exist_ok=True)
+    base_task = next(
+        task for task in silicon_nq1_release_tasks()
+        if task.task_id == "coupling-g100"
+    )
     # Authenticate the shared material inputs without executing a Born bubble.
-    identity, _problem, _config = case.authenticate_scba_inputs(
+    identity, base_problem, _config = case.authenticate_scba_inputs(
         fixture=args.fixture,
         fc3_full=args.fc3_full,
         phase_b_artifacts=args.phase_b_artifacts,
         coupling_scale=1.0,
+        grid_step=base_task.grid_step,
+        grid_n_positive=base_task.grid_n_positive,
+        eta_lead=base_task.eta_lead,
+        mixing=base_task.mixing,
+        temperature_bias=base_task.temperature_bias_solver,
     )
-    input_hashes = case._source_hashes(identity)
+    mode_set = build_observation_mode_set(
+        base_problem,
+        observation_layers=(4,),
+        grid_step=base_task.grid_step,
+        eta_lead=base_task.eta_lead,
+    )
+    modes_path = _atomic_json(
+        campaign_root / "observation-modes.json", mode_set.as_dict()
+    )
+    input_hashes = case._source_hashes(identity) | {
+        "observation_modes": _sha256(modes_path),
+    }
     campaign = build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
         source_tree_sha256=source_tree,
         environment_sha256=lock["sha256"],
         input_hashes=input_hashes,
     )
-    campaign_root = args.artifacts.expanduser().resolve()
 
     def executor(
         scientific: MaterialSCBATask,
@@ -375,6 +402,12 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         "source": source,
         "source_tree_sha256": source_tree,
         "environment_lock": lock,
+        "observation_modes": {
+            "path": modes_path.name,
+            "sha256": _sha256(modes_path),
+            "mode_set_sha256": mode_set.as_dict()["mode_set_sha256"],
+            "resolved_subspace_count": len(mode_set.subspaces),
+        },
         "statuses": dict(report.statuses),
         "complete": report.complete,
         "phase_reports": [_plain(item) for item in report.phase_reports],
