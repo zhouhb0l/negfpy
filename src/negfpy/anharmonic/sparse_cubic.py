@@ -63,6 +63,17 @@ def _freeze(value: Any) -> Any:
 
 def _available_memory_bytes() -> int | None:
     try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            for line in stream:
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == "MemAvailable:":
+                    kilobytes = int(fields[1])
+                    if kilobytes > 0:
+                        return kilobytes * 1024
+                    break
+    except (OSError, ValueError):
+        pass
+    try:
         pages = int(os.sysconf("SC_AVPHYS_PAGES"))
         size = int(os.sysconf("SC_PAGE_SIZE"))
     except (AttributeError, OSError, ValueError):

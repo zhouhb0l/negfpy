@@ -93,6 +93,21 @@ def _cubic_execution_details(
 def _available_memory_bytes() -> int | None:
     """Return currently available physical memory without a hard dependency."""
 
+    # Open MPI can expose a low ``SC_AVPHYS_PAGES`` value to ranks even when
+    # the host's reclaimable memory is large.  Prefer the Linux kernel's
+    # MemAvailable estimate, which is also what the remote qualification guard
+    # records, and retain sysconf as a portable fallback.
+    try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            for line in stream:
+                fields = line.split()
+                if len(fields) >= 2 and fields[0] == "MemAvailable:":
+                    kilobytes = int(fields[1])
+                    if kilobytes > 0:
+                        return kilobytes * 1024
+                    break
+    except (OSError, ValueError):
+        pass
     try:
         page_size = int(os.sysconf("SC_PAGE_SIZE"))
         available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
