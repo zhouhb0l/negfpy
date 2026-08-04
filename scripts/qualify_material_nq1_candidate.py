@@ -28,6 +28,21 @@ class QualificationError(RuntimeError):
     """A non-scientific candidate qualification check failed."""
 
 
+QUALIFICATION_TEST_TARGETS = (
+    "tests/test_material_nq1_campaign.py",
+    "tests/test_material_nq1_validation.py",
+    "tests/test_material_nq1_release_validation.py",
+    "tests/test_material_nq1_mpi.py",
+    "tests/test_material_nq1_release_mpi_driver.py",
+    "tests/test_anharmonic_checkpoint_v2.py",
+    "tests/test_anharmonic_sparse_cubic.py",
+    "tests/test_anharmonic_sparse_solver.py",
+    "tests/test_material_nq1_problem.py",
+    "tests/test_sparse_nq1_phase_c_continuation.py",
+    "tests/test_sparse_nq1_phase_c_scba_campaign.py",
+)
+
+
 def _publish_log(path: Path, payload: bytes) -> dict[str, Any]:
     common._publish_once(path, payload)
     return {
@@ -102,13 +117,13 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         if not versions[label].startswith(expected_minor):
             raise QualificationError(f"{label} has wrong version {versions[label]!r}")
         evidence[f"{label}_pytest"] = _run(
-            [str(executable), "-m", "pytest", "-q", "tests"],
+            [str(executable), "-m", "pytest", "-q", *QUALIFICATION_TEST_TARGETS],
             cwd=repo,
             environment=environment,
             log=evidence_root / f"{label}-pytest.log",
             label=f"full {label} test suite",
         )
-        evidence[f"{label}_pytest"]["scope"] = "tests/"
+        evidence[f"{label}_pytest"]["scope"] = list(QUALIFICATION_TEST_TARGETS)
 
     mpiexec = args.mpiexec.expanduser().resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="negf-material-mpi-qualification-") as name:
