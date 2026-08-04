@@ -92,6 +92,13 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
     ):
         environment[name] = "1"
     environment["PYTHONHASHSEED"] = "0"
+    inherited_pythonpath = environment.get("PYTHONPATH")
+    source_paths = os.pathsep.join((str(repo / "src"), str(repo / "scripts")))
+    environment["PYTHONPATH"] = (
+        source_paths
+        if not inherited_pythonpath
+        else source_paths + os.pathsep + inherited_pythonpath
+    )
 
     evidence: dict[str, Any] = {}
     versions: dict[str, str] = {}
@@ -226,6 +233,9 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
                 "VECLIB_MAXIMUM_THREADS",
             )
         ),
+        "candidate_pythonpath_first": environment["PYTHONPATH"].split(
+            os.pathsep
+        )[:2] == [str(repo / "src"), str(repo / "scripts")],
     }
     passed = bool(checks and all(checks.values()))
     return {
