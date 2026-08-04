@@ -1068,8 +1068,9 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
         driver._mutable_conda_hash_category("lib/python3.12/__pycache__/module.py")
         is None
     )
-    site_packages = prefix / "lib/python3.12/site-packages"
-    site_packages.mkdir()
+    python_directory = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    site_packages = prefix / "lib" / python_directory / "site-packages"
+    site_packages.mkdir(parents=True)
     (site_packages / "sitecustomize.py").write_text(
         "UNOWNED = True\n", encoding="utf-8"
     )
@@ -1081,7 +1082,7 @@ def test_explicit_lock_binds_exact_prefix_urls_paths_and_hashes(
     ownership = driver._import_code_ownership_identity(prefix)
     assert ownership["passed"] is False
     assert ownership["unowned_code_paths"] == [
-        "lib/python3.12/site-packages/sitecustomize.py"
+        f"lib/{python_directory}/site-packages/sitecustomize.py"
     ]
 
     record["md5"] = None
