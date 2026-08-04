@@ -126,3 +126,34 @@ def test_material_receipt_rejects_changed_numerical_controls(
     _write(receipt, payload)
     with pytest.raises(driver.MaterialCampaignError, match="numerical controls"):
         driver._receipt_evidence(receipt, spec)
+
+
+def test_candidate_qualification_is_exact_and_fail_closed(tmp_path: Path) -> None:
+    source = {"commit": "candidate", "tree": "tree", "dirty": False}
+    report = tmp_path / "qualification.json"
+    payload = {
+        "schema": driver.QUALIFICATION_SCHEMA,
+        "source": source,
+        "source_tree_sha256": "a" * 64,
+        "environment_sha256": "b" * 64,
+        "checks": {"full_tests": True, "mpi_smoke": True},
+        "evidence": {"logs": ["tests.log", "mpi.log"]},
+        "release_preflight_passed": True,
+    }
+    _write(report, payload)
+    record = driver._validate_qualification(
+        report,
+        source=source,
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+    )
+    assert record["sha256"] == driver._sha256(report)
+    payload["checks"]["mpi_smoke"] = False
+    _write(report, payload)
+    with pytest.raises(driver.MaterialCampaignError, match="does not authorize"):
+        driver._validate_qualification(
+            report,
+            source=source,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )

@@ -204,6 +204,12 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     source_tree = provenance.get("source_tree_sha256")
     if not isinstance(source_tree, str) or len(source_tree) != 64:
         raise MaterialReleaseValidationError("source tree SHA256 is unavailable")
+    qualification = mpi_driver._validate_qualification(
+        args.qualification_report,
+        source=source,
+        source_tree_sha256=source_tree,
+        environment_sha256=lock["sha256"],
+    )
 
     base_task = next(
         item for item in silicon_nq1_release_tasks()
@@ -248,6 +254,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     input_hashes = case._source_hashes(identity) | {
         "observation_modes": mpi_driver._sha256(modes_path),
         "harmonic_buffer_preflight": mpi_driver._sha256(buffer_path),
+        "candidate_qualification": qualification["sha256"],
     }
     campaign = mpi_driver.build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
@@ -438,6 +445,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "source": source,
         "source_tree_sha256": source_tree,
         "environment_lock": lock,
+        "candidate_qualification": qualification,
         "campaign_manifest_sha256": campaign.manifest.manifest_sha256,
         "observation_modes": archived_modes,
         "harmonic_buffer_preflight": archived_buffer,
@@ -474,6 +482,7 @@ def main() -> int:
     parser.add_argument("--campaign", type=Path, required=True)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--environment-lock", type=Path, required=True)
+    parser.add_argument("--qualification-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:

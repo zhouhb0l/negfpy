@@ -37,6 +37,7 @@ from negfpy.anharmonic._provenance import code_provenance
 
 RECEIPT_SCHEMA = "negfpy.material-nq1-mpi-task-receipt.v1"
 REPORT_SCHEMA = "negfpy.material-nq1-mpi-execution-report.v1"
+QUALIFICATION_SCHEMA = "negfpy.material-nq1-candidate-qualification.v1"
 
 
 class MaterialCampaignError(RuntimeError):
@@ -92,6 +93,38 @@ def _load_canonical(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or payload != _canonical(value):
         raise MaterialCampaignError(f"{label} is not canonical JSON")
     return value
+
+
+def _validate_qualification(
+    path: Path,
+    *,
+    source: Mapping[str, Any],
+    source_tree_sha256: str,
+    environment_sha256: str,
+) -> dict[str, Any]:
+    document = _load_canonical(path.expanduser().resolve(strict=True), "qualification report")
+    expected = {
+        "schema", "source", "source_tree_sha256", "environment_sha256",
+        "checks", "evidence", "release_preflight_passed",
+    }
+    checks = document.get("checks")
+    if (
+        set(document) != expected
+        or document.get("schema") != QUALIFICATION_SCHEMA
+        or document.get("source") != source
+        or document.get("source_tree_sha256") != source_tree_sha256
+        or document.get("environment_sha256") != environment_sha256
+        or not isinstance(checks, Mapping)
+        or not checks
+        or not all(value is True for value in checks.values())
+        or document.get("release_preflight_passed") is not True
+    ):
+        raise MaterialCampaignError("candidate qualification does not authorize launch")
+    return {
+        "path": str(path.expanduser().resolve()),
+        "sha256": _sha256(path.expanduser().resolve()),
+        "checks": dict(checks),
+    }
 
 
 def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
@@ -243,6 +276,12 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     source_tree = code_provenance().get("source_tree_sha256")
     if not isinstance(source_tree, str) or len(source_tree) != 64:
         raise MaterialCampaignError("source tree SHA256 is unavailable")
+    qualification = _validate_qualification(
+        args.qualification_report,
+        source=source,
+        source_tree_sha256=source_tree,
+        environment_sha256=lock["sha256"],
+    )
     campaign_root = args.artifacts.expanduser().resolve()
     campaign_root.mkdir(parents=True, exist_ok=True)
     base_task = next(
@@ -289,6 +328,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     input_hashes = case._source_hashes(identity) | {
         "observation_modes": _sha256(modes_path),
         "harmonic_buffer_preflight": _sha256(buffer_path),
+        "candidate_qualification": qualification["sha256"],
     }
     campaign = build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
@@ -420,6 +460,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         "source": source,
         "source_tree_sha256": source_tree,
         "environment_lock": lock,
+        "candidate_qualification": qualification,
         "observation_modes": {
             "path": modes_path.name,
             "sha256": _sha256(modes_path),
@@ -465,6 +506,7 @@ def main() -> int:
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--environment-lock", type=Path, required=True)
+    parser.add_argument("--qualification-report", type=Path, required=True)
     parser.add_argument("--execution-id")
     parser.add_argument("--require-mpi", action="store_true")
     args = parser.parse_args()
