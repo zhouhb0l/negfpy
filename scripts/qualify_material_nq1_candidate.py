@@ -132,7 +132,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
             evidence[f"mpi_ranks_{ranks}"] = _run(
                 [
                     str(mpiexec), "--bind-to", "core", "-n", str(ranks),
-                    str(interpreters["python310"]),
+                    str(interpreters["python312"]),
                     str(repo / "tests/mpi/run_material_nq1_mpi_smoke.py"),
                     str(temporary / f"ranks-{ranks}"),
                     "--execution-id", f"qualification-ranks-{ranks}",
@@ -142,6 +142,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
                 log=evidence_root / f"mpi-ranks-{ranks}.log",
                 label=f"{ranks}-rank MPI smoke test",
             )
+            evidence[f"mpi_ranks_{ranks}"]["interpreter"] = "python312"
 
     base = next(
         task for task in silicon_nq1_release_tasks()
