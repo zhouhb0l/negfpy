@@ -1041,6 +1041,32 @@ def load_scba_checkpoint_v2(
         ) from exc
 
 
+def load_scba_checkpoint_v2_self_validating(
+    path: str | Path,
+) -> SCBACheckpointV2:
+    """Load a checkpoint using and validating its stored identity.
+
+    This is intentionally separate from :func:`load_scba_checkpoint_v2`:
+    normal restart always supplies an independently constructed expected
+    identity, while a continuation parent is first inspected as an immutable
+    artifact and then checked against the child problem by the caller.
+    """
+
+    h5py = _require_h5py()
+    source = Path(path).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(f"SCBA checkpoint v2 does not exist: {source}")
+    try:
+        with h5py.File(source, "r") as handle:
+            identity_value, _ = _load_json_object(handle, "identity_json")
+        identity = _identity_from_dict(identity_value)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise CheckpointCorruptionError(
+            f"could not read the self-validating checkpoint identity: {source}"
+        ) from exc
+    return load_scba_checkpoint_v2(source, expected_identity=identity)
+
+
 def _validate_checkpoint_for_solver(
     checkpoint: SCBACheckpointV2,
     problem: CubicSCBAProblem,
@@ -1539,6 +1565,7 @@ __all__ = [
     "SparseSCBACheckpoint",
     "SparseSCBACheckpointIdentity",
     "load_scba_checkpoint_v2",
+    "load_scba_checkpoint_v2_self_validating",
     "load_sparse_scba_checkpoint",
     "make_scba_checkpoint_identity_v2",
     "make_sparse_scba_checkpoint_identity",

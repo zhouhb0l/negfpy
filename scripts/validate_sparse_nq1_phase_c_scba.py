@@ -29,6 +29,8 @@ import validate_sparse_nq1_phase_c_born as phase_c
 import validate_sparse_nq1_phase_b as phase_b
 from negfpy.anharmonic import SCBAConfig, SignedFrequencyGrid
 from negfpy.anharmonic._checkpoint_v2 import (
+    checkpoint_initial_sigma_v2,
+    load_scba_checkpoint_v2_self_validating,
     load_scba_checkpoint_v2,
     solve_sparse_scba_checkpointed,
 )
@@ -37,6 +39,7 @@ from negfpy.anharmonic._material_nq1_problem import (
 )
 from negfpy.anharmonic._provenance import configuration_hash, problem_input_hashes
 from negfpy.anharmonic.exceptions import SCBAConvergenceError
+from negfpy.anharmonic._checkpoint import CheckpointDependencyError
 
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-case.v1"
@@ -178,6 +181,77 @@ def authenticate_scba_inputs(
     return identity, problem, config
 
 
+def _continuation_initial_state(
+    *,
+    checkpoint: Path | None,
+    identity: Mapping[str, Any],
+    problem: Any,
+    config: SCBAConfig,
+    source_tree_sha256: str,
+    environment_sha256: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Validate and load a completed coupling-continuation parent.
+
+    A parent is allowed to differ only in its cubic vertex/problem hash.  The
+    device, contacts, grid, solver scale, configuration, source files,
+    environment, and source revision must be identical.  This prevents a
+    convenient-looking warm start from silently crossing a physical or
+    numerical boundary.
+    """
+
+    if checkpoint is None:
+        return None, None
+    source = checkpoint.expanduser().resolve()
+    try:
+        parent = load_scba_checkpoint_v2_self_validating(source)
+    except Exception as error:
+        raise SCBACaseError(
+            f"continuation parent checkpoint is invalid: {source}: {error}"
+        ) from error
+    if parent.status != "completed":
+        raise SCBACaseError(
+            "continuation parents must be completed checkpoints; "
+            f"{source} has status {parent.status!r}"
+        )
+    parent_identity = parent.identity
+    current_hashes = problem_input_hashes(problem)
+    current_sources = _source_hashes(identity)
+    if parent_identity.source_tree_sha256 != source_tree_sha256:
+        raise SCBACaseError("continuation parent source-tree hash differs")
+    if parent_identity.environment_sha256 != environment_sha256:
+        raise SCBACaseError("continuation parent environment hash differs")
+    if parent_identity.configuration_sha256 != configuration_hash(config):
+        raise SCBACaseError("continuation parent SCBA configuration differs")
+    if parent_identity.source_hashes != current_sources:
+        raise SCBACaseError("continuation parent material/source hashes differ")
+    if parent_identity.grid_sha256 != current_hashes["frequency_grid"]:
+        raise SCBACaseError("continuation parent frequency grid differs")
+    stable = (
+        "device", "left_reservoir", "right_reservoir", "frequency_grid",
+        "solver_scale",
+    )
+    for name in stable:
+        if parent_identity.problem_hashes.get(name) != current_hashes.get(name):
+            raise SCBACaseError(
+                f"continuation parent numerical input differs for {name!r}"
+            )
+    expected_shape = (problem.grid.n_points, problem.ndof, problem.ndof)
+    if parent.shape != expected_shape:
+        raise SCBACaseError(
+            f"continuation parent shape {parent.shape} does not match {expected_shape}"
+        )
+    try:
+        initial = checkpoint_initial_sigma_v2(parent)
+    except CheckpointDependencyError as error:  # defensive; status checked above
+        raise SCBACaseError(str(error)) from error
+    return initial, {
+        "path": str(source),
+        "sha256": _sha256_file(source),
+        "identity_sha256": parent_identity.identity_sha256,
+        "status": parent.status,
+    }
+
+
 def _result_arrays(result: Any) -> dict[str, np.ndarray]:
     arrays = {"grid/omega": np.asarray(result.grid.values)}
     for spectrum_name in ("green", "sigma_pp", "sigma_left", "sigma_right"):
@@ -225,7 +299,7 @@ def preflight_scba_inputs(
     *, fixture: Path, fc3_full: Path, phase_b_artifacts: Path,
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     source_tree_sha256: str, environment_sha256: str, run_id: str,
-    coupling_scale: float = 1.0,
+    coupling_scale: float = 1.0, initial_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
         if path.exists() or path.is_symlink():
@@ -234,6 +308,11 @@ def preflight_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
     )
+    initial_sigma_pp, parent = _continuation_initial_state(
+        checkpoint=initial_checkpoint, identity=identity, problem=problem,
+        config=config, source_tree_sha256=source_tree_sha256,
+        environment_sha256=environment_sha256,
+    )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
     if os.statvfs(output_parent).f_bavail * os.statvfs(output_parent).f_frsize < MIN_OUTPUT_FREE_BYTES:
@@ -241,6 +320,7 @@ def preflight_scba_inputs(
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     checkpoint_identity = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
+        initial_sigma_pp=initial_sigma_pp,
         source_hashes=_source_hashes(identity), source_tree_sha256=source_tree_sha256,
     )
     predicted = int(problem.grid.n_points * problem.ndof * problem.ndof * 288)
@@ -249,6 +329,7 @@ def preflight_scba_inputs(
         "source": identity,
         "run_id": run_id,
         "coupling_scale": coupling_scale,
+        "continuation_parent": parent,
         "source_tree_sha256": source_tree_sha256,
         "environment_sha256": environment_sha256,
         "configuration_sha256": configuration_hash(config),
@@ -272,14 +353,21 @@ def run_scba_case(
     checkpoint: Path, output_json: Path, output_hdf5: Path,
     campaign_manifest_sha256: str, source_tree_sha256: str, environment_sha256: str,
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
+    initial_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
     )
+    initial_sigma_pp, parent = _continuation_initial_state(
+        checkpoint=initial_checkpoint, identity=identity, problem=problem,
+        config=config, source_tree_sha256=source_tree_sha256,
+        environment_sha256=environment_sha256,
+    )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
         run_id, problem, config, environment_sha256=environment_sha256,
+        initial_sigma_pp=initial_sigma_pp,
         source_hashes=_source_hashes(identity), source_tree_sha256=source_tree_sha256,
     )
     start = time.perf_counter()
@@ -290,6 +378,7 @@ def run_scba_case(
             problem, config, checkpoint_path=checkpoint, run_id=run_id,
             environment_sha256=environment_sha256, source_hashes=_source_hashes(identity),
             source_tree_sha256=source_tree_sha256, resume=resume,
+            initial_sigma_pp=initial_sigma_pp,
         )
     except SCBAConvergenceError as error:
         result = error.result
@@ -318,6 +407,7 @@ def run_scba_case(
         "schema": SCHEMA, "campaign_manifest_sha256": campaign_manifest_sha256,
         "preflight_source": identity, "checkpoint": str(checkpoint.resolve()),
         "checkpoint_sha256": _sha256_file(checkpoint), "checkpoint_status": load_scba_checkpoint_v2(checkpoint, expected_identity=expected).status,
+        "continuation_parent": parent,
         "result": summary, "hdf5": {"path": str(output_hdf5.resolve()), "sha256": hdf5_sha, "schema": ARCHIVE_SCHEMA},
         "scba_executed": True, "release_certified": False,
         "not_certified": ["converged material conductance", "0.3.0 release", "transverse SCBA"],
@@ -335,6 +425,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--environment-sha256", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--coupling-scale", type=float, default=1.0)
+    parser.add_argument("--initial-checkpoint", type=Path)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
@@ -349,6 +440,7 @@ def main() -> int:
                 checkpoint=args.checkpoint, output_json=args.output_json, output_hdf5=args.output_hdf5,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
+                initial_checkpoint=args.initial_checkpoint,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -359,6 +451,7 @@ def main() -> int:
                 campaign_manifest_sha256=args.campaign_manifest_sha256,
                 source_tree_sha256=args.source_tree_sha256, environment_sha256=args.environment_sha256,
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
+                initial_checkpoint=args.initial_checkpoint,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2
