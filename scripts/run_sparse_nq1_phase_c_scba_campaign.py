@@ -56,6 +56,7 @@ def _manifest(
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
     mixing: float | None = None,
+    mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> dict[str, Any]:
     repo = repo.resolve()
@@ -74,7 +75,8 @@ def _manifest(
         continuation_axis=continuation_axis,
         born_initial_hdf5=born_initial_hdf5,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
-        eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
+        eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
+        temperature_bias=temperature_bias,
     )
     driver = repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"
     if not driver.is_file():
@@ -205,7 +207,7 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
@@ -232,7 +234,8 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
             fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b,
             coupling_scale=coupling_scale, grid_step=grid_step,
             grid_n_positive=grid_n_positive, eta_lead=eta_lead,
-            mixing=mixing, temperature_bias=temperature_bias,
+            mixing=mixing, mixing_floor=mixing_floor,
+            temperature_bias=temperature_bias,
         )
         observed_controls = {
             "grid_step": float(_resume_problem.grid.step),
@@ -240,6 +243,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
             "grid_cutoff": float(_resume_problem.grid.cutoff),
             "eta_lead": float(_resume_config.eta_lead),
             "mixing": float(_resume_config.mixing),
+            "mixing_floor": float(_resume_config.mixing_floor),
             "temperature_bias": float(
                 _resume_problem.left.temperature - _resume_problem.right.temperature
             ),
@@ -253,7 +257,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
                 fixture=fixture, fc3_full=fc3_full,
                 phase_b_artifacts=phase_b, coupling_scale=coupling_scale,
                 grid_step=grid_step, grid_n_positive=grid_n_positive,
-                eta_lead=eta_lead, mixing=mixing,
+                eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
                 temperature_bias=temperature_bias,
             )
             _initial, supplied_parent = case._continuation_initial_state(
@@ -286,7 +290,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
     else:
         if any(artifacts.iterdir()):
             raise common.CampaignError("nonempty artifact directory has no manifest; refusing overwrite")
-        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale, continuation_parent_artifacts=continuation_parent_artifacts, continuation_axis=continuation_axis, born_initial_hdf5=born_initial_hdf5, grid_step=grid_step, grid_n_positive=grid_n_positive, eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias)
+        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale, continuation_parent_artifacts=continuation_parent_artifacts, continuation_axis=continuation_axis, born_initial_hdf5=born_initial_hdf5, grid_step=grid_step, grid_n_positive=grid_n_positive, eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor, temperature_bias=temperature_bias)
         common._publish_once(manifest_path, _canonical(manifest))
     manifest_sha = _sha256(manifest_path)
     if not running_path.exists():
@@ -300,6 +304,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         "--grid-n-positive", str(numerical["grid_n_positive"]),
         "--eta-lead", str(numerical["eta_lead"]),
         "--mixing", str(numerical["mixing"]),
+        "--mixing-floor", str(numerical["mixing_floor"]),
         "--temperature-bias", str(numerical["temperature_bias"]),
     ])
     parent = manifest.get("continuation_parent")
@@ -358,16 +363,17 @@ def main() -> int:
     parser.add_argument("--grid-n-positive", type=int)
     parser.add_argument("--eta-lead", type=float)
     parser.add_argument("--mixing", type=float)
+    parser.add_argument("--mixing-floor", type=float)
     parser.add_argument("--temperature-bias", type=float)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, temperature_bias=args.temperature_bias, resume=args.resume)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if status.get("state") == "passed" else 2
     except Exception as error:

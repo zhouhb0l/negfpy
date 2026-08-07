@@ -131,7 +131,7 @@ def _publish_once(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _config(*, eta_lead: float | None = None, mixing: float | None = None) -> SCBAConfig:
+def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None) -> SCBAConfig:
     # These controls are intentionally explicit and immutable for this case.
     return SCBAConfig(
         eta_lead=phase_c.ETA_LEAD if eta_lead is None else float(eta_lead),
@@ -144,7 +144,7 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None) -> SC
         min_iterations=3,
         consecutive_passes=3,
         mixing=0.2 if mixing is None else float(mixing),
-        mixing_floor=0.01,
+        mixing_floor=0.01 if mixing_floor is None else float(mixing_floor),
         on_nonconvergence="raise",
         max_memory_fraction=phase_c.MEMORY_FRACTION,
         allow_memory_overcommit=False,
@@ -192,6 +192,7 @@ def authenticate_scba_inputs(
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
     mixing: float | None = None,
+    mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> tuple[dict[str, Any], Any, SCBAConfig]:
     if not np.isfinite(coupling_scale) or coupling_scale <= 0.0 or coupling_scale > 1.0:
@@ -202,6 +203,7 @@ def authenticate_scba_inputs(
     )
     resolved_eta = phase_c.ETA_LEAD if eta_lead is None else float(eta_lead)
     resolved_mixing = 0.2 if mixing is None else float(mixing)
+    resolved_mixing_floor = 0.01 if mixing_floor is None else float(mixing_floor)
     resolved_bias = (
         phase_c.TEMPERATURE_BIAS
         if temperature_bias is None else float(temperature_bias)
@@ -214,6 +216,10 @@ def authenticate_scba_inputs(
         raise SCBACaseError("eta_lead must be finite and positive")
     if not np.isfinite(resolved_mixing) or not 0.0 < resolved_mixing <= 1.0:
         raise SCBACaseError("mixing must be finite and in (0, 1]")
+    if not np.isfinite(resolved_mixing_floor) or not 0.0 <= resolved_mixing_floor <= 1.0:
+        raise SCBACaseError("mixing_floor must be finite and in [0, 1]")
+    if resolved_mixing_floor > resolved_mixing:
+        raise SCBACaseError("mixing_floor must not exceed mixing")
     if not np.isfinite(resolved_bias):
         raise SCBACaseError("temperature_bias must be finite")
     identity, problem, _born_config = phase_c.authenticate_phase_c_inputs(
@@ -244,7 +250,10 @@ def authenticate_scba_inputs(
         )
         identity = dict(identity)
         identity["problem_input_hashes"] = problem_input_hashes(problem)
-    config = _config(eta_lead=resolved_eta, mixing=resolved_mixing)
+    config = _config(
+        eta_lead=resolved_eta, mixing=resolved_mixing,
+        mixing_floor=resolved_mixing_floor,
+    )
     # The Phase-C assembly is the authenticated source of the material
     # problem.  Only the SCBA iteration controls differ from the Born gate.
     if problem.ndof != phase_c.N_DEVICE_DOFS:
@@ -547,6 +556,7 @@ def preflight_scba_inputs(
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
     mixing: float | None = None,
+    mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> dict[str, Any]:
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
@@ -556,7 +566,8 @@ def preflight_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
-        eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
+        eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
+        temperature_bias=temperature_bias,
     )
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
@@ -601,6 +612,7 @@ def preflight_scba_inputs(
             "grid_cutoff": float(problem.grid.cutoff),
             "eta_lead": float(config.eta_lead),
             "mixing": float(config.mixing),
+            "mixing_floor": float(config.mixing_floor),
             "temperature_bias": float(
                 problem.left.temperature - problem.right.temperature
             ),
@@ -626,13 +638,15 @@ def run_scba_case(
     grid_n_positive: int | None = None,
     eta_lead: float | None = None,
     mixing: float | None = None,
+    mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
-        eta_lead=eta_lead, mixing=mixing, temperature_bias=temperature_bias,
+        eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
+        temperature_bias=temperature_bias,
     )
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
@@ -719,6 +733,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--grid-n-positive", type=int)
     parser.add_argument("--eta-lead", type=float)
     parser.add_argument("--mixing", type=float)
+    parser.add_argument("--mixing-floor", type=float)
     parser.add_argument("--temperature-bias", type=float)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
@@ -739,6 +754,7 @@ def main() -> int:
                 born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
+                mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
             )
         else:
@@ -755,6 +771,7 @@ def main() -> int:
                 born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
+                mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
