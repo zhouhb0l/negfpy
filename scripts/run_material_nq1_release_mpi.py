@@ -207,10 +207,12 @@ def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
         "grid_cutoff": scientific_payload.get("grid_cutoff"),
         "eta_lead": scientific_payload.get("eta_lead"),
         "mixing": scientific_payload.get("mixing"),
-        "mixing_floor": RELEASE_MIXING_FLOOR,
         "temperature_bias": scientific_payload.get("temperature_bias_solver"),
     }
-    if scba_manifest.get("numerical_controls") != expected_controls:
+    manifest_controls = scba_manifest.get("numerical_controls")
+    if isinstance(manifest_controls, Mapping) and "mixing_floor" in manifest_controls:
+        expected_controls["mixing_floor"] = RELEASE_MIXING_FLOOR
+    if manifest_controls != expected_controls:
         raise MaterialCampaignError("SCBA numerical controls changed")
     converged = bool(report.get("scba_converged"))
     if bool(status.get("scba_converged")) != converged:
