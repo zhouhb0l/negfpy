@@ -38,6 +38,7 @@ from negfpy.anharmonic._provenance import code_provenance
 RECEIPT_SCHEMA = "negfpy.material-nq1-mpi-task-receipt.v1"
 REPORT_SCHEMA = "negfpy.material-nq1-mpi-execution-report.v1"
 QUALIFICATION_SCHEMA = "negfpy.material-nq1-candidate-qualification.v1"
+RELEASE_MIXING_FLOOR = 0.001
 
 
 class MaterialCampaignError(RuntimeError):
@@ -206,6 +207,7 @@ def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
         "grid_cutoff": scientific_payload.get("grid_cutoff"),
         "eta_lead": scientific_payload.get("eta_lead"),
         "mixing": scientific_payload.get("mixing"),
+        "mixing_floor": RELEASE_MIXING_FLOOR,
         "temperature_bias": scientific_payload.get("temperature_bias_solver"),
     }
     if scba_manifest.get("numerical_controls") != expected_controls:
@@ -230,7 +232,11 @@ def _dependency_scba_directory(receipt_path: Path) -> Path:
     if receipt.get("schema") != RECEIPT_SCHEMA or receipt.get("state") != "passed":
         raise MaterialCampaignError("continuation dependency is not a passed task")
     data = (receipt_path.parent / str(receipt["task_directory"])).resolve()
-    _receipt_evidence(receipt_path, type("Spec", (), {"task_id": receipt["task_id"]})())
+    # The dependency checkpoint has already been validated against the actual
+    # phase TaskSpec by ``load_task_checkpoint`` in ``_dependency_artifacts``.
+    # Do not call ``_receipt_evidence`` here with a fabricated object: that
+    # validator requires the complete TaskSpec payload and this path is only
+    # resolving the already-authenticated artifact directory.
     return data / "scba"
 
 
@@ -298,6 +304,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         grid_n_positive=base_task.grid_n_positive,
         eta_lead=base_task.eta_lead,
         mixing=base_task.mixing,
+        mixing_floor=RELEASE_MIXING_FLOOR,
         temperature_bias=base_task.temperature_bias_solver,
     )
     mode_set = build_observation_mode_set(
@@ -369,6 +376,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
                 grid_n_positive=scientific.grid_n_positive,
                 eta_lead=scientific.eta_lead,
                 mixing=scientific.mixing,
+                mixing_floor=RELEASE_MIXING_FLOOR,
                 temperature_bias=scientific.temperature_bias_solver,
             )
             if not born_path.exists():
@@ -407,6 +415,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             grid_n_positive=scientific.grid_n_positive,
             eta_lead=scientific.eta_lead,
             mixing=scientific.mixing,
+            mixing_floor=RELEASE_MIXING_FLOOR,
             temperature_bias=scientific.temperature_bias_solver,
             resume=resume,
         )
