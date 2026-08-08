@@ -25,6 +25,13 @@ import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
 
 
+# The material SCBA fixed point is substantially more expensive than the
+# lightweight Born gate.  Keep its infrastructure watchdog explicit and
+# independent while preserving the same RSS and termination safeguards.
+SCBA_WALL_LIMIT_SECONDS = 12 * 60 * 60
+common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
+
+
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v1"
 STATUS_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-status.v1"
 REPORT_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-report.v1"
