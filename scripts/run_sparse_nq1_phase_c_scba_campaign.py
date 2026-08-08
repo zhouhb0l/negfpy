@@ -29,7 +29,6 @@ import validate_sparse_nq1_phase_c_scba as case
 # lightweight Born gate.  Keep its infrastructure watchdog explicit and
 # independent while preserving the same RSS and termination safeguards.
 SCBA_WALL_LIMIT_SECONDS = 12 * 60 * 60
-common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
 
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v1"
@@ -376,6 +375,9 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     args = parser.parse_args()
     try:
+        # Apply the material-SCBA watchdog only when this campaign is run;
+        # importing the shared Born module must retain its 2-hour contract.
+        common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
         if args.preflight_only:
             manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
