@@ -86,6 +86,7 @@ def _write_parent(
             "grid_cutoff": float(problem.grid.cutoff),
             "eta_lead": float(config.eta_lead),
             "mixing": float(config.mixing),
+            "mixing_floor": float(config.mixing_floor),
             "temperature_bias": float(
                 problem.left.temperature - problem.right.temperature
             ),
@@ -150,6 +151,26 @@ def test_completed_lower_coupling_campaign_seeds_and_binds_child(
     bound = driver._source_hashes(_identity(), record)
     assert bound["continuation_parent_checkpoint"] == record["checkpoint_sha256"]
     assert set(driver._source_hashes(_identity())).issubset(bound)
+
+
+def test_coupling_continuation_rejects_changed_mixing_floor(
+    tmp_path: Path,
+) -> None:
+    problem, config = _write_parent(tmp_path / "parent")
+    with pytest.raises(
+        driver.SCBACaseError,
+        match="cannot change numerical or temperature controls",
+    ):
+        driver._continuation_initial_state(
+            parent_artifacts=tmp_path / "parent",
+            identity=_identity(),
+            problem=problem,
+            config=replace(config, mixing_floor=0.005),
+            source_tree_sha256=SOURCE_TREE,
+            environment_sha256=ENVIRONMENT,
+            child_coupling_scale=0.02,
+            continuation_axis="coupling",
+        )
 
 
 @pytest.mark.parametrize("parent_scale", [0.02, 0.03])

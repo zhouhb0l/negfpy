@@ -358,6 +358,7 @@ def _continuation_initial_state(
         "grid_cutoff": float(problem.grid.cutoff),
         "eta_lead": float(config.eta_lead),
         "mixing": float(config.mixing),
+        "mixing_floor": float(config.mixing_floor),
         "temperature_bias": float(
             problem.left.temperature - problem.right.temperature
         ),
