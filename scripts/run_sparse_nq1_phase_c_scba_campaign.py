@@ -65,6 +65,10 @@ def _manifest(
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> dict[str, Any]:
+    # The release driver may call _manifest directly for preflight, without
+    # entering main(). Apply the material-SCBA watchdog at the shared entry
+    # point so both preflight and execution use the same 12-hour contract.
+    common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
     repo = repo.resolve()
     artifacts = artifacts.resolve()
     checkpoint = artifacts / "checkpoint" / "sigma-pp.h5"
