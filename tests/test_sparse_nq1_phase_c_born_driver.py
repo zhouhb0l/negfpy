@@ -146,7 +146,7 @@ def test_fixed_timing_controls_are_not_scba_controls() -> None:
     assert config.max_workers == 1
     assert not config.allow_memory_overcommit
     assert campaign.WALL_LIMIT_SECONDS == 7200
-    assert campaign.RSS_LIMIT_BYTES == 4 * 1024**3
+    assert campaign.RSS_LIMIT_BYTES == 8 * 1024**3
 
 
 def test_complete_phase_b_set_is_bound_and_tamper_fails(

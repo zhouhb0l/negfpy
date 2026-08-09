@@ -2,7 +2,7 @@
 """Seal and supervise one remote Nq=1, Nw=17 Born timing gate.
 
 The coordinator closes provenance and infrastructure gates before launching
-the scientific subprocess.  A two-hour wall watchdog and 4-GiB resident-set
+the scientific subprocess.  A two-hour wall watchdog and 8-GiB resident-set
 watchdog terminate the process group with TERM, then KILL after 60 seconds.
 Timeouts and infrastructure failures are terminal archived outcomes and are
 never retried automatically.  Scientific failures likewise retain the exact
@@ -38,7 +38,7 @@ MATERIAL_LOCK_SHA256 = (
 )
 WALL_LIMIT_SECONDS = 2 * 60 * 60
 TERM_GRACE_SECONDS = 60
-RSS_LIMIT_BYTES = 4 * 1024**3
+RSS_LIMIT_BYTES = 8 * 1024**3
 RSS_POLL_SECONDS = 2.0
 EXPECTED_DISTRIBUTIONS = {
     "h5py": "3.16.0",
