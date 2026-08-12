@@ -23,6 +23,25 @@ HBAR_J_S = 1.0545718176461565e-34
 KB_J_K = 1.380649e-23
 OMEGA0_RAD_S = 2.0 * math.pi * 1.0e13
 HARMONIC_CONSERVATIVE_BOUND = 2.463999
+MATERIAL_NQ1_MIXING_FLOOR = 0.001
+MATERIAL_NQ1_ACCEPTANCE = MappingProxyType({
+    "fixed_point_rtol": 1.0e-8,
+    "consecutive_passes": 3,
+    "field_equality_rtol": 1.0e-8,
+    "backend_equality_rtol": 1.0e-10,
+    "absolute_field_tolerance": 1.0e-12,
+    "conservation_rtol": 1.0e-5,
+    "current_atol_j0": 1.0e-10,
+    "refinement_rtol": 5.0e-3,
+    "tail_rtol": 1.0e-6,
+    "weak_coupling_ratio": 0.1,
+})
+MATERIAL_NQ1_EXCLUDED_CLAIMS = (
+    "transverse-momentum convergence",
+    "bulk-film prediction",
+    "anharmonic leads",
+    "quartic and four-phonon diagrams",
+)
 
 
 def _canonical(value: Any) -> bytes:
@@ -60,13 +79,14 @@ class MaterialSCBATask:
     grid_n_positive: int
     eta_lead: float
     mixing: float
+    mixing_floor: float
     mean_temperature_kelvin: float
     temperature_bias_kelvin: float
     initialization: Literal["zero", "born", "continuation"]
     continuation_parent: str | None = None
     continuation_axis: Literal["coupling", "temperature_bias"] | None = None
 
-    schema: ClassVar[str] = "negfpy.material-nq1-scba-task.v1"
+    schema: ClassVar[str] = "negfpy.material-nq1-scba-task.v2"
 
     def __post_init__(self) -> None:
         for name in ("task_id", "role"):
@@ -75,6 +95,7 @@ class MaterialSCBATask:
                 raise ValueError(f"{name} is invalid")
         for name in (
             "coupling_scale", "grid_step", "eta_lead", "mixing",
+            "mixing_floor",
             "mean_temperature_kelvin", "temperature_bias_kelvin",
         ):
             value = getattr(self, name)
@@ -92,6 +113,8 @@ class MaterialSCBATask:
             raise ValueError("grid_n_positive must be a positive integer")
         if not 0.01 <= self.mixing <= 1.0:
             raise ValueError("mixing must lie in [0.01, 1]")
+        if not 0.0 < self.mixing_floor <= self.mixing:
+            raise ValueError("mixing_floor must lie in (0, mixing]")
         if self.mean_temperature_kelvin < 0.0 or (
             self.mean_temperature_kelvin
             < 0.5 * abs(self.temperature_bias_kelvin)
@@ -133,6 +156,7 @@ class MaterialSCBATask:
             "grid_cutoff": self.grid_cutoff,
             "eta_lead": self.eta_lead,
             "mixing": self.mixing,
+            "mixing_floor": self.mixing_floor,
             "mean_temperature_kelvin": self.mean_temperature_kelvin,
             "temperature_bias_kelvin": self.temperature_bias_kelvin,
             "temperature_bias_solver": self.temperature_bias_solver,
@@ -159,6 +183,10 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
         "grid_n_positive": 75,
         "eta_lead": 0.025,
         "mixing": 0.2,
+        # This post-7b0c169 development control is part of every task identity.
+        # It defines a new candidate and cannot retroactively certify the
+        # earlier frozen 0.01-floor campaign.
+        "mixing_floor": MATERIAL_NQ1_MIXING_FLOOR,
         "mean_temperature_kelvin": 300.0,
         "temperature_bias_kelvin": 0.0,
     }
@@ -279,7 +307,7 @@ def silicon_nq1_release_manifest(
             raise ValueError(f"{name} must be a lowercase SHA256")
     tasks = silicon_nq1_release_tasks()
     payload = {
-        "schema": "negfpy.material-nq1-scba-campaign.v1",
+        "schema": "negfpy.material-nq1-scba-campaign.v2",
         "scientific_scope": "silicon N_q=1 algebraic material validation",
         "source_revision": source_revision,
         "source_tree_sha256": source_tree_sha256,
@@ -289,24 +317,8 @@ def silicon_nq1_release_manifest(
         "harmonic_conservative_bound": HARMONIC_CONSERVATIVE_BOUND,
         "minimum_cutoff_ratio": 3.0,
         "tasks": [task.as_dict() | {"task_sha256": task.task_sha256} for task in tasks],
-        "acceptance": {
-            "fixed_point_rtol": 1.0e-8,
-            "consecutive_passes": 3,
-            "field_equality_rtol": 1.0e-8,
-            "backend_equality_rtol": 1.0e-10,
-            "absolute_field_tolerance": 1.0e-12,
-            "conservation_rtol": 1.0e-5,
-            "current_atol_j0": 1.0e-10,
-            "refinement_rtol": 5.0e-3,
-            "tail_rtol": 1.0e-6,
-            "weak_coupling_ratio": 0.1,
-        },
-        "excluded": [
-            "transverse-momentum convergence",
-            "bulk-film prediction",
-            "anharmonic leads",
-            "quartic and four-phonon diagrams",
-        ],
+        "acceptance": dict(MATERIAL_NQ1_ACCEPTANCE),
+        "excluded": list(MATERIAL_NQ1_EXCLUDED_CLAIMS),
     }
     manifest = dict(payload)
     manifest["campaign_sha256"] = _sha256_bytes(_canonical(payload))
@@ -315,6 +327,9 @@ def silicon_nq1_release_manifest(
 
 __all__ = [
     "HARMONIC_CONSERVATIVE_BOUND",
+    "MATERIAL_NQ1_ACCEPTANCE",
+    "MATERIAL_NQ1_EXCLUDED_CLAIMS",
+    "MATERIAL_NQ1_MIXING_FLOOR",
     "MaterialSCBATask",
     "OMEGA0_RAD_S",
     "kelvin_to_solver_temperature",

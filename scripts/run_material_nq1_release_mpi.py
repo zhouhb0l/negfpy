@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,9 @@ from negfpy.anharmonic._born_initial import (
     write_born_initial_state,
 )
 from negfpy.anharmonic._material_nq1_campaign import (
+    MATERIAL_NQ1_ACCEPTANCE,
+    MATERIAL_NQ1_EXCLUDED_CLAIMS,
+    MATERIAL_NQ1_MIXING_FLOOR,
     MaterialSCBATask,
     silicon_nq1_release_tasks,
 )
@@ -37,12 +41,58 @@ from negfpy.anharmonic._provenance import code_provenance
 
 RECEIPT_SCHEMA = "negfpy.material-nq1-mpi-task-receipt.v1"
 REPORT_SCHEMA = "negfpy.material-nq1-mpi-execution-report.v1"
-QUALIFICATION_SCHEMA = "negfpy.material-nq1-candidate-qualification.v1"
-RELEASE_MIXING_FLOOR = 0.001
+QUALIFICATION_SCHEMA = "negfpy.material-nq1-candidate-qualification.v2"
+SCIENTIFIC_CONTROLS_SCHEMA = "negfpy.material-nq1-scientific-controls.v1"
+EXPECTED_QUALIFICATION_CHECKS = frozenset({
+    "source_clean_and_unchanged",
+    "python_310_full_suite",
+    "python_312_full_suite",
+    "mpi_two_rank_smoke",
+    "mpi_four_rank_smoke",
+    "material_inputs_authenticated",
+    "resolved_mode_set_nonempty",
+    "harmonic_embedding_buffer",
+    "memory_guard",
+    "disk_guard",
+    "thread_limits_one",
+    "candidate_pythonpath_first",
+})
+# Compatibility name for external launch wrappers.  The authoritative value
+# is serialized into each MaterialSCBATask and its campaign identity.
+RELEASE_MIXING_FLOOR = MATERIAL_NQ1_MIXING_FLOOR
 
 
 class MaterialCampaignError(RuntimeError):
     """Fail-closed material campaign error."""
+
+
+def _authenticate_task_inputs(
+    *,
+    fixture: Path,
+    fc3_full: Path,
+    phase_b_artifacts: Path,
+    task: MaterialSCBATask,
+) -> tuple[Any, Any, Any]:
+    """Authenticate one task using every serialized numerical control."""
+
+    frozen_mean = case.phase_c.TEMPERATURE_K
+    if task.mean_temperature_kelvin != frozen_mean:
+        raise MaterialCampaignError(
+            "task mean temperature differs from the authenticated material input"
+        )
+
+    return case.authenticate_scba_inputs(
+        fixture=fixture,
+        fc3_full=fc3_full,
+        phase_b_artifacts=phase_b_artifacts,
+        coupling_scale=task.coupling_scale,
+        grid_step=task.grid_step,
+        grid_n_positive=task.grid_n_positive,
+        eta_lead=task.eta_lead,
+        mixing=task.mixing,
+        mixing_floor=task.mixing_floor,
+        temperature_bias=task.temperature_bias_solver,
+    )
 
 
 def _canonical(value: Any) -> bytes:
@@ -53,6 +103,23 @@ def _canonical(value: Any) -> bytes:
         )
         + "\n"
     ).encode("ascii")
+
+
+def _scientific_control_record() -> dict[str, Any]:
+    tasks = [
+        task.as_dict() | {"task_sha256": task.task_sha256}
+        for task in silicon_nq1_release_tasks()
+    ]
+    payload = {
+        "schema": SCIENTIFIC_CONTROLS_SCHEMA,
+        "acceptance": dict(MATERIAL_NQ1_ACCEPTANCE),
+        "excluded_claims": list(MATERIAL_NQ1_EXCLUDED_CLAIMS),
+        "task_count": len(tasks),
+        "tasks": tasks,
+    }
+    return payload | {
+        "task_set_sha256": hashlib.sha256(_canonical(payload)).hexdigest()
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -106,7 +173,8 @@ def _validate_qualification(
     document = _load_canonical(path.expanduser().resolve(strict=True), "qualification report")
     expected = {
         "schema", "source", "source_tree_sha256", "environment_sha256",
-        "checks", "evidence", "release_preflight_passed",
+        "scientific_controls", "checks", "evidence",
+        "release_preflight_passed",
     }
     checks = document.get("checks")
     if (
@@ -115,8 +183,9 @@ def _validate_qualification(
         or document.get("source") != source
         or document.get("source_tree_sha256") != source_tree_sha256
         or document.get("environment_sha256") != environment_sha256
+        or document.get("scientific_controls") != _scientific_control_record()
         or not isinstance(checks, Mapping)
-        or not checks
+        or set(checks) != EXPECTED_QUALIFICATION_CHECKS
         or not all(value is True for value in checks.values())
         or document.get("release_preflight_passed") is not True
     ):
@@ -125,10 +194,19 @@ def _validate_qualification(
         "path": str(path.expanduser().resolve()),
         "sha256": _sha256(path.expanduser().resolve()),
         "checks": dict(checks),
+        "scientific_task_set_sha256": document[
+            "scientific_controls"
+        ]["task_set_sha256"],
     }
 
 
-def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
+def _receipt_evidence(
+    path: Path,
+    spec: Any,
+    *,
+    expected_campaign_manifest_sha256: str,
+    expected_task_identity_sha256: str,
+) -> dict[str, Any]:
     receipt = _load_canonical(path, "material task receipt")
     expected = {
         "schema", "campaign_manifest_sha256", "task_id",
@@ -141,6 +219,10 @@ def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
         raise MaterialCampaignError("material task receipt schema is invalid")
     if receipt["task_id"] != spec.task_id:
         raise MaterialCampaignError("material task receipt names another task")
+    if receipt["campaign_manifest_sha256"] != expected_campaign_manifest_sha256:
+        raise MaterialCampaignError("material task receipt names another campaign")
+    if receipt["task_identity_sha256"] != expected_task_identity_sha256:
+        raise MaterialCampaignError("material task receipt identity changed")
     scientific_payload = spec.payload.get("scientific_task")
     if not isinstance(scientific_payload, Mapping):
         raise MaterialCampaignError("MPI task lacks its scientific payload")
@@ -210,8 +292,12 @@ def _receipt_evidence(path: Path, spec: Any) -> dict[str, Any]:
         "temperature_bias": scientific_payload.get("temperature_bias_solver"),
     }
     manifest_controls = scba_manifest.get("numerical_controls")
-    if isinstance(manifest_controls, Mapping) and "mixing_floor" in manifest_controls:
-        expected_controls["mixing_floor"] = RELEASE_MIXING_FLOOR
+    task_schema = scientific_payload.get("schema")
+    if task_schema != "negfpy.material-nq1-scba-task.v2":
+        raise MaterialCampaignError("material task schema is unsupported")
+    if "mixing_floor" not in scientific_payload:
+        raise MaterialCampaignError("v2 material task lacks mixing_floor")
+    expected_controls["mixing_floor"] = scientific_payload["mixing_floor"]
     if manifest_controls != expected_controls:
         raise MaterialCampaignError("SCBA numerical controls changed")
     converged = bool(report.get("scba_converged"))
@@ -297,17 +383,11 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         if task.task_id == "coupling-g100"
     )
     # Authenticate the shared material inputs without executing a Born bubble.
-    identity, base_problem, _config = case.authenticate_scba_inputs(
+    identity, base_problem, _config = _authenticate_task_inputs(
         fixture=args.fixture,
         fc3_full=args.fc3_full,
         phase_b_artifacts=args.phase_b_artifacts,
-        coupling_scale=1.0,
-        grid_step=base_task.grid_step,
-        grid_n_positive=base_task.grid_n_positive,
-        eta_lead=base_task.eta_lead,
-        mixing=base_task.mixing,
-        mixing_floor=RELEASE_MIXING_FLOOR,
-        temperature_bias=base_task.temperature_bias_solver,
+        task=base_task,
     )
     mode_set = build_observation_mode_set(
         base_problem,
@@ -349,6 +429,17 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         input_hashes=input_hashes,
     )
 
+    def validate_receipt(path: Path, spec: Any) -> dict[str, Any]:
+        phase = importlib.import_module(
+            "negfpy.anharmonic._material_nq1_mpi"
+        )._phase_manifest(campaign, campaign.wave_index(spec.task_id))
+        return _receipt_evidence(
+            path,
+            spec,
+            expected_campaign_manifest_sha256=campaign.manifest.manifest_sha256,
+            expected_task_identity_sha256=phase.task_identity_sha256(spec),
+        )
+
     def executor(
         scientific: MaterialSCBATask,
         spec: Any,
@@ -369,17 +460,11 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         born_record = None
         if scientific.initialization == "born":
             born_path = task_data / "born-initial.h5"
-            _identity, problem, config = case.authenticate_scba_inputs(
+            _identity, problem, config = _authenticate_task_inputs(
                 fixture=args.fixture,
                 fc3_full=args.fc3_full,
                 phase_b_artifacts=args.phase_b_artifacts,
-                coupling_scale=scientific.coupling_scale,
-                grid_step=scientific.grid_step,
-                grid_n_positive=scientific.grid_n_positive,
-                eta_lead=scientific.eta_lead,
-                mixing=scientific.mixing,
-                mixing_floor=RELEASE_MIXING_FLOOR,
-                temperature_bias=scientific.temperature_bias_solver,
+                task=scientific,
             )
             if not born_path.exists():
                 write_born_initial_state(
@@ -417,7 +502,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             grid_n_positive=scientific.grid_n_positive,
             eta_lead=scientific.eta_lead,
             mixing=scientific.mixing,
-            mixing_floor=RELEASE_MIXING_FLOOR,
+            mixing_floor=scientific.mixing_floor,
             temperature_bias=scientific.temperature_bias_solver,
             resume=resume,
         )
@@ -458,7 +543,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         campaign,
         executor,
         campaign_root,
-        artifact_validator=_receipt_evidence,
+        artifact_validator=validate_receipt,
         comm=communicator,
         require_mpi=args.require_mpi,
         thread_limit=1,

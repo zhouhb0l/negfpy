@@ -29,6 +29,7 @@ import validate_sparse_nq1_phase_c_scba as case
 # lightweight Born gate.  Keep its infrastructure watchdog explicit and
 # independent while preserving the same RSS and termination safeguards.
 SCBA_WALL_LIMIT_SECONDS = 12 * 60 * 60
+SCBA_RSS_LIMIT_BYTES = 8 * 1024**3
 
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v1"
@@ -65,10 +66,6 @@ def _manifest(
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
 ) -> dict[str, Any]:
-    # The release driver may call _manifest directly for preflight, without
-    # entering main(). Apply the material-SCBA watchdog at the shared entry
-    # point so both preflight and execution use the same 12-hour contract.
-    common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
     repo = repo.resolve()
     artifacts = artifacts.resolve()
     checkpoint = artifacts / "checkpoint" / "sigma-pp.h5"
@@ -107,7 +104,7 @@ def _manifest(
         "numerical_controls": preflight["numerical_controls"],
         "fixed_controls_no_retuning": True,
         "restart": {"checkpoint_schema": case.CHECKPOINT_SCHEMA, "resume_exact_identity": True, "automatic_retry": False},
-        "watchdog": {"wall_limit_seconds": common.WALL_LIMIT_SECONDS, "rss_limit_bytes": common.RSS_LIMIT_BYTES, "term_grace_seconds": common.TERM_GRACE_SECONDS, "automatic_retry": False},
+        "watchdog": {"wall_limit_seconds": SCBA_WALL_LIMIT_SECONDS, "rss_limit_bytes": SCBA_RSS_LIMIT_BYTES, "term_grace_seconds": common.TERM_GRACE_SECONDS, "automatic_retry": False},
         "outputs": {"checkpoint": str(checkpoint), "json": str(output_json), "hdf5": str(output_hdf5)},
         "python": {"executable": str(Path(sys.executable).resolve()), "version": platform.python_version()},
         "distributions": common._versions(),
@@ -135,6 +132,23 @@ def _attempt_paths(artifacts: Path) -> tuple[int, Path, Path, Path]:
         artifacts / "logs" / f"scba{suffix}.json",
         artifacts / f"infrastructure-failure{suffix}.json",
         artifacts / f"SHA256SUMS.infrastructure-failure{suffix}",
+    )
+
+
+def _supervise_scba(
+    command: tuple[str, ...],
+    *,
+    repo: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> dict[str, Any]:
+    return common._supervised_subprocess(
+        command,
+        repo=repo,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        wall_limit_seconds=SCBA_WALL_LIMIT_SECONDS,
+        rss_limit_bytes=SCBA_RSS_LIMIT_BYTES,
     )
 
 
@@ -332,7 +346,12 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_path = log_path.with_suffix(".stdout.tmp")
     stderr_path = log_path.with_suffix(".stderr.tmp")
-    supervision = common._supervised_subprocess(command, repo=repo, stdout_path=stdout_path, stderr_path=stderr_path)
+    supervision = _supervise_scba(
+        command,
+        repo=repo,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
     log = {
         "attempt": attempt,
         "resume": bool(resume),
@@ -379,9 +398,6 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     args = parser.parse_args()
     try:
-        # Apply the material-SCBA watchdog only when this campaign is run;
-        # importing the shared Born module must retain its 2-hour contract.
-        common.WALL_LIMIT_SECONDS = SCBA_WALL_LIMIT_SECONDS
         if args.preflight_only:
             manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))

@@ -38,7 +38,10 @@ MATERIAL_LOCK_SHA256 = (
 )
 WALL_LIMIT_SECONDS = 2 * 60 * 60
 TERM_GRACE_SECONDS = 60
-RSS_LIMIT_BYTES = 8 * 1024**3
+# The one-shot Born timing gate and the material SCBA solve have different
+# memory envelopes.  Keep the Born contract at its original 4-GiB bound;
+# the SCBA wrapper passes its own explicit 8-GiB limit to the supervisor.
+RSS_LIMIT_BYTES = 4 * 1024**3
 RSS_POLL_SECONDS = 2.0
 EXPECTED_DISTRIBUTIONS = {
     "h5py": "3.16.0",
@@ -333,8 +336,26 @@ def _terminate_group(process: subprocess.Popen[Any]) -> bool:
 
 
 def _supervised_subprocess(
-    command: tuple[str, ...], *, repo: Path, stdout_path: Path, stderr_path: Path
+    command: tuple[str, ...],
+    *,
+    repo: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    wall_limit_seconds: int | None = None,
+    rss_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
+    selected_wall_limit = (
+        WALL_LIMIT_SECONDS if wall_limit_seconds is None else wall_limit_seconds
+    )
+    selected_rss_limit = (
+        RSS_LIMIT_BYTES if rss_limit_bytes is None else rss_limit_bytes
+    )
+    for name, value in {
+        "wall_limit_seconds": selected_wall_limit,
+        "rss_limit_bytes": selected_rss_limit,
+    }.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
     environment = os.environ.copy()
     environment.update(phase_c.THREAD_LIMIT_ENV)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -357,9 +378,9 @@ def _supervised_subprocess(
             rss = _rss_bytes(process.pid)
             if rss is not None:
                 peak_rss = max(peak_rss, rss)
-            if rss is not None and rss > RSS_LIMIT_BYTES:
+            if rss is not None and rss > selected_rss_limit:
                 trigger = "rss-limit"
-            elif elapsed > WALL_LIMIT_SECONDS:
+            elif elapsed > selected_wall_limit:
                 trigger = "wall-timeout"
             if trigger is not None:
                 killed_after_grace = _terminate_group(process)
@@ -372,6 +393,8 @@ def _supervised_subprocess(
         "peak_observed_rss_bytes": peak_rss,
         "watchdog_trigger": trigger,
         "killed_after_term_grace": killed_after_grace,
+        "wall_limit_seconds": selected_wall_limit,
+        "rss_limit_bytes": selected_rss_limit,
     }
 
 

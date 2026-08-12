@@ -248,16 +248,11 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         task for task in silicon_nq1_release_tasks()
         if task.task_id == "coupling-g100"
     )
-    identity, problem, _config = case.authenticate_scba_inputs(
+    identity, problem, _config = release._authenticate_task_inputs(
         fixture=args.fixture,
         fc3_full=args.fc3_full,
         phase_b_artifacts=args.phase_b_artifacts,
-        coupling_scale=1.0,
-        grid_step=base.grid_step,
-        grid_n_positive=base.grid_n_positive,
-        eta_lead=base.eta_lead,
-        mixing=base.mixing,
-        temperature_bias=base.temperature_bias_solver,
+        task=base,
     )
     modes = build_observation_mode_set(
         problem,
@@ -345,6 +340,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         "source": source,
         "source_tree_sha256": source_tree,
         "environment_sha256": lock["sha256"],
+        "scientific_controls": release._scientific_control_record(),
         "checks": checks,
         "evidence": {
             "python_versions": versions,

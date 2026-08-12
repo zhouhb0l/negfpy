@@ -48,7 +48,28 @@ def _load_receipts(root: Path, campaign: Any) -> dict[str, dict[str, Any]]:
             spec = campaign.manifest.task(task_id)
         except KeyError as error:
             raise MaterialReleaseValidationError("receipt names an unknown task") from error
-        evidence = mpi_driver._receipt_evidence(path, spec)
+        wave_index = campaign.wave_index(task_id)
+        phase = importlib.import_module(
+            "negfpy.anharmonic._material_nq1_mpi"
+        )._phase_manifest(campaign, wave_index)
+        expected_name = (
+            f"{phase.ordinal(spec):06d}-"
+            f"{phase.task_identity_sha256(spec)[:16]}.json"
+        )
+        expected_path = (
+            root / "waves" / f"{wave_index:03d}" / "task-artifacts"
+            / expected_name
+        )
+        if path != expected_path or path.resolve() != expected_path.resolve():
+            raise MaterialReleaseValidationError(
+                "material task receipt path is not canonical"
+            )
+        evidence = mpi_driver._receipt_evidence(
+            path,
+            spec,
+            expected_campaign_manifest_sha256=campaign.manifest.manifest_sha256,
+            expected_task_identity_sha256=phase.task_identity_sha256(spec),
+        )
         data = path.with_suffix(".data")
         scba = data / "scba"
         outcome = mpi_driver._load_canonical(
@@ -215,16 +236,11 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         item for item in silicon_nq1_release_tasks()
         if item.task_id == "coupling-g100"
     )
-    identity, problem, _config = case.authenticate_scba_inputs(
+    identity, problem, _config = mpi_driver._authenticate_task_inputs(
         fixture=args.fixture,
         fc3_full=args.fc3_full,
         phase_b_artifacts=args.phase_b_artifacts,
-        coupling_scale=1.0,
-        grid_step=base_task.grid_step,
-        grid_n_positive=base_task.grid_n_positive,
-        eta_lead=base_task.eta_lead,
-        mixing=base_task.mixing,
-        temperature_bias=base_task.temperature_bias_solver,
+        task=base_task,
     )
     mode_set = build_observation_mode_set(
         problem,

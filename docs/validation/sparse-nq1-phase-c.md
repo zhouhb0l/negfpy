@@ -40,8 +40,16 @@ cutoff, or grid after the fact.
 
 ## Current status
 
-The coarse low-coupling screening case (`g=0.01`, signed grid with 17 points)
-is running remotely under an immutable campaign manifest. It is diagnostic
-and cannot certify `0.3.0`; the production gate remains open until the
-required refined cases and buffer-invariance check have passed.
+The original `7b0c169` release campaign is terminal and incomplete: two
+coupling tasks passed and the `g=0.025` task ended as a scientific failure at
+iteration 200.  It did not regress from a completed state.  The later
+Aspire2A recovery campaign, run `material-nq1-release-011` at exact commit
+`ad4430c`, was still running at the last locally authenticated scheduler
+observation on 2026-08-10.  Its terminal MPI report and strict validation
+report have not yet been retrieved, so this document makes no completion or
+certification claim for that run.
 
+Post-evidence development is isolated from the exact `ad4430c` worktree and
+is described in [material-nq1-development-candidate.md](material-nq1-development-candidate.md).
+Any such source change defines a new candidate and cannot be used to
+retroactively validate run 011.

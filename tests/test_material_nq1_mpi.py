@@ -28,6 +28,13 @@ def _validator(path, task):
 
 def test_material_mpi_waves_preserve_dependencies_and_fanout() -> None:
     campaign = _campaign()
+    assert campaign.manifest.metadata["schema"] == (
+        "negfpy.material-nq1-mpi-campaign.v2"
+    )
+    assert all(
+        spec.payload["schema"] == "negfpy.material-nq1-mpi-task.v2"
+        for spec in campaign.manifest.tasks
+    )
     assert len(campaign.scientific_tasks) == 19
     assert len(campaign.waves) == 11
     assert campaign.waves[:9] == tuple(

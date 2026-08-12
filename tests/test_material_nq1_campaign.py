@@ -4,6 +4,9 @@ import pytest
 
 from negfpy.anharmonic._material_nq1_campaign import (
     HARMONIC_CONSERVATIVE_BOUND,
+    MATERIAL_NQ1_ACCEPTANCE,
+    MATERIAL_NQ1_EXCLUDED_CLAIMS,
+    MATERIAL_NQ1_MIXING_FLOOR,
     MaterialSCBATask,
     kelvin_to_solver_temperature,
     silicon_nq1_release_manifest,
@@ -22,6 +25,10 @@ def test_release_task_graph_is_complete_topological_and_preregistered() -> None:
     assert [task.coupling_scale for task in tasks[:9]] == [
         0.001, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0,
     ]
+    assert all(
+        task.mixing_floor == MATERIAL_NQ1_MIXING_FLOOR for task in tasks
+    )
+    assert all(task.as_dict()["schema"].endswith(".v2") for task in tasks)
     by_id = {task.task_id: task for task in tasks}
     for index, task in enumerate(tasks):
         if task.continuation_parent is not None:
@@ -80,7 +87,14 @@ def test_campaign_manifest_hashes_all_tasks_inputs_and_acceptance() -> None:
     assert first == second
     assert len(first["campaign_sha256"]) == 64
     assert len(first["tasks"]) == 19
+    assert first["schema"] == "negfpy.material-nq1-scba-campaign.v2"
+    assert all(
+        task["mixing_floor"] == MATERIAL_NQ1_MIXING_FLOOR
+        for task in first["tasks"]
+    )
     assert first["acceptance"]["refinement_rtol"] == 5.0e-3
+    assert first["acceptance"] == dict(MATERIAL_NQ1_ACCEPTANCE)
+    assert first["excluded"] == list(MATERIAL_NQ1_EXCLUDED_CLAIMS)
     changed = silicon_nq1_release_manifest(
         **{**kwargs, "input_hashes": {"fc2": "e" * 64, "fc3": "d" * 64}}
     )
@@ -96,6 +110,7 @@ def test_invalid_continuation_and_negative_temperature_fail_closed() -> None:
         "grid_n_positive": 75,
         "eta_lead": 0.025,
         "mixing": 0.2,
+        "mixing_floor": MATERIAL_NQ1_MIXING_FLOOR,
         "mean_temperature_kelvin": 1.0,
         "temperature_bias_kelvin": 0.0,
     }
@@ -105,4 +120,9 @@ def test_invalid_continuation_and_negative_temperature_fail_closed() -> None:
         MaterialSCBATask(
             initialization="zero",
             **{**base, "temperature_bias_kelvin": 3.0},
+        )
+    with pytest.raises(ValueError, match="mixing_floor"):
+        MaterialSCBATask(
+            initialization="zero",
+            **{**base, "mixing_floor": 0.3},
         )

@@ -8,11 +8,47 @@ import h5py
 import numpy as np
 import pytest
 
+from negfpy.anharmonic._material_nq1_mpi import (
+    _phase_manifest,
+    build_material_nq1_mpi_campaign,
+)
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 validation = importlib.import_module("validate_material_nq1_release")
+
+
+def _campaign():
+    return build_material_nq1_mpi_campaign(
+        source_revision="candidate",
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        input_hashes={"fc2": "c" * 64, "fc3": "d" * 64},
+    )
+
+
+def test_strict_receipt_loader_rejects_correct_name_in_wrong_wave(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign()
+    task = campaign.task("coupling-g0001")
+    spec = campaign.manifest.task(task.task_id)
+    phase = _phase_manifest(campaign, campaign.wave_index(task.task_id))
+    name = (
+        f"{phase.ordinal(spec):06d}-"
+        f"{phase.task_identity_sha256(spec)[:16]}.json"
+    )
+    misplaced = tmp_path / "waves/999/task-artifacts" / name
+    misplaced.parent.mkdir(parents=True)
+    misplaced.write_bytes(validation.mpi_driver._canonical({
+        "task_id": task.task_id,
+    }))
+    with pytest.raises(
+        validation.MaterialReleaseValidationError,
+        match="path is not canonical",
+    ):
+        validation._load_receipts(tmp_path, campaign)
 
 
 def _fields(path: Path, perturbation: float = 0.0) -> None:

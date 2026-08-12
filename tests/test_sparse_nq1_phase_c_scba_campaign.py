@@ -16,6 +16,35 @@ def _write(path: Path, value: dict[str, object]) -> None:
     path.write_bytes(campaign._canonical(value))
 
 
+def test_scba_watchdog_is_independent_of_born_gate() -> None:
+    assert campaign.SCBA_WALL_LIMIT_SECONDS == 12 * 60 * 60
+    assert campaign.SCBA_RSS_LIMIT_BYTES == 8 * 1024**3
+    assert campaign.common.WALL_LIMIT_SECONDS == 2 * 60 * 60
+    assert campaign.common.RSS_LIMIT_BYTES == 4 * 1024**3
+
+
+def test_scba_supervisor_receives_manifest_watchdog_limits(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def supervise(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return {"returncode": 0}
+
+    monkeypatch.setattr(campaign.common, "_supervised_subprocess", supervise)
+    result = campaign._supervise_scba(
+        ("python", "driver.py"),
+        repo=tmp_path,
+        stdout_path=tmp_path / "stdout",
+        stderr_path=tmp_path / "stderr",
+    )
+    assert result == {"returncode": 0}
+    assert observed["wall_limit_seconds"] == campaign.SCBA_WALL_LIMIT_SECONDS
+    assert observed["rss_limit_bytes"] == campaign.SCBA_RSS_LIMIT_BYTES
+
+
 def test_infrastructure_resume_uses_append_only_attempt_artifacts(
     tmp_path: Path,
 ) -> None:
