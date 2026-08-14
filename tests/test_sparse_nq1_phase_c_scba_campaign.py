@@ -17,7 +17,7 @@ def _write(path: Path, value: dict[str, object]) -> None:
 
 
 def test_scba_watchdog_is_independent_of_born_gate() -> None:
-    assert campaign.SCBA_WALL_LIMIT_SECONDS == 12 * 60 * 60
+    assert campaign.SCBA_WALL_LIMIT_SECONDS == 48 * 60 * 60
     assert campaign.SCBA_RSS_LIMIT_BYTES == 8 * 1024**3
     assert campaign.common.WALL_LIMIT_SECONDS == 2 * 60 * 60
     assert campaign.common.RSS_LIMIT_BYTES == 4 * 1024**3

@@ -140,11 +140,11 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixin
         hilbert_backend="fft",
         backend="fft",
         max_workers=1,
-        # The material g=0.025 continuation can require more than the
-        # original 200-iteration development budget. Keep this explicit in
-        # the candidate source so qualification and receipts bind the larger
+        # The material g=0.025 continuation reached iteration 317 before the
+        # previous candidate's watchdog expired. Keep this explicit in the
+        # candidate source so qualification and receipts bind the larger
         # numerical budget rather than silently resuming with new controls.
-        max_iterations=400,
+        max_iterations=800,
         min_iterations=3,
         consecutive_passes=3,
         mixing=0.2 if mixing is None else float(mixing),

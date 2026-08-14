@@ -28,7 +28,10 @@ import validate_sparse_nq1_phase_c_scba as case
 # The material SCBA fixed point is substantially more expensive than the
 # lightweight Born gate.  Keep its infrastructure watchdog explicit and
 # independent while preserving the same RSS and termination safeguards.
-SCBA_WALL_LIMIT_SECONDS = 12 * 60 * 60
+# The g=0.025 continuation reached iteration 317 before the prior 12-hour
+# infrastructure watchdog fired.  Keep the longer bound explicit in this
+# separately qualified candidate; Born retains its independent 2-hour gate.
+SCBA_WALL_LIMIT_SECONDS = 48 * 60 * 60
 SCBA_RSS_LIMIT_BYTES = 8 * 1024**3
 
 

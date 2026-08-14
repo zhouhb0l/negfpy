@@ -31,7 +31,8 @@ record and given a new artifact root and execution identifier.
 The watchdog contracts are also separated:
 
 - the bounded one-shot Born gate retains its 2-hour, 4-GiB limits;
-- material SCBA uses explicit 12-hour, 8-GiB limits.
+- material SCBA uses explicit 48-hour, 8-GiB limits for the g=0.025
+  continuation that previously reached iteration 317 at the 12-hour limit.
 
 The SCBA wrapper passes both limits directly to the supervisor.  It no longer
 mutates limits in the imported Born module, preventing import order from
