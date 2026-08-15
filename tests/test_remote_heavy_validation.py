@@ -776,11 +776,16 @@ def _rank_runtime(
             (core_id, by_core[(package_id, core_id)])
         )
     packages = sorted(by_package)
-    assert len(packages) >= socket_count
+    # Batch schedulers may expose a cpuset from only one physical socket even
+    # when the locked production identity was recorded on a two-socket host.
+    # This helper fabricates validation evidence; the real launch/binding
+    # contract remains checked separately against the recorded socket count.
+    effective_socket_count = min(socket_count, len(packages))
+    assert effective_socket_count >= 1
     selected: list[tuple[int, int, int]] = []
-    if rank_count >= socket_count and rank_count % socket_count == 0:
-        per_socket = rank_count // socket_count
-        for package_id in packages[:socket_count]:
+    if rank_count >= effective_socket_count and rank_count % effective_socket_count == 0:
+        per_socket = rank_count // effective_socket_count
+        for package_id in packages[:effective_socket_count]:
             assert len(by_package[package_id]) >= per_socket
             selected.extend(
                 (package_id, core_id, cpu_id)
