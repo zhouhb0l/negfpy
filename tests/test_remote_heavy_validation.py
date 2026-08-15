@@ -46,6 +46,22 @@ GIT_TREE = "a" * 40
 SOURCE_SHA256 = "b" * 64
 
 
+def _visible_socket_count() -> int:
+    allowed = (
+        set(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else set(range(os.cpu_count() or 1))
+    )
+    packages = {
+        toy_mpi._logical_cpu_topology(int(cpu))["physical_package_id"]
+        for cpu in allowed
+    }
+    return max(1, len(packages))
+
+
+TEST_SOCKET_COUNT = _visible_socket_count()
+
+
 def _valid_ssh_config() -> str:
     return "\n".join(
         (
@@ -454,7 +470,7 @@ def _worker_identity(lock_sha: str) -> dict[str, object]:
         "machine": "x86_64",
         "affinity_logical_cpu_count": 152,
         "physical_core_count": 76,
-        "socket_count": 2,
+        "socket_count": TEST_SOCKET_COUNT,
         "python_executable": "/validation/environment/bin/python",
         "python_version": "3.10.0",
         "distributions": {"numpy": "1.0", "negfpy": "0.1"},
@@ -760,7 +776,7 @@ def _rank_runtime(
     root: pathlib.Path,
     execution_id: str,
     environment_sha256: str,
-    socket_count: int = 2,
+    socket_count: int = TEST_SOCKET_COUNT,
 ) -> list[dict[str, object]]:
     by_core: dict[tuple[int, int], int] = {}
     for cpu_id in sorted(os.sched_getaffinity(0)):
@@ -1240,7 +1256,7 @@ def _write_scaling_selection(
                     prefix,
                     rank_count=rank,
                     physical_core_count=76,
-                    socket_count=2,
+                    socket_count=TEST_SOCKET_COUNT,
                     program=program,
                 )
             ),
@@ -1248,7 +1264,7 @@ def _write_scaling_selection(
                 mpi_scaling.openmpi_binding_arguments(
                     rank,
                     physical_core_count=76,
-                    socket_count=2,
+                    socket_count=TEST_SOCKET_COUNT,
                 )
             ),
             "thread_limits": dict(sorted(core.THREAD_LIMIT_ENV.items())),
@@ -1270,7 +1286,7 @@ def _write_scaling_selection(
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
     )
     target = root / "scaling-selection.json"
     toy_mpi.write_hashed_manifest(target, selection)
@@ -1395,13 +1411,13 @@ def _write_release_launch_facts(
         prefix,
         rank_count=rank_count,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
         program=program,
     )
     binding_arguments = mpi_scaling.openmpi_binding_arguments(
         rank_count,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
     )
     identity = _worker_identity(lock_sha)
     source_identity = identity["execution_source_identity"]
@@ -1471,7 +1487,7 @@ def _write_release_launch_facts(
         environment_prefix=prefix,
         selected_rank=rank_count,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
         source_revision=COMMIT,
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
@@ -1583,7 +1599,7 @@ def test_worker_validates_current_attempt_and_publishes_self_contained_evidence(
     assert "scale" in scale_argv
     assert release_argv[0] == str(root / "environment" / "bin" / "mpiexec")
     assert tuple(release_argv[1:7]) == mpi_scaling.openmpi_binding_arguments(
-        4, physical_core_count=76, socket_count=2
+        4, physical_core_count=76, socket_count=TEST_SOCKET_COUNT
     )
     assert release_argv[release_argv.index("-n") + 1] == "4"
     assert "release" in release_argv
@@ -1765,7 +1781,7 @@ def test_worker_uses_rank_one_serial_fallback_but_retains_silicon_mpi_choice(
     release_argv = captured[1][0]
     assert release_argv[release_argv.index("-n") + 1] == "1"
     assert tuple(release_argv[1:7]) == mpi_scaling.openmpi_binding_arguments(
-        1, physical_core_count=76, socket_count=2
+        1, physical_core_count=76, socket_count=TEST_SOCKET_COUNT
     )
 
 
@@ -1781,7 +1797,7 @@ def test_lifecycle_rebuilds_scaling_selection_and_rejects_worker_tampering(
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
     )
     assert facts["toy_rank_count"] == 4
     worker = (
@@ -1799,7 +1815,7 @@ def test_lifecycle_rebuilds_scaling_selection_and_rejects_worker_tampering(
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
             physical_core_count=76,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
         )
 
 
@@ -1834,7 +1850,7 @@ def test_scaling_validation_accepts_canonical_environment_entry_symlinks(
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
         physical_core_count=76,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
     )
     assert facts["toy_rank_count"] == 4
 
@@ -1867,7 +1883,7 @@ def test_scaling_validation_rejects_noncanonical_executable_aliases(
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
             physical_core_count=76,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
         )
 
 
@@ -1920,7 +1936,7 @@ def test_scaling_validation_rejects_executable_target_outside_prefix(
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
             physical_core_count=76,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
         )
 
 
@@ -1953,7 +1969,7 @@ def test_lifecycle_rejects_hash_mismatched_mpi_execution_manifest(
         source_revision=COMMIT,
         source_tree_sha256=SOURCE_SHA256,
         environment_sha256=lock_sha,
-        socket_count=2,
+        socket_count=TEST_SOCKET_COUNT,
         environment_prefix=deployment / "environment",
         launch_facts=launch_facts,
     )
@@ -1969,7 +1985,7 @@ def test_lifecycle_rejects_hash_mismatched_mpi_execution_manifest(
             source_revision=COMMIT,
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
             environment_prefix=deployment / "environment",
             launch_facts=launch_facts,
         )
@@ -2007,7 +2023,7 @@ def test_release_launch_receipt_rejects_tampering(
             environment_prefix=deployment / "environment",
             selected_rank=4,
             physical_core_count=76,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
             source_revision=COMMIT,
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
@@ -2056,7 +2072,7 @@ def test_release_launch_receipt_rejects_post_run_check_after_finish(
             environment_prefix=deployment / "environment",
             selected_rank=4,
             physical_core_count=76,
-            socket_count=2,
+            socket_count=TEST_SOCKET_COUNT,
             source_revision=COMMIT,
             source_tree_sha256=SOURCE_SHA256,
             environment_sha256=lock_sha,
