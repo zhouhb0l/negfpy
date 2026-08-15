@@ -46,15 +46,22 @@ GIT_TREE = "a" * 40
 SOURCE_SHA256 = "b" * 64
 
 
-def _visible_socket_count() -> int:
-    allowed = (
-        set(os.sched_getaffinity(0))
-        if hasattr(os, "sched_getaffinity")
-        else set(range(os.cpu_count() or 1))
+def _host_cpu_ids() -> tuple[int, ...]:
+    topology_root = pathlib.Path("/sys/devices/system/cpu")
+    cpu_ids = tuple(
+        sorted(
+            int(path.name[3:])
+            for path in topology_root.glob("cpu[0-9]*")
+            if path.name[3:].isdigit()
+        )
     )
+    return cpu_ids or tuple(range(os.cpu_count() or 1))
+
+
+def _visible_socket_count() -> int:
     packages = {
         toy_mpi._logical_cpu_topology(int(cpu))["physical_package_id"]
-        for cpu in allowed
+        for cpu in _host_cpu_ids()
     }
     return max(1, len(packages))
 
@@ -779,7 +786,7 @@ def _rank_runtime(
     socket_count: int = TEST_SOCKET_COUNT,
 ) -> list[dict[str, object]]:
     by_core: dict[tuple[int, int], int] = {}
-    for cpu_id in sorted(os.sched_getaffinity(0)):
+    for cpu_id in _host_cpu_ids():
         topology = toy_mpi._logical_cpu_topology(cpu_id)
         key = (
             topology["physical_package_id"],
