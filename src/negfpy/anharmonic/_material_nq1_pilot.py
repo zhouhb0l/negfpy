@@ -77,6 +77,9 @@ EXPECTED_FIELD_SHAPE = (151, 216, 216)
 EXPECTED_FIELD_DTYPE = "complex128"
 PILOT_WALL_LIMIT_SECONDS = 48 * 60 * 60
 PILOT_RSS_LIMIT_BYTES = 8 * 1024**3
+PILOT_PBS_NCPUS = 2
+PILOT_PBS_MEMORY = "16gb"
+PILOT_PBS_WALLTIME = "50:00:00"
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
     "coupling-g0001": "nq1p-g0001",
     "coupling-g001": "nq1p-g001",
@@ -2590,8 +2593,11 @@ def _canonical_pbs_script(
         f"#PBS -N {task['scheduler_job_name']}",
         f"#PBS -o {stdout_path}",
         f"#PBS -e {stderr_path}",
-        "#PBS -l select=1:ncpus=1:mem=8gb",
-        "#PBS -l walltime=48:00:00",
+        (
+            "#PBS -l select=1:"
+            f"ncpus={PILOT_PBS_NCPUS}:mem={PILOT_PBS_MEMORY}"
+        ),
+        f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
         "export PYTHONDONTWRITEBYTECODE=1",
         "export PYTHONHASHSEED=0",
@@ -3085,6 +3091,9 @@ __all__ = [
     "FIELD_DATASETS",
     "FIELD_RTOL",
     "PILOT_RSS_LIMIT_BYTES",
+    "PILOT_PBS_MEMORY",
+    "PILOT_PBS_NCPUS",
+    "PILOT_PBS_WALLTIME",
     "PILOT_SCHEMA",
     "PILOT_TASK_IDS",
     "PILOT_WALL_LIMIT_SECONDS",

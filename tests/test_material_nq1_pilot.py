@@ -984,6 +984,25 @@ def test_pilot_is_exact_first_three_release_tasks() -> None:
     )
 
 
+def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
+    payload = pilot._canonical_pbs_script(
+        task={"scheduler_job_name": "nq1p-g0001"},
+        stdout_path=Path("/evidence/task.stdout"),
+        stderr_path=Path("/evidence/task.stderr"),
+        workload={
+            "repo_root": "/candidate",
+            "command": ["/python", "/candidate/pilot.py", "run-task"],
+        },
+    ).decode("utf-8")
+    assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
+    assert "#PBS -l walltime=50:00:00\n" in payload
+    assert pilot.PILOT_PBS_NCPUS == 2
+    assert pilot.PILOT_PBS_MEMORY == "16gb"
+    assert pilot.PILOT_PBS_WALLTIME == "50:00:00"
+    assert pilot.PILOT_WALL_LIMIT_SECONDS < 50 * 60 * 60
+    assert pilot.PILOT_RSS_LIMIT_BYTES < 16 * 1000**3
+
+
 def test_manifest_is_deterministic_and_explicitly_non_release(tmp_path: Path) -> None:
     manifest, _path, _qualification_path = _manifest(tmp_path)
     assert pilot.validate_pilot_manifest(manifest) == manifest

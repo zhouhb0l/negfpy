@@ -82,6 +82,11 @@ permission from a checkpoint or infrastructure-failure record. Infrastructure
 interruption stops that execution; recovery requires a separately identified
 and qualified execution while preserving the interrupted tree.
 
+Each one-task pilot PBS allocation is frozen at 2 CPUs, 16 GB, and 50 hours,
+while the child supervisor remains capped at one computational worker, 8 GiB
+resident memory, and 48 hours. This preserves scheduler headroom without
+changing the scientific solver controls.
+
 The two completed release-018 results at `g=0.001` and `g=0.01` are comparison
 anchors only. They may be authenticated and compared after the corresponding
 new task completes, but they must never be supplied as continuation parents.
