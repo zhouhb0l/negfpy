@@ -80,6 +80,27 @@ PILOT_RSS_LIMIT_BYTES = 8 * 1024**3
 PILOT_PBS_NCPUS = 2
 PILOT_PBS_MEMORY = "16gb"
 PILOT_PBS_WALLTIME = "50:00:00"
+PILOT_PBS_PROJECT = "13004417"
+PILOT_PBS_QUEUE = "normal"
+PILOT_GIT_BIN = Path("/app/apps/git/2.39.2/bin")
+PILOT_PYTHON_VERSION = "3.12.13"
+PILOT_DISTRIBUTIONS = MappingProxyType({
+    "h5py": "3.16.0",
+    "numpy": "2.5.1",
+    "phonopy": "4.4.0",
+    "phono3py": "4.4.0",
+    "scipy": "1.18.0",
+    "spglib": "2.7.0",
+    "threadpoolctl": "3.6.0",
+})
+PILOT_THREAD_LIMITS = MappingProxyType({
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+})
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
     "coupling-g0001": "nq1p-g0001",
     "coupling-g001": "nq1p-g001",
@@ -331,6 +352,23 @@ def _directory(path: str | Path, *, name: str) -> Path:
         raise MaterialNQ1PilotError(
             f"{name} must be a non-symlink directory: {selected}"
         )
+    return selected
+
+
+def _require_fixed_absolute_path(
+    path: str | Path, expected: str | Path, *, name: str
+) -> Path:
+    """Reject relative, normalized, or otherwise aliased evidence paths."""
+
+    selected = Path(path)
+    fixed = Path(expected)
+    if (
+        not fixed.is_absolute()
+        or not selected.is_absolute()
+        or os.fspath(selected) != os.fspath(fixed)
+        or Path(os.path.abspath(selected)) != fixed
+    ):
+        raise MaterialNQ1PilotError(f"{name} path is not fixed")
     return selected
 
 
@@ -935,6 +973,219 @@ def _task_from_manifest(manifest: Mapping[str, Any], task_id: str) -> dict[str, 
     return dict(matches[0])
 
 
+def _stable_material_identity(value: Any, *, name: str) -> dict[str, Any]:
+    """Normalize only the independently observed available-memory value."""
+
+    if not isinstance(value, Mapping):
+        raise MaterialNQ1PilotError(f"{name} is not a material identity")
+    try:
+        stable = json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as error:
+        raise MaterialNQ1PilotError(f"{name} is not JSON-compatible") from error
+    memory = stable.get("memory")
+    if not isinstance(memory, dict) or set(memory) != {
+        "available_bytes", "predicted_peak_bytes", "maximum_fraction",
+        "guard_passed",
+    }:
+        raise MaterialNQ1PilotError(f"{name} memory identity is incomplete")
+    available = memory.get("available_bytes")
+    if isinstance(available, bool) or not isinstance(available, int) or available <= 0:
+        raise MaterialNQ1PilotError(
+            f"{name} available-memory observation is invalid"
+        )
+    memory["available_bytes"] = "runtime-observation"
+    return stable
+
+
+def qualified_python312_runtime(
+    manifest: Mapping[str, Any], qualification: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Extract the exact P312 runtime and lock from an authorized v3 report."""
+
+    validated = validate_pilot_manifest(manifest)
+    if (
+        sha256_bytes(canonical_json(dict(qualification)))
+        != validated["qualification_sha256"]
+        or not qualification_authorizes_pilot(validated, qualification)
+    ):
+        raise MaterialNQ1PilotError("qualification does not authorize this pilot")
+    try:
+        base = qualification["evidence"]["base_qualification_evidence"]
+        runtime = base["records"]["python312_runtime"]
+        context = base["qualification_context"]
+        context_runtime = context["runtimes"]["python312"]
+        environment_lock = context["environment_lock"]
+    except (KeyError, TypeError) as error:
+        raise MaterialNQ1PilotError(
+            "qualification lacks the bound P312 runtime"
+        ) from error
+    runtime_payload = {
+        name: runtime[name]
+        for name in (
+            "schema", "label", "version", "executable",
+            "executable_sha256", "packages_sha256",
+        )
+    } if isinstance(runtime, Mapping) and all(
+        name in runtime for name in (
+            "schema", "label", "version", "executable",
+            "executable_sha256", "packages_sha256",
+        )
+    ) else None
+    if (
+        not isinstance(runtime, Mapping)
+        or runtime != context_runtime
+        or runtime_payload is None
+        or runtime.get("schema") != "negfpy.material-nq1-python-runtime.v1"
+        or runtime.get("label") != "python312"
+        or runtime.get("version") != PILOT_PYTHON_VERSION
+        or sha256_bytes(canonical_json(runtime_payload))
+        != runtime.get("runtime_sha256")
+        or not isinstance(environment_lock, Mapping)
+        or set(environment_lock) != {"path", "sha256", "format"}
+        or environment_lock.get("sha256") != validated["environment_sha256"]
+        or environment_lock.get("format") != "@EXPLICIT"
+    ):
+        raise MaterialNQ1PilotError("qualified P312 runtime contract changed")
+    executable = _regular_file(
+        runtime.get("executable"), name="qualified P312 executable"
+    )
+    if (
+        os.fspath(executable) != runtime.get("executable")
+        or sha256_file(executable) != runtime.get("executable_sha256")
+    ):
+        raise MaterialNQ1PilotError("qualified P312 executable changed")
+    lock_path = _regular_file(
+        environment_lock.get("path"), name="qualified environment lock"
+    )
+    if (
+        os.fspath(lock_path) != environment_lock.get("path")
+        or sha256_file(lock_path) != environment_lock.get("sha256")
+    ):
+        raise MaterialNQ1PilotError("qualified environment lock changed")
+    return dict(runtime), dict(environment_lock)
+
+
+def _fixed_task_layout(scba_root: str | Path, task_id: str) -> tuple[Path, Path]:
+    root = _directory(scba_root, name=f"{task_id} SCBA root")
+    root = Path(os.path.abspath(root))
+    if root.name != "scba" or root.parent.name != task_id:
+        raise MaterialNQ1PilotError("SCBA root is outside the fixed pilot task layout")
+    pilot_root = root.parent.parent.parent
+    expected = pilot_root / "tasks" / task_id / "scba"
+    if root != expected:
+        raise MaterialNQ1PilotError("SCBA root is outside the fixed pilot task layout")
+    _directory(pilot_root, name="pilot root")
+    return root, pilot_root
+
+
+def _bound_qualification_contract(
+    manifest: Mapping[str, Any], pilot_root: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the qualification only through the fixed, hash-bound preflight."""
+
+    validated = validate_pilot_manifest(manifest)
+    manifest_path = _regular_file(
+        pilot_root / "pilot-manifest.json", name="bound pilot manifest"
+    )
+    if (
+        stat.S_IMODE(manifest_path.stat().st_mode) != 0o444
+        or load_canonical_json(manifest_path, name="bound pilot manifest") != validated
+    ):
+        raise MaterialNQ1PilotError("fixed pilot manifest binding changed")
+    preflight_path = _regular_file(
+        pilot_root / "pilot-preflight.json", name="bound pilot preflight"
+    )
+    if stat.S_IMODE(preflight_path.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("bound pilot preflight must have mode 0444")
+    preflight = validate_preflight_record(validated, preflight_path)
+    manifest_record = preflight.get("manifest")
+    qualification_record = preflight.get("qualification")
+    if (
+        preflight.get("schema") != PREFLIGHT_SCHEMA
+        or preflight.get("pilot_sha256") != validated["pilot_sha256"]
+        or preflight.get("passed") is not True
+        or preflight.get("release_certified") is not False
+        or not isinstance(manifest_record, Mapping)
+        or manifest_record != {
+            "path": os.fspath(manifest_path),
+            "sha256": sha256_file(manifest_path),
+        }
+        or not isinstance(qualification_record, Mapping)
+        or qualification_record.get("sha256") != validated["qualification_sha256"]
+    ):
+        raise MaterialNQ1PilotError("fixed pilot preflight binding changed")
+    qualification_path = _regular_file(
+        qualification_record.get("path"), name="bound qualification report"
+    )
+    if (
+        sha256_file(qualification_path) != qualification_record.get("sha256")
+        or stat.S_IMODE(qualification_path.stat().st_mode) != 0o444
+    ):
+        raise MaterialNQ1PilotError("bound qualification report changed")
+    qualification = load_canonical_json(
+        qualification_path, name="bound qualification report"
+    )
+    return qualified_python312_runtime(validated, qualification)
+
+
+def _expected_scba_attempt_command(
+    manifest: Mapping[str, Any],
+    task: Mapping[str, Any],
+    scba_manifest: Mapping[str, Any],
+    root: Path,
+    runtime: Mapping[str, Any],
+) -> list[str]:
+    source = scba_manifest["preflight"]["source"]
+    repo = Path(manifest["source_package_file"]).parents[2]
+    outputs = scba_manifest["outputs"]
+    numerical = scba_manifest["numerical_controls"]
+    command = [
+        str(runtime["executable"]),
+        os.fspath(repo / "scripts/validate_sparse_nq1_phase_c_scba.py"),
+        "--fixture", str(source["fixture_path"]),
+        "--fc3-full", str(source["fc3_full"]["path"]),
+        "--phase-b-artifacts", str(source["phase_b"]["root"]),
+        "--checkpoint", str(outputs["checkpoint"]),
+        "--output-json", str(outputs["json"]),
+        "--output-hdf5", str(outputs["hdf5"]),
+        "--campaign-manifest-sha256", sha256_file(root / "campaign-manifest.json"),
+        "--source-tree-sha256", str(scba_manifest["source_tree_sha256"]),
+        "--environment-sha256", str(scba_manifest["environment_lock"]["sha256"]),
+        "--run-id", str(scba_manifest["run_id"]),
+        "--coupling-scale", str(scba_manifest["coupling_scale"]),
+        "--grid-step", str(numerical["grid_step"]),
+        "--grid-n-positive", str(numerical["grid_n_positive"]),
+        "--eta-lead", str(numerical["eta_lead"]),
+        "--mixing", str(numerical["mixing"]),
+        "--mixing-floor", str(numerical["mixing_floor"]),
+        "--temperature-bias", str(numerical["temperature_bias"]),
+    ]
+    parent = scba_manifest.get("continuation_parent")
+    if parent is not None:
+        command.extend([
+            "--continuation-parent-artifacts", str(parent["artifacts"]),
+            "--continuation-axis", str(task["continuation_axis"]),
+            "--continuation-predictor", str(task["continuation_predictor"]),
+        ])
+    command.append("--no-resume")
+    return command
+
+
+def _expected_scba_sums(root: Path) -> bytes:
+    names = (
+        "campaign-manifest.json",
+        "status-running.json",
+        "outcomes/scba.json",
+        "outcomes/scba-fields.h5",
+        "checkpoint/sigma-pp.h5",
+        "scba-report.json",
+        "logs/scba.json",
+    )
+    return "".join(
+        f"{sha256_file(root / name)}  {name}\n" for name in sorted(names)
+    ).encode("ascii")
+
+
 def _hdf5_metadata(path: Path) -> dict[str, Any]:
     try:
         with h5py.File(path, "r") as handle:
@@ -1439,8 +1690,7 @@ def _validate_continuation_binding(
         )
     if (
         continuation.get("run_id") != expected_parent
-        or Path(str(continuation.get("artifacts"))).resolve()
-        != Path(str(parent_receipt["scba_root"])).resolve()
+        or continuation.get("artifacts") != parent_receipt["scba_root"]
         or continuation.get("coupling_scale") != parent_task["coupling_scale"]
         or continuation.get("continuation_axis") != "coupling"
         or continuation.get("campaign_manifest_sha256") != parent_hashes["manifest"]
@@ -1482,7 +1732,10 @@ def build_task_receipt(
 
     validated = validate_pilot_manifest(manifest)
     task = _task_from_manifest(validated, task_id)
-    root = _directory(scba_root, name=f"{task_id} SCBA root")
+    root, pilot_root = _fixed_task_layout(scba_root, task_id)
+    qualified_runtime, qualified_lock = _bound_qualification_contract(
+        validated, pilot_root
+    )
     paths = {
         "manifest": root / "campaign-manifest.json",
         "status": root / "status.json",
@@ -1551,6 +1804,11 @@ def build_task_receipt(
         raise MaterialNQ1PilotError("SCBA terminal document schemas are invalid")
     if scba_manifest.get("run_id") != task_id:
         raise MaterialNQ1PilotError("SCBA manifest names another task")
+    if scba_manifest.get("scientific_scope") != (
+        "authenticated silicon Nq=1 sparse material SCBA, fixed Nw=17 "
+        "development gate"
+    ):
+        raise MaterialNQ1PilotError("SCBA scientific scope changed")
     if scba_manifest.get("coupling_scale") != task["coupling_scale"]:
         raise MaterialNQ1PilotError("SCBA coupling changed")
     if scba_manifest.get("continuation_axis") != task["continuation_axis"]:
@@ -1568,13 +1826,18 @@ def build_task_receipt(
             "package_file": validated["source_package_file"],
         }
         or scba_manifest.get("source_tree_sha256") != validated["source_tree_sha256"]
-        or scba_manifest.get("environment_lock", {}).get("sha256")
-        != validated["environment_sha256"]
+        or scba_manifest.get("environment_lock") != qualified_lock
         or not isinstance(driver_record, Mapping)
-        or driver_record.get("relative_path")
-        != "scripts/validate_sparse_nq1_phase_c_scba.py"
-        or driver_record.get("sha256")
-        != validated["input_hashes"]["scba_case_driver"]
+        or driver_record != {
+            "relative_path": "scripts/validate_sparse_nq1_phase_c_scba.py",
+            "sha256": validated["input_hashes"]["scba_case_driver"],
+        }
+        or scba_manifest.get("python") != {
+            "executable": qualified_runtime["executable"],
+            "version": PILOT_PYTHON_VERSION,
+        }
+        or scba_manifest.get("distributions") != dict(PILOT_DISTRIBUTIONS)
+        or scba_manifest.get("thread_limits") != dict(PILOT_THREAD_LIMITS)
     ):
         raise MaterialNQ1PilotError("SCBA candidate identity changed")
     expected_controls = {
@@ -1607,7 +1870,6 @@ def build_task_receipt(
         or set(preflight) != preflight_keys
         or preflight.get("schema")
         != "negfpy.sparse-nq1-phase-c-scba-preflight.v1"
-        or preflight.get("source") != outcome.get("preflight_source")
         or preflight.get("run_id") != task_id
         or preflight.get("coupling_scale") != task["coupling_scale"]
         or preflight.get("source_tree_sha256") != validated["source_tree_sha256"]
@@ -1638,6 +1900,12 @@ def build_task_receipt(
         or preflight.get("passed") is not True
     ):
         raise MaterialNQ1PilotError("SCBA immutable campaign contract changed")
+    if _stable_material_identity(
+        preflight.get("source"), name="SCBA manifest preflight source"
+    ) != _stable_material_identity(
+        outcome.get("preflight_source"), name="SCBA outcome preflight source"
+    ):
+        raise MaterialNQ1PilotError("SCBA preflight material identity changed")
     controls = preflight.get("controls", {})
     if controls != _expected_scba_controls(task):
         raise MaterialNQ1PilotError("SCBA full solver controls changed")
@@ -1737,6 +2005,11 @@ def build_task_receipt(
     if (
         status_document.get("release_certified") is not False
         or report_document.get("release_certified") is not False
+        or report_document.get("next_gate") != (
+            "refine frequency/cutoff/eta and validate conservation"
+            if converged
+            else "inspect fixed-control scientific failure"
+        )
     ):
         raise MaterialNQ1PilotError("task evidence misstates release certification")
     _validate_supervision(scba_manifest, report_document, converged=converged)
@@ -1776,6 +2049,14 @@ def build_task_receipt(
         if parent_receipt is None:
             raise MaterialNQ1PilotError("continuation task lacks its pilot parent receipt")
         parent_path = _regular_file(parent_receipt, name="pilot parent receipt")
+        expected_parent_path = (
+            pilot_root / "tasks" / expected_parent / "task-receipt.json"
+        )
+        if (
+            Path(os.path.abspath(parent_path)) != expected_parent_path
+            or os.fspath(parent_path) != os.fspath(expected_parent_path)
+        ):
+            raise MaterialNQ1PilotError("pilot parent receipt path is not fixed")
         parent_document = validate_task_receipt(validated, parent_path)
         if (
             parent_document.get("task_id") != expected_parent
@@ -1803,32 +2084,59 @@ def build_task_receipt(
         checkpoint=checkpoint,
     )
     records = _tree_records(root)
-    running = load_canonical_json(root / "running.json", name="SCBA running marker")
-    if (
-        running != {
-            "schema": "negfpy.sparse-nq1-phase-c-scba-status.v1",
-            "campaign_manifest_sha256": hashes["manifest"],
-            "state": "running",
-            "automatic_retry": False,
-            "release_certified": False,
-        }
-        or status_document.get("sha256sums_sha256")
-        != records.get("SHA256SUMS")
-    ):
-        raise MaterialNQ1PilotError("SCBA initial/terminal checksum evidence changed")
     forbidden_paths = [
         name
         for name in records
         if "infrastructure-failure" in name
         or re.search(r"(?:^|[-_/])resume(?:[-_.]|$)", name) is not None
     ]
+    if forbidden_paths:
+        raise MaterialNQ1PilotError(
+            "task evidence is not one immutable initial attempt without "
+            "infrastructure history"
+        )
+    expected_tree_names = {
+        "campaign-manifest.json",
+        "status-running.json",
+        "outcomes/scba.json",
+        "outcomes/scba-fields.h5",
+        "checkpoint/sigma-pp.h5",
+        "scba-report.json",
+        "logs/scba.json",
+        "SHA256SUMS",
+        "status.json",
+    }
+    observed_directories = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_dir()
+    }
+    expected_directories = {"checkpoint", "logs", "outcomes"}
+    running = load_canonical_json(
+        root / "status-running.json", name="SCBA running marker"
+    )
+    sums_path = _regular_file(root / "SHA256SUMS", name="SCBA SHA256SUMS")
+    if (
+        set(records) != expected_tree_names
+        or observed_directories != expected_directories
+        or running != {
+            "schema": "negfpy.sparse-nq1-phase-c-scba-status.v1",
+            "campaign_manifest_sha256": hashes["manifest"],
+            "state": "running",
+            "automatic_retry": False,
+            "release_certified": False,
+        }
+        or sums_path.read_bytes() != _expected_scba_sums(root)
+        or status_document.get("sha256sums_sha256")
+        != records.get("SHA256SUMS")
+    ):
+        raise MaterialNQ1PilotError("SCBA initial/terminal checksum evidence changed")
     expected_attempts = [{
         "path": "logs/scba.json",
         "sha256": records.get("logs/scba.json"),
     }]
     if (
-        forbidden_paths
-        or report_document.get("attempt_logs") != expected_attempts
+        report_document.get("attempt_logs") != expected_attempts
         or report_document.get("infrastructure_failures") != []
         or report_document.get("log_sha256") != records.get("logs/scba.json")
     ):
@@ -1836,17 +2144,18 @@ def build_task_receipt(
             "task evidence is not one immutable initial attempt without infrastructure history"
         )
     attempt_log = load_canonical_json(root / "logs/scba.json", name="SCBA attempt log")
+    expected_attempt_command = _expected_scba_attempt_command(
+        validated, task, scba_manifest, root, qualified_runtime
+    )
     if (
         set(attempt_log)
         != {"attempt", "resume", "command", "supervision", "stdout", "stderr"}
         or attempt_log.get("attempt") != 1
         or attempt_log.get("resume") is not False
         or attempt_log.get("supervision") != report_document.get("supervision")
-        or not isinstance(attempt_log.get("stdout"), str)
-        or not isinstance(attempt_log.get("stderr"), str)
-        or not isinstance(attempt_log.get("command"), list)
-        or not all(isinstance(item, str) for item in attempt_log["command"])
-        or "--resume" in attempt_log["command"]
+        or attempt_log.get("command") != expected_attempt_command
+        or attempt_log.get("stdout") != canonical_json(outcome).decode("ascii")
+        or attempt_log.get("stderr") != ""
     ):
         raise MaterialNQ1PilotError("SCBA attempt log does not prove a fresh initial run")
     conservation = conservation_record(outcome)
@@ -1875,7 +2184,10 @@ def validate_task_receipt(
     manifest: Mapping[str, Any],
     receipt_path: str | Path,
 ) -> dict[str, Any]:
-    receipt = load_canonical_json(receipt_path, name="pilot task receipt")
+    selected = _regular_file(receipt_path, name="pilot task receipt")
+    if stat.S_IMODE(selected.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("pilot task receipt must have mode 0444")
+    receipt = load_canonical_json(selected, name="pilot task receipt")
     expected_keys = {
         "schema",
         "pilot_sha256",
@@ -1895,10 +2207,20 @@ def validate_task_receipt(
     }
     if set(receipt) != expected_keys or receipt.get("schema") != TASK_RECEIPT_SCHEMA:
         raise MaterialNQ1PilotError("pilot task receipt schema is invalid")
+    task_id = str(receipt.get("task_id"))
+    scba_root, pilot_root = _fixed_task_layout(
+        str(receipt.get("scba_root")), task_id
+    )
+    expected_receipt = pilot_root / "tasks" / task_id / "task-receipt.json"
+    if (
+        Path(os.path.abspath(selected)) != expected_receipt
+        or os.fspath(selected) != os.fspath(expected_receipt)
+    ):
+        raise MaterialNQ1PilotError("pilot task receipt path is not fixed")
     rebuilt = build_task_receipt(
         manifest=manifest,
-        task_id=str(receipt.get("task_id")),
-        scba_root=str(receipt.get("scba_root")),
+        task_id=task_id,
+        scba_root=scba_root,
         parent_receipt=(
             None
             if receipt.get("parent_receipt") is None
@@ -2001,6 +2323,8 @@ def validate_comparison(
     manifest: Mapping[str, Any], path: str | Path
 ) -> dict[str, Any]:
     selected = _regular_file(path, name="pilot comparison")
+    if stat.S_IMODE(selected.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("pilot comparison must have mode 0444")
     record = load_canonical_json(selected, name="pilot comparison")
     expected_keys = {
         "schema",
@@ -2022,6 +2346,16 @@ def validate_comparison(
         or not isinstance(second, Mapping)
     ):
         raise MaterialNQ1PilotError("pilot comparison schema is invalid")
+    first_receipt_path = Path(str(first.get("receipt_path")))
+    first_receipt = validate_task_receipt(manifest, first_receipt_path)
+    fixed_first_receipt = Path(first_receipt["scba_root"]).parent / "task-receipt.json"
+    pilot_root = fixed_first_receipt.parent.parent.parent
+    expected_path = (
+        pilot_root / "comparisons" / f"{record['comparison_id']}.json"
+    )
+    _require_fixed_absolute_path(
+        selected, expected_path, name="pilot comparison"
+    )
     rebuilt = build_comparison(
         manifest=manifest,
         comparison_id=str(record.get("comparison_id")),
@@ -2479,7 +2813,14 @@ def validate_preflight_record(
     manifest: Mapping[str, Any], path: str | Path
 ) -> dict[str, Any]:
     validated = validate_pilot_manifest(manifest)
-    record = load_canonical_json(path, name="pilot preflight")
+    selected = _regular_file(path, name="pilot preflight")
+    if stat.S_IMODE(selected.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("pilot preflight must have mode 0444")
+    record = load_canonical_json(selected, name="pilot preflight")
+    expected_record_keys = {
+        "schema", "pilot_sha256", "manifest", "qualification",
+        "anchor_authentication", "checks", "passed", "release_certified",
+    }
     expected_checks = {
         "manifest_reproduced",
         "source_clean_and_exact",
@@ -2490,8 +2831,19 @@ def validate_preflight_record(
     }
     manifest_record = record.get("manifest")
     qualification_record = record.get("qualification")
+    manifest_record_path = (
+        Path(str(manifest_record.get("path")))
+        if isinstance(manifest_record, Mapping)
+        else Path()
+    )
+    qualification_record_path = (
+        Path(str(qualification_record.get("path")))
+        if isinstance(qualification_record, Mapping)
+        else Path()
+    )
     if (
-        record.get("schema") != PREFLIGHT_SCHEMA
+        set(record) != expected_record_keys
+        or record.get("schema") != PREFLIGHT_SCHEMA
         or record.get("pilot_sha256") != validated["pilot_sha256"]
         or record.get("passed") is not True
         or record.get("release_certified") is not False
@@ -2499,17 +2851,34 @@ def validate_preflight_record(
         or set(record["checks"]) != expected_checks
         or not all(value is True for value in record["checks"].values())
         or not isinstance(manifest_record, Mapping)
-        or sha256_file(manifest_record.get("path")) != manifest_record.get("sha256")
-        or load_canonical_json(manifest_record.get("path"), name="bound pilot manifest")
+        or set(manifest_record) != {"path", "sha256"}
+        or not manifest_record_path.is_absolute()
+        or manifest_record_path != Path(os.path.abspath(manifest_record_path))
+        or sha256_file(manifest_record_path) != manifest_record.get("sha256")
+        or load_canonical_json(manifest_record_path, name="bound pilot manifest")
         != validated
         or not isinstance(qualification_record, Mapping)
-        or sha256_file(qualification_record.get("path"))
+        or set(qualification_record) != {"path", "sha256"}
+        or not qualification_record_path.is_absolute()
+        or qualification_record_path
+        != Path(os.path.abspath(qualification_record_path))
+        or sha256_file(qualification_record_path)
         != qualification_record.get("sha256")
         or qualification_record.get("sha256") != validated["qualification_sha256"]
     ):
         raise MaterialNQ1PilotError("pilot preflight did not pass")
+    manifest_selected = _regular_file(
+        manifest_record_path, name="bound pilot manifest"
+    )
+    if stat.S_IMODE(manifest_selected.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("bound pilot manifest must have mode 0444")
+    qualification_selected = _regular_file(
+        qualification_record_path, name="bound qualification"
+    )
+    if stat.S_IMODE(qualification_selected.stat().st_mode) != 0o444:
+        raise MaterialNQ1PilotError("bound qualification must have mode 0444")
     qualification = load_canonical_json(
-        qualification_record["path"], name="bound qualification"
+        qualification_selected, name="bound qualification"
     )
     if not qualification_authorizes_pilot(validated, qualification):
         raise MaterialNQ1PilotError("bound qualification no longer authorizes pilot")
@@ -2524,25 +2893,29 @@ def _scheduler_workload_contract(
     task: Mapping[str, Any],
     task_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
-    scba_root = Path(task_receipt["scba_root"])
-    scba_manifest = load_canonical_json(
-        scba_root / "campaign-manifest.json", name="scheduler-bound SCBA manifest"
+    scba_root, pilot_root = _fixed_task_layout(
+        task_receipt["scba_root"], task["task_id"]
     )
     outcome = load_canonical_json(
         scba_root / "outcomes/scba.json", name="scheduler-bound SCBA outcome"
     )
-    pilot_root = scba_root.parents[2]
-    preflight = load_canonical_json(
-        pilot_root / "pilot-preflight.json", name="scheduler-bound pilot preflight"
+    preflight = validate_preflight_record(
+        manifest, pilot_root / "pilot-preflight.json"
+    )
+    qualification = load_canonical_json(
+        preflight["qualification"]["path"], name="scheduler-bound qualification"
+    )
+    runtime, environment_lock_record = qualified_python312_runtime(
+        manifest, qualification
     )
     source = outcome.get("preflight_source")
     if not isinstance(source, Mapping):
         raise MaterialNQ1PilotError("scheduler workload lacks authenticated input paths")
     try:
         repo = Path(manifest["source_package_file"]).parents[2]
-        python = scba_manifest["python"]["executable"]
-        environment_lock = scba_manifest["environment_lock"]["path"]
-        qualification = preflight["qualification"]["path"]
+        python = runtime["executable"]
+        environment_lock = environment_lock_record["path"]
+        qualification_path = preflight["qualification"]["path"]
         fixture = source["fixture_path"]
         fc3_full = source["fc3_full"]["path"]
         phase_b = source["phase_b"]["root"]
@@ -2560,7 +2933,7 @@ def _scheduler_workload_contract(
         "--repo-root", os.fspath(repo),
         "--expected-commit", manifest["source_revision"],
         "--environment-lock", str(environment_lock),
-        "--qualification-report", str(qualification),
+        "--qualification-report", str(qualification_path),
         "--fixture", str(fixture),
         "--fc3-full", str(fc3_full),
         "--phase-b-artifacts", str(phase_b),
@@ -2583,31 +2956,67 @@ def _canonical_pbs_script(
     stderr_path: Path,
     workload: Mapping[str, Any],
 ) -> bytes:
-    repo = str(workload["repo_root"])
-    thread_names = (
-        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-    )
+    def literal_path(value: Any, *, name: str) -> str:
+        text = str(value)
+        selected = Path(text)
+        if (
+            not selected.is_absolute()
+            or ".." in selected.parts
+            or any(character in text for character in "\r\n\0")
+            or any(character.isspace() for character in text)
+        ):
+            raise MaterialNQ1PilotError(f"{name} is not a safe absolute PBS path")
+        return text
+
+    repo = literal_path(workload["repo_root"], name="PBS repository")
+    stdout = literal_path(stdout_path, name="PBS stdout")
+    stderr = literal_path(stderr_path, name="PBS stderr")
+    command = workload.get("command")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(
+            isinstance(item, str)
+            and item
+            and not any(character in item for character in "\r\n\0")
+            for item in command
+        )
+    ):
+        raise MaterialNQ1PilotError("PBS workload command contains unsafe bytes")
+    python = literal_path(command[0], name="qualified P312 executable")
+    staged_path = os.pathsep.join((
+        os.fspath(PILOT_GIT_BIN),
+        os.fspath(Path(python).parent),
+        "/usr/bin",
+        "/bin",
+    ))
     lines = [
         "#!/bin/bash",
         f"#PBS -N {task['scheduler_job_name']}",
-        "#PBS -P 13004417",
-        "#PBS -q normal",
-        f"#PBS -o {stdout_path}",
-        f"#PBS -e {stderr_path}",
+        f"#PBS -P {PILOT_PBS_PROJECT}",
+        f"#PBS -q {PILOT_PBS_QUEUE}",
+        "#PBS -r n",
+        f"#PBS -o {stdout}",
+        f"#PBS -e {stderr}",
         (
             "#PBS -l select=1:"
             f"ncpus={PILOT_PBS_NCPUS}:mem={PILOT_PBS_MEMORY}"
         ),
         f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
+        "umask 077",
+        f"export PATH={shlex.quote(staged_path)}",
+        "export GIT_CONFIG_NOSYSTEM=1",
+        "export GIT_CONFIG_GLOBAL=/dev/null",
+        "export LC_ALL=C",
+        "export TZ=UTC",
         "export PYTHONDONTWRITEBYTECODE=1",
         "export PYTHONNOUSERSITE=1",
         "export PYTHONHASHSEED=0",
-        *(f"export {name}=1" for name in thread_names),
+        *(f"export {name}=1" for name in PILOT_THREAD_LIMITS),
         f"export PYTHONPATH={shlex.quote(repo + '/src:' + repo + '/scripts')}",
-        f"cd {shlex.quote(repo)}",
-        f"exec {shlex.join(workload['command'])}",
+        f"cd -- {shlex.quote(repo)}",
+        f"exec {shlex.join(command)}",
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -2622,6 +3031,17 @@ def validate_scheduler_receipt(
     validated = validate_pilot_manifest(manifest)
     task = _task_from_manifest(validated, task_id)
     selected = _regular_file(path, name=f"{task_id} scheduler receipt")
+    lexical_selected = selected
+    selected = Path(os.path.abspath(selected))
+    scheduler_root = selected.parent
+    pilot_root = scheduler_root.parent.parent
+    expected_scheduler_root = pilot_root / "scheduler" / task_id
+    if (
+        scheduler_root != expected_scheduler_root
+        or selected != scheduler_root / "scheduler-terminal-receipt.json"
+        or os.fspath(lexical_selected) != os.fspath(selected)
+    ):
+        raise MaterialNQ1PilotError("scheduler receipt path is not fixed")
     if stat.S_IMODE(selected.stat().st_mode) != 0o444:
         raise MaterialNQ1PilotError("scheduler receipt must have mode 0444")
     record = load_canonical_json(selected, name=f"{task_id} scheduler receipt")
@@ -2664,6 +3084,10 @@ def validate_scheduler_receipt(
         or _PBS_JOB_ID.fullmatch(record["job_id"]) is None
     ):
         raise MaterialNQ1PilotError("scheduler receipt is not exact terminal F/0 evidence")
+    if record.get("raw_qstat_path") != os.fspath(
+        scheduler_root / "qstat-terminal.txt"
+    ):
+        raise MaterialNQ1PilotError("raw qstat evidence path is not fixed")
     raw_path = _regular_file(record["raw_qstat_path"], name="raw qstat evidence")
     if stat.S_IMODE(raw_path.stat().st_mode) != 0o444:
         raise MaterialNQ1PilotError("raw qstat evidence must have mode 0444")
@@ -2700,7 +3124,11 @@ def validate_scheduler_receipt(
         record.get("task_receipt_path"), name="scheduler-bound task receipt"
     )
     if (
-        stat.S_IMODE(task_receipt_path.stat().st_mode) != 0o444
+        Path(os.path.abspath(task_receipt_path))
+        != pilot_root / "tasks" / task_id / "task-receipt.json"
+        or record.get("task_receipt_path")
+        != os.fspath(pilot_root / "tasks" / task_id / "task-receipt.json")
+        or stat.S_IMODE(task_receipt_path.stat().st_mode) != 0o444
         or sha256_file(task_receipt_path) != record.get("task_receipt_sha256")
     ):
         raise MaterialNQ1PilotError("scheduler receipt task binding changed")
@@ -2722,6 +3150,19 @@ def validate_scheduler_receipt(
     pbs_stderr_path = _regular_file(
         record.get("pbs_stderr_path"), name="pilot PBS stderr"
     )
+    fixed_paths = {
+        pre_path: scheduler_root / "pre-submission.json",
+        submission_path: scheduler_root / "submission.json",
+        pbs_path: scheduler_root / "task.pbs",
+        pbs_stdout_path: scheduler_root / "task.stdout",
+        pbs_stderr_path: scheduler_root / "task.stderr",
+    }
+    if any(
+        Path(os.path.abspath(observed)) != expected
+        or os.fspath(observed) != os.fspath(expected)
+        for observed, expected in fixed_paths.items()
+    ):
+        raise MaterialNQ1PilotError("scheduler-bound artifact path is not fixed")
     for selected_record in (
         pre_path, submission_path, pbs_path, pbs_stdout_path, pbs_stderr_path
     ):
@@ -2772,13 +3213,27 @@ def validate_scheduler_receipt(
     qsub_stderr_path = _regular_file(
         submission.get("qsub_stderr_path"), name="qsub stderr"
     )
+    expected_task_stdout = canonical_json({
+        "task_id": task_id,
+        "state": "passed",
+        "anchor_comparison_passed": (
+            True if task.get("anchor_task_id") is not None else None
+        ),
+        "release_certified": False,
+    })
     if (
-        stat.S_IMODE(qsub_stdout_path.stat().st_mode) != 0o444
+        Path(os.path.abspath(qsub_stdout_path)) != scheduler_root / "qsub.stdout"
+        or Path(os.path.abspath(qsub_stderr_path)) != scheduler_root / "qsub.stderr"
+        or os.fspath(qsub_stdout_path) != os.fspath(scheduler_root / "qsub.stdout")
+        or os.fspath(qsub_stderr_path) != os.fspath(scheduler_root / "qsub.stderr")
+        or stat.S_IMODE(qsub_stdout_path.stat().st_mode) != 0o444
         or stat.S_IMODE(qsub_stderr_path.stat().st_mode) != 0o444
         or sha256_file(qsub_stdout_path) != submission.get("qsub_stdout_sha256")
         or sha256_file(qsub_stderr_path) != submission.get("qsub_stderr_sha256")
         or qsub_stdout_path.read_bytes() != (record["job_id"] + "\n").encode("ascii")
         or qsub_stderr_path.read_bytes() != b""
+        or pbs_stdout_path.read_bytes() != expected_task_stdout
+        or pbs_stderr_path.read_bytes() != b""
         or set(pre) != pre_keys
         or pre != ({"schema": PRE_SUBMISSION_SCHEMA} | common)
         or set(submission) != submission_keys
@@ -2821,13 +3276,36 @@ def build_final_report(
     scheduler_receipts: Mapping[str, str | Path],
 ) -> dict[str, Any]:
     validated = validate_pilot_manifest(manifest)
-    validate_preflight_record(validated, preflight_path)
+    manifest_selected = _regular_file(manifest_path, name="pilot manifest")
+    pilot_root = Path(os.path.abspath(manifest_selected)).parent
+    _require_fixed_absolute_path(
+        manifest_selected,
+        pilot_root / "pilot-manifest.json",
+        name="pilot manifest",
+    )
+    if (
+        stat.S_IMODE(manifest_selected.stat().st_mode) != 0o444
+        or load_canonical_json(manifest_selected, name="pilot manifest") != validated
+    ):
+        raise MaterialNQ1PilotError("fixed pilot manifest binding changed")
+    preflight_selected = _regular_file(preflight_path, name="pilot preflight")
+    _require_fixed_absolute_path(
+        preflight_selected,
+        pilot_root / "pilot-preflight.json",
+        name="pilot preflight",
+    )
+    validate_preflight_record(validated, preflight_selected)
     if set(task_receipts) != set(PILOT_TASK_IDS):
         raise MaterialNQ1PilotError("final report requires exactly three task receipts")
     receipt_records: dict[str, Any] = {}
     all_tasks_passed = True
     for task_id in PILOT_TASK_IDS:
         path = _regular_file(task_receipts[task_id], name=f"{task_id} receipt")
+        _require_fixed_absolute_path(
+            path,
+            pilot_root / "tasks" / task_id / "task-receipt.json",
+            name=f"{task_id} receipt",
+        )
         receipt = validate_task_receipt(validated, path)
         if receipt["task_id"] != task_id:
             raise MaterialNQ1PilotError("task receipt map names another task")
@@ -2848,6 +3326,11 @@ def build_final_report(
     all_comparisons_passed = True
     for comparison_id in sorted(comparisons):
         path = _regular_file(comparisons[comparison_id], name="pilot comparison")
+        _require_fixed_absolute_path(
+            path,
+            pilot_root / "comparisons" / f"{comparison_id}.json",
+            name="pilot comparison",
+        )
         record = validate_comparison(validated, path)
         if (
             record.get("schema") != COMPARISON_SCHEMA
@@ -2873,6 +3356,14 @@ def build_final_report(
         path = _regular_file(
             scheduler_receipts[task_id], name=f"{task_id} scheduler receipt"
         )
+        _require_fixed_absolute_path(
+            path,
+            pilot_root
+            / "scheduler"
+            / task_id
+            / "scheduler-terminal-receipt.json",
+            name=f"{task_id} scheduler receipt",
+        )
         record = validate_scheduler_receipt(validated, task_id, path)
         scheduler_records[task_id] = {
             "path": os.fspath(path),
@@ -2892,12 +3383,12 @@ def build_final_report(
         "pilot_sha256": validated["pilot_sha256"],
         "execution_id": validated["execution_id"],
         "manifest": {
-            "path": os.fspath(_regular_file(manifest_path, name="pilot manifest")),
-            "sha256": sha256_file(manifest_path),
+            "path": os.fspath(manifest_selected),
+            "sha256": sha256_file(manifest_selected),
         },
         "preflight": {
-            "path": os.fspath(_regular_file(preflight_path, name="pilot preflight")),
-            "sha256": sha256_file(preflight_path),
+            "path": os.fspath(preflight_selected),
+            "sha256": sha256_file(preflight_selected),
         },
         "task_receipts": receipt_records,
         "comparisons": comparison_records,
@@ -2958,6 +3449,16 @@ def validate_final_report(
         or not isinstance(report.get("scheduler_receipts"), Mapping)
     ):
         raise MaterialNQ1PilotError("pilot final report schema is invalid")
+    manifest_record_path = Path(str(report["manifest"].get("path")))
+    pilot_root = manifest_record_path.parent
+    _require_fixed_absolute_path(
+        manifest_record_path,
+        pilot_root / "pilot-manifest.json",
+        name="pilot report manifest",
+    )
+    _require_fixed_absolute_path(
+        selected, pilot_root / "pilot-report.json", name="pilot final report"
+    )
     task_paths = {
         task_id: str(item.get("path"))
         for task_id, item in report["task_receipts"].items()
@@ -3024,7 +3525,14 @@ def build_audit(
 ) -> dict[str, Any]:
     validated = validate_pilot_manifest(manifest)
     selected_root = _directory(root, name="pilot root")
+    fixed_root = Path(os.path.abspath(selected_root))
+    _require_fixed_absolute_path(selected_root, fixed_root, name="pilot root")
     report_selected = _regular_file(report_path, name="pilot report")
+    _require_fixed_absolute_path(
+        report_selected, fixed_root / "pilot-report.json", name="pilot report"
+    )
+    fixed_audit_path = fixed_root / "pilot-audit.json"
+    _require_fixed_absolute_path(audit_path, fixed_audit_path, name="pilot audit")
     report = validate_final_report(validated, report_selected)
     if (
         report.get("schema") != REPORT_SCHEMA
@@ -3035,7 +3543,7 @@ def build_audit(
         raise MaterialNQ1PilotError("pilot report is not a passed non-release report")
     # The audit excludes its own not-yet-created path; every other byte is
     # covered.  Re-running after publication reproduces the same inventory.
-    inventory = _inventory(selected_root, excluded=(Path(audit_path),))
+    inventory = _inventory(selected_root, excluded=(fixed_audit_path,))
     return {
         "schema": AUDIT_SCHEMA,
         "pilot_sha256": validated["pilot_sha256"],
@@ -3064,7 +3572,13 @@ def validate_audit(
     """Reproduce the recursively authenticated final audit exactly."""
 
     validated = validate_pilot_manifest(manifest)
+    selected_root = _directory(root, name="pilot root")
+    fixed_root = Path(os.path.abspath(selected_root))
+    _require_fixed_absolute_path(selected_root, fixed_root, name="pilot root")
     selected = _regular_file(audit_path, name="pilot audit")
+    _require_fixed_absolute_path(
+        selected, fixed_root / "pilot-audit.json", name="pilot audit"
+    )
     if stat.S_IMODE(selected.stat().st_mode) != 0o444:
         raise MaterialNQ1PilotError("pilot audit must have mode 0444")
     record = load_canonical_json(selected, name="pilot audit")
@@ -3078,7 +3592,7 @@ def validate_audit(
         raise MaterialNQ1PilotError("pilot audit schema is invalid")
     rebuilt = build_audit(
         manifest=validated,
-        root=root,
+        root=selected_root,
         report_path=str(record["report"].get("path")),
         audit_path=selected,
     )
@@ -3093,10 +3607,10 @@ __all__ = [
     "FIELD_ATOL",
     "FIELD_DATASETS",
     "FIELD_RTOL",
-    "PILOT_RSS_LIMIT_BYTES",
     "PILOT_PBS_MEMORY",
     "PILOT_PBS_NCPUS",
     "PILOT_PBS_WALLTIME",
+    "PILOT_RSS_LIMIT_BYTES",
     "PILOT_SCHEMA",
     "PILOT_TASK_IDS",
     "PILOT_WALL_LIMIT_SECONDS",

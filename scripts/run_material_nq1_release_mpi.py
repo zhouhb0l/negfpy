@@ -8,20 +8,26 @@ import hashlib
 import importlib
 import json
 import os
-from pathlib import Path
+import platform
 import re
 import stat
+import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import run_sparse_nq1_phase_c_born_campaign as common
 import run_sparse_nq1_phase_c_scba_campaign as single_campaign
 import validate_sparse_nq1_phase_c_scba as case
+
+from negfpy.anharmonic import _material_nq1_pilot as predictor_pilot
 from negfpy.anharmonic._born_initial import (
     load_born_initial_state,
     write_born_initial_state,
 )
+from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
 from negfpy.anharmonic._material_nq1_campaign import (
     MATERIAL_NQ1_ACCEPTANCE,
     MATERIAL_NQ1_EXCLUDED_CLAIMS,
@@ -37,11 +43,8 @@ from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
     check_harmonic_embedding_buffer,
 )
-from negfpy.anharmonic import _material_nq1_pilot as predictor_pilot
-from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
 from negfpy.anharmonic._mpi_tasks import TaskResult
 from negfpy.anharmonic._provenance import code_provenance
-
 
 RECEIPT_SCHEMA = "negfpy.material-nq1-mpi-task-receipt.v2"
 REPORT_SCHEMA = "negfpy.material-nq1-mpi-execution-report.v1"
@@ -81,6 +84,7 @@ PREDICTOR_CORE_SHA256 = {
         "0887298a9aa2021b52843082b51ffc998ba230376af3aae86be382fd97282a94"
     ),
 }
+RUNTIME_REPLAY_TIMEOUT_SECONDS = 60
 
 
 class MaterialCampaignError(RuntimeError):
@@ -245,6 +249,73 @@ def _recursively_validate_predictor_qualification(
     return validator(document, repo=repo, evidence_root=evidence_root)
 
 
+def _authenticate_current_python312_runtime(
+    pilot_manifest: Mapping[str, Any],
+    qualification: Mapping[str, Any],
+    *,
+    repo: Path,
+) -> dict[str, Any]:
+    """Prove this process is the exact P312 runtime qualified for the pilot."""
+
+    try:
+        runtime, _environment_lock = (
+            predictor_pilot.qualified_python312_runtime(
+                pilot_manifest, qualification
+            )
+        )
+        lexical = Path(os.path.abspath(sys.executable))
+        selected = _absolute_nonsymlink_path(
+            lexical, label="current release Python", directory=False
+        )
+        resolved = Path(sys.executable).resolve(strict=True)
+    except Exception as error:
+        raise MaterialCampaignError(
+            "qualified P312 runtime is unavailable"
+        ) from error
+    if (
+        lexical != selected
+        or selected != resolved
+        or os.fspath(selected) != runtime.get("executable")
+        or _sha256(selected) != runtime.get("executable_sha256")
+        or platform.python_version() != runtime.get("version")
+    ):
+        raise MaterialCampaignError(
+            "release process is not the exact qualified P312 runtime"
+        )
+    try:
+        completed = subprocess.run(
+            [os.fspath(selected), "-m", "pip", "freeze", "--all"],
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=RUNTIME_REPLAY_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise MaterialCampaignError(
+            "qualified P312 package inventory could not be replayed"
+        ) from error
+    if (
+        completed.returncode != 0
+        or not completed.stdout
+        or hashlib.sha256(completed.stdout).hexdigest()
+        != runtime.get("packages_sha256")
+    ):
+        raise MaterialCampaignError(
+            "release P312 package inventory differs from qualification"
+        )
+    names = (
+        "schema",
+        "label",
+        "version",
+        "executable",
+        "executable_sha256",
+        "packages_sha256",
+        "runtime_sha256",
+    )
+    return {name: runtime[name] for name in names}
+
+
 def _validate_qualification(
     path: Path,
     *,
@@ -357,6 +428,9 @@ def _validate_qualification(
         raise MaterialCampaignError(
             "exact v3 predictor qualification does not authorize launch"
         )
+    python312_runtime = _authenticate_current_python312_runtime(
+        pilot_manifest, document, repo=repo
+    )
     return {
         "path": str(selected),
         "sha256": _sha256(selected),
@@ -364,6 +438,7 @@ def _validate_qualification(
         "scientific_task_set_sha256": document[
             "scientific_controls"
         ]["task_set_sha256"],
+        "python312_runtime": python312_runtime,
     }
 
 
@@ -375,6 +450,78 @@ def _pilot_input_hashes(
             repo / "scripts/validate_sparse_nq1_phase_c_scba.py"
         )
     }
+
+
+def _release_campaign_input_hashes(
+    *,
+    scientific_input_hashes: Mapping[str, str],
+    observation_modes_sha256: str,
+    harmonic_buffer_sha256: str,
+    release_authorization: Mapping[str, Any],
+) -> dict[str, str]:
+    """Bind qualification, pilot, and the live qualified runtime to a campaign."""
+
+    qualification = release_authorization.get("qualification")
+    runtime = (
+        qualification.get("python312_runtime")
+        if isinstance(qualification, Mapping)
+        else None
+    )
+    required_runtime = {
+        "schema",
+        "label",
+        "version",
+        "executable",
+        "executable_sha256",
+        "packages_sha256",
+        "runtime_sha256",
+    }
+    if (
+        not isinstance(runtime, Mapping)
+        or set(runtime) != required_runtime
+        or runtime.get("schema")
+        != "negfpy.material-nq1-python-runtime.v1"
+        or runtime.get("label") != "python312"
+    ):
+        raise MaterialCampaignError(
+            "release authorization lacks the exact qualified P312 runtime"
+        )
+    try:
+        authorization_hashes = {
+            "candidate_qualification": qualification["sha256"],
+            "predictor_pilot_manifest": release_authorization[
+                "pilot_manifest"
+            ]["sha256"],
+            "predictor_pilot_report": release_authorization[
+                "pilot_report"
+            ]["sha256"],
+            "predictor_pilot_audit": release_authorization[
+                "pilot_audit"
+            ]["sha256"],
+            "qualified_python312_executable": runtime["executable_sha256"],
+            "qualified_python312_packages": runtime["packages_sha256"],
+            "qualified_python312_runtime": runtime["runtime_sha256"],
+        }
+    except (KeyError, TypeError) as error:
+        raise MaterialCampaignError(
+            "release authorization hash bindings are incomplete"
+        ) from error
+    all_hashes = (
+        dict(scientific_input_hashes)
+        | {
+            "observation_modes": observation_modes_sha256,
+            "harmonic_buffer_preflight": harmonic_buffer_sha256,
+        }
+        | authorization_hashes
+    )
+    if any(
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in all_hashes.values()
+    ):
+        raise MaterialCampaignError("release campaign input hash is invalid")
+    return all_hashes
 
 
 def _validate_release_authorization(
@@ -495,6 +642,83 @@ def _validate_release_authorization(
     }
 
 
+def _collective_release_authorization(
+    *,
+    communicator: Any,
+    rank: int,
+    repo: Path,
+    qualification_path: Path,
+    pilot_audit_path: Path,
+    source: Mapping[str, Any],
+    source_tree_sha256: str,
+    environment_sha256: str,
+    scientific_input_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    """Require every MPI rank to authenticate one identical release record."""
+
+    size = int(communicator.Get_size())
+    if size < 1 or not 0 <= rank < size:
+        raise MaterialCampaignError("MPI communicator rank/size is invalid")
+    authorization: dict[str, Any] | None = None
+    error_record: str | None = None
+    digest: str | None = None
+    try:
+        authorization = _validate_release_authorization(
+            repo=repo,
+            qualification_path=qualification_path,
+            pilot_audit_path=pilot_audit_path,
+            source=source,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+            scientific_input_hashes=scientific_input_hashes,
+        )
+        digest = hashlib.sha256(_canonical(authorization)).hexdigest()
+    except Exception as error:  # fail closed at the collective boundary
+        error_record = f"{type(error).__name__}: {error}"
+    local = {
+        "rank": rank,
+        "authorization_sha256": digest,
+        "error": error_record,
+    }
+    observations = (
+        communicator.allgather(local) if size > 1 else [local]
+    )
+    expected_ranks = set(range(size))
+    if (
+        not isinstance(observations, list)
+        or len(observations) != size
+        or any(
+            not isinstance(item, Mapping)
+            or set(item) != {"rank", "authorization_sha256", "error"}
+            for item in observations
+        )
+        or {item.get("rank") for item in observations} != expected_ranks
+    ):
+        raise MaterialCampaignError(
+            "MPI release-authorization collective returned an invalid result"
+        )
+    errors = [
+        f"rank {item['rank']}: {item['error']}"
+        for item in observations
+        if item.get("error") is not None
+    ]
+    digests = {item.get("authorization_sha256") for item in observations}
+    if errors:
+        raise MaterialCampaignError(
+            "MPI release authorization failed before campaign creation: "
+            + "; ".join(errors)
+        )
+    if (
+        authorization is None
+        or digest is None
+        or digests != {digest}
+    ):
+        raise MaterialCampaignError(
+            "MPI ranks authenticated different release authorizations"
+        )
+    return authorization
+
+
 def _continuation_initialization(
     scba_manifest: Mapping[str, Any],
     scientific_task: Mapping[str, Any],
@@ -547,6 +771,28 @@ def _continuation_initialization(
             "SCBA continuation initialization differs from the scientific task"
         )
     return initialization
+
+
+def _validate_scba_python312_runtime(
+    scba_manifest: Mapping[str, Any],
+    expected_runtime: Mapping[str, Any],
+) -> None:
+    """Require a task manifest to record the qualified release interpreter."""
+
+    if (
+        scba_manifest.get("python")
+        != {
+            "executable": expected_runtime.get("executable"),
+            "version": expected_runtime.get("version"),
+        }
+        or scba_manifest.get("distributions")
+        != common.EXPECTED_DISTRIBUTIONS
+        or scba_manifest.get("thread_limits")
+        != dict(sorted(case.phase_c.THREAD_LIMIT_ENV.items()))
+    ):
+        raise MaterialCampaignError(
+            "SCBA task did not record the exact qualified P312 runtime"
+        )
 
 
 def _independently_authenticate_continuation(
@@ -603,6 +849,7 @@ def _receipt_evidence(
     authenticated_child_inputs: tuple[Mapping[str, Any], Any, Any] | None = None,
     expected_source_tree_sha256: str | None = None,
     expected_environment_sha256: str | None = None,
+    expected_python312_runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     receipt = _load_canonical(path, "material task receipt")
     expected = {
@@ -664,6 +911,10 @@ def _receipt_evidence(
         "path": "logs/scba.json",
         "sha256": records.get("scba/logs/scba.json"),
     }
+    if expected_python312_runtime is not None:
+        _validate_scba_python312_runtime(
+            scba_manifest, expected_python312_runtime
+        )
     forbidden_attempt_records = [
         name
         for name in records
@@ -954,7 +1205,9 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
         task=base_task,
     )
     scientific_input_hashes = _pilot_input_hashes(repo, identity)
-    release_authorization = _validate_release_authorization(
+    release_authorization = _collective_release_authorization(
+        communicator=communicator,
+        rank=rank,
         repo=repo,
         qualification_path=args.qualification_report,
         pilot_audit_path=args.pilot_audit,
@@ -995,20 +1248,12 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
     buffer_path = _atomic_json(
         campaign_root / "harmonic-buffer-preflight.json", buffer_report
     )
-    input_hashes = dict(scientific_input_hashes) | {
-        "observation_modes": _sha256(modes_path),
-        "harmonic_buffer_preflight": _sha256(buffer_path),
-        "candidate_qualification": qualification["sha256"],
-        "predictor_pilot_manifest": release_authorization[
-            "pilot_manifest"
-        ]["sha256"],
-        "predictor_pilot_report": release_authorization[
-            "pilot_report"
-        ]["sha256"],
-        "predictor_pilot_audit": release_authorization[
-            "pilot_audit"
-        ]["sha256"],
-    }
+    input_hashes = _release_campaign_input_hashes(
+        scientific_input_hashes=scientific_input_hashes,
+        observation_modes_sha256=_sha256(modes_path),
+        harmonic_buffer_sha256=_sha256(buffer_path),
+        release_authorization=release_authorization,
+    )
     campaign = build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
         source_tree_sha256=source_tree,
@@ -1058,6 +1303,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             authenticated_child_inputs=child_inputs,
             expected_source_tree_sha256=source_tree,
             expected_environment_sha256=lock["sha256"],
+            expected_python312_runtime=qualification["python312_runtime"],
         )
 
     def executor(

@@ -86,9 +86,19 @@ Each one-task pilot PBS allocation is frozen at 2 CPUs, 16 GB, and 50 hours,
 while the child supervisor remains capped at one computational worker, 8 GiB
 resident memory, and 48 hours. This preserves scheduler headroom without
 changing the scientific solver controls. The byte-authenticated PBS environment
-also disables the Python user site so the qualified staged package set cannot
-be shadowed by account-local packages. Every task submission is pinned to the
-Aspire project `13004417` and the `normal` queue.
+uses the exact qualified Python 3.12 executable and package inventory, disables
+the Python user site, pins the staged Git path, disables system and global Git
+configuration, fixes the locale and time zone, and sets every numerical thread
+limit to one. Each non-rerunnable PBS job is pinned to Aspire project
+`13004417`, the `normal` queue, and create-only fixed stdout/stderr paths.
+
+Task receipts reconstruct the producer's exact inner command, including the
+terminal `--no-resume`, its canonical JSON stdout and empty stderr, the
+`status-running.json` marker, and the exact sorted seven-member `SHA256SUMS`
+payload. Scheduler receipts separately bind the canonical PBS bytes, qsub
+record, unique terminal `F`/0 observation, canonical task-result stdout, and
+empty job stderr. A pre-existing task directory, even if empty, is evidence of
+an earlier claim and cannot be reused.
 
 The two completed release-018 results at `g=0.001` and `g=0.01` are comparison
 anchors only. They may be authenticated and compared after the corresponding

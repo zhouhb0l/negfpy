@@ -6,25 +6,25 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-from pathlib import Path
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import h5py
 import numpy as np
-
 import run_material_nq1_release_mpi as mpi_driver
 import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
-from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
+
 from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
+from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
     check_harmonic_embedding_buffer,
     measure_observation_mode_poles,
 )
 from negfpy.anharmonic._provenance import code_provenance
-
 
 SCHEMA = "negfpy.material-nq1-release-validation.v2"
 FIELD_DATASETS = (
@@ -87,6 +87,7 @@ def _load_receipts(
     ] | None = None,
     source_tree_sha256: str | None = None,
     environment_sha256: str | None = None,
+    python312_runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for path in sorted(root.glob("waves/*/task-artifacts/*.json")):
@@ -141,6 +142,7 @@ def _load_receipts(
             authenticated_child_inputs=child_inputs,
             expected_source_tree_sha256=source_tree_sha256,
             expected_environment_sha256=environment_sha256,
+            expected_python312_runtime=python312_runtime,
         )
         data = path.with_suffix(".data")
         scba = data / "scba"
@@ -505,20 +507,12 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         raise MaterialReleaseValidationError(
             "harmonic embedding-buffer preflight changed"
         )
-    input_hashes = dict(scientific_input_hashes) | {
-        "observation_modes": mpi_driver._sha256(modes_path),
-        "harmonic_buffer_preflight": mpi_driver._sha256(buffer_path),
-        "candidate_qualification": qualification["sha256"],
-        "predictor_pilot_manifest": release_authorization[
-            "pilot_manifest"
-        ]["sha256"],
-        "predictor_pilot_report": release_authorization[
-            "pilot_report"
-        ]["sha256"],
-        "predictor_pilot_audit": release_authorization[
-            "pilot_audit"
-        ]["sha256"],
-    }
+    input_hashes = mpi_driver._release_campaign_input_hashes(
+        scientific_input_hashes=scientific_input_hashes,
+        observation_modes_sha256=mpi_driver._sha256(modes_path),
+        harmonic_buffer_sha256=mpi_driver._sha256(buffer_path),
+        release_authorization=release_authorization,
+    )
     campaign = mpi_driver.build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
         source_tree_sha256=source_tree,
@@ -553,6 +547,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         authenticated_inputs=authenticated_inputs,
         source_tree_sha256=source_tree,
         environment_sha256=lock["sha256"],
+        python312_runtime=qualification["python312_runtime"],
     )
 
     per_run: dict[str, Any] = {}

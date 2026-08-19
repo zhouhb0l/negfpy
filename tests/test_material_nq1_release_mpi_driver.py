@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import replace
 import importlib
 import inspect
-from pathlib import Path
 import sys
 import textwrap
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,6 @@ from negfpy.anharmonic._material_nq1_mpi import (
     build_material_nq1_mpi_campaign,
 )
 from negfpy.anharmonic._mpi_tasks import TaskSpec
-
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -160,11 +160,86 @@ def test_release_executor_never_infers_resume_from_failed_artifacts() -> None:
         isinstance(node, ast.Attribute) and node.attr == "_failure_records"
         for node in ast.walk(tree)
     )
+    named_calls = {
+        node.func.id: node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in {
+            "_collective_release_authorization", "_prepare_campaign_root"
+        }
+    }
+    assert named_calls["_collective_release_authorization"] < named_calls[
+        "_prepare_campaign_root"
+    ]
 
 
 class _SerialCommunicator:
     def Get_size(self) -> int:
         return 1
+
+
+class _CollectiveCommunicator:
+    def __init__(self, observations: list[dict[str, object]]) -> None:
+        self.observations = observations
+        self.local: dict[str, object] | None = None
+
+    def Get_size(self) -> int:
+        return len(self.observations)
+
+    def allgather(self, value: dict[str, object]) -> list[dict[str, object]]:
+        self.local = value
+        return self.observations
+
+
+def test_release_authorization_is_authenticated_identically_on_every_rank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = {"passed": True, "qualification": {"sha256": "a" * 64}}
+    digest = driver.hashlib.sha256(driver._canonical(authorization)).hexdigest()
+    monkeypatch.setattr(
+        driver,
+        "_validate_release_authorization",
+        lambda **_kwargs: authorization,
+    )
+    communicator = _CollectiveCommunicator([
+        {"rank": 0, "authorization_sha256": digest, "error": None},
+        {"rank": 1, "authorization_sha256": digest, "error": None},
+    ])
+    observed = driver._collective_release_authorization(
+        communicator=communicator,
+        rank=0,
+        repo=tmp_path,
+        qualification_path=tmp_path / "qualification.json",
+        pilot_audit_path=tmp_path / "pilot-audit.json",
+        source={},
+        source_tree_sha256="b" * 64,
+        environment_sha256="c" * 64,
+        scientific_input_hashes={},
+    )
+    assert observed == authorization
+    assert communicator.local == {
+        "rank": 0,
+        "authorization_sha256": digest,
+        "error": None,
+    }
+
+    communicator.observations[1] = {
+        "rank": 1,
+        "authorization_sha256": None,
+        "error": "MaterialCampaignError: wrong runtime",
+    }
+    with pytest.raises(driver.MaterialCampaignError, match="before campaign creation"):
+        driver._collective_release_authorization(
+            communicator=communicator,
+            rank=0,
+            repo=tmp_path,
+            qualification_path=tmp_path / "qualification.json",
+            pilot_audit_path=tmp_path / "pilot-audit.json",
+            source={},
+            source_tree_sha256="b" * 64,
+            environment_sha256="c" * 64,
+            scientific_input_hashes={},
+        )
 
 
 def test_release_campaign_root_must_be_new_and_cannot_follow_symlinks(
@@ -482,6 +557,20 @@ def test_release_qualification_accepts_exact_v3_and_rejects_v2(
         driver, "_recursively_validate_predictor_qualification",
         recursive_validator,
     )
+    runtime_record = {
+        "schema": "negfpy.material-nq1-python-runtime.v1",
+        "label": "python312",
+        "version": "3.12.13",
+        "executable": "/qualified/python3.12",
+        "executable_sha256": "d" * 64,
+        "packages_sha256": "e" * 64,
+        "runtime_sha256": "f" * 64,
+    }
+    monkeypatch.setattr(
+        driver,
+        "_authenticate_current_python312_runtime",
+        lambda *_args, **_kwargs: dict(runtime_record),
+    )
     exact = tmp_path / "qualification-v3.json"
     payload = _v3_qualification(repo, source)
     _write_immutable(exact, payload)
@@ -494,6 +583,7 @@ def test_release_qualification_accepts_exact_v3_and_rejects_v2(
         environment_sha256="b" * 64,
     )
     assert record["sha256"] == driver._sha256(exact)
+    assert record["python312_runtime"] == runtime_record
     assert recursively_validated == [(payload, repo, evidence_root)]
 
     legacy = tmp_path / "qualification-v2.json"
@@ -508,6 +598,126 @@ def test_release_qualification_accepts_exact_v3_and_rejects_v2(
             source_tree_sha256="a" * 64,
             environment_sha256="b" * 64,
         )
+
+
+def test_release_runtime_replays_exact_qualified_python_and_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "python3.12"
+    executable.write_bytes(b"qualified executable\n")
+    packages = b"numpy==2.5.1\n"
+    runtime = {
+        "schema": "negfpy.material-nq1-python-runtime.v1",
+        "label": "python312",
+        "version": "3.12.13",
+        "executable": str(executable),
+        "executable_sha256": driver._sha256(executable),
+        "packages_sha256": driver.hashlib.sha256(packages).hexdigest(),
+        "runtime_sha256": "f" * 64,
+    }
+    monkeypatch.setattr(
+        driver.predictor_pilot,
+        "qualified_python312_runtime",
+        lambda *_args: (dict(runtime), {"path": "/qualified/lock"}),
+    )
+    monkeypatch.setattr(driver.sys, "executable", str(executable))
+    monkeypatch.setattr(driver.platform, "python_version", lambda: "3.12.13")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def replay(command: list[str], **kwargs: object) -> object:
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=packages)
+
+    monkeypatch.setattr(driver.subprocess, "run", replay)
+    observed = driver._authenticate_current_python312_runtime(
+        {"pilot": "exact"}, {"qualification": "exact"}, repo=tmp_path
+    )
+    assert observed == runtime
+    assert calls == [(
+        [str(executable), "-m", "pip", "freeze", "--all"],
+        {
+            "cwd": tmp_path,
+            "stdout": driver.subprocess.PIPE,
+            "stderr": driver.subprocess.STDOUT,
+            "check": False,
+            "timeout": driver.RUNTIME_REPLAY_TIMEOUT_SECONDS,
+        },
+    )]
+
+    runtime["version"] = "3.12.12"
+    with pytest.raises(driver.MaterialCampaignError, match="exact qualified"):
+        driver._authenticate_current_python312_runtime(
+            {}, {}, repo=tmp_path
+        )
+    runtime["version"] = "3.12.13"
+    runtime["packages_sha256"] = "0" * 64
+    with pytest.raises(driver.MaterialCampaignError, match="package inventory"):
+        driver._authenticate_current_python312_runtime(
+            {}, {}, repo=tmp_path
+        )
+
+    runtime["packages_sha256"] = driver.hashlib.sha256(packages).hexdigest()
+    alias = tmp_path / "python-alias"
+    alias.symlink_to(executable)
+    runtime["executable"] = str(alias)
+    monkeypatch.setattr(driver.sys, "executable", str(alias))
+    with pytest.raises(driver.MaterialCampaignError, match="unavailable"):
+        driver._authenticate_current_python312_runtime(
+            {}, {}, repo=tmp_path
+        )
+
+
+def test_release_campaign_hashes_bind_qualified_runtime_and_packages() -> None:
+    runtime = {
+        "schema": "negfpy.material-nq1-python-runtime.v1",
+        "label": "python312",
+        "version": "3.12.13",
+        "executable": "/qualified/python3.12",
+        "executable_sha256": "1" * 64,
+        "packages_sha256": "2" * 64,
+        "runtime_sha256": "3" * 64,
+    }
+    authorization = {
+        "qualification": {"sha256": "4" * 64, "python312_runtime": runtime},
+        "pilot_manifest": {"sha256": "5" * 64},
+        "pilot_report": {"sha256": "6" * 64},
+        "pilot_audit": {"sha256": "7" * 64},
+    }
+    hashes = driver._release_campaign_input_hashes(
+        scientific_input_hashes={"phase_a_fixture": "8" * 64},
+        observation_modes_sha256="9" * 64,
+        harmonic_buffer_sha256="a" * 64,
+        release_authorization=authorization,
+    )
+    assert hashes["qualified_python312_executable"] == "1" * 64
+    assert hashes["qualified_python312_packages"] == "2" * 64
+    assert hashes["qualified_python312_runtime"] == "3" * 64
+
+    del runtime["runtime_sha256"]
+    with pytest.raises(driver.MaterialCampaignError, match="qualified P312"):
+        driver._release_campaign_input_hashes(
+            scientific_input_hashes={"phase_a_fixture": "8" * 64},
+            observation_modes_sha256="9" * 64,
+            harmonic_buffer_sha256="a" * 64,
+            release_authorization=authorization,
+        )
+
+
+def test_release_task_manifest_records_exact_qualified_runtime() -> None:
+    runtime = {
+        "executable": "/qualified/python3.12",
+        "version": "3.12.13",
+    }
+    manifest = {
+        "python": dict(runtime),
+        "distributions": dict(driver.common.EXPECTED_DISTRIBUTIONS),
+        "thread_limits": dict(sorted(driver.case.phase_c.THREAD_LIMIT_ENV.items())),
+    }
+    driver._validate_scba_python312_runtime(manifest, runtime)
+
+    manifest["python"]["executable"] = "/unqualified/python3.12"
+    with pytest.raises(driver.MaterialCampaignError, match="qualified P312"):
+        driver._validate_scba_python312_runtime(manifest, runtime)
 
 
 def test_release_qualification_rejects_recursive_evidence_failure(

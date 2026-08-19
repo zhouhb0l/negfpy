@@ -23,9 +23,12 @@ individual task receipt, but is never created here.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import stat
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -51,6 +54,7 @@ from negfpy.anharmonic._material_nq1_pilot import (
     predictor_pilot_tasks,
     publish_json_once,
     qualification_authorizes_pilot,
+    qualified_python312_runtime,
     sha256_file,
     validate_audit,
     validate_comparison,
@@ -105,7 +109,11 @@ def _authenticate_inputs(args: argparse.Namespace) -> dict[str, str]:
 def _candidate_identity(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], str]:
     repo = _nonsymlink_directory(args.repo_root, name="repository", create=False)
     source = common._source_identity(repo, args.expected_commit)
-    lock = common._validate_lock(args.environment_lock)
+    lexical_lock = Path(os.path.abspath(args.environment_lock.expanduser()))
+    sha256_file(lexical_lock)
+    lock = common._validate_lock(lexical_lock)
+    if lock.get("path") != os.fspath(lexical_lock):
+        raise MaterialNQ1PilotError("environment lock path is not lexical and exact")
     tree = _source_tree_sha256()
     if source.get("commit") != args.expected_commit or source.get("dirty") is not False:
         raise MaterialNQ1PilotError("candidate source is not exact and clean")
@@ -150,6 +158,16 @@ def _qualification_matches(
     document: Mapping[str, Any],
     qualification_path: Path,
 ) -> bool:
+    try:
+        if (
+            not qualification_path.is_absolute()
+            or qualification_path != Path(os.path.abspath(qualification_path))
+            or stat.S_IMODE(qualification_path.lstat().st_mode) != 0o444
+            or sha256_file(qualification_path) != manifest["qualification_sha256"]
+        ):
+            return False
+    except (OSError, KeyError, TypeError):
+        return False
     if not qualification_authorizes_pilot(manifest, document):
         return False
     repo = Path(manifest["source_package_file"]).parents[2]
@@ -162,12 +180,48 @@ def _qualification_matches(
         )
     except Exception:  # noqa: BLE001 - validation is a fail-closed predicate.
         return False
-    return authenticated == document
+    return authenticated == document and _current_runtime_matches(
+        manifest, document
+    )
+
+
+def _current_runtime_matches(
+    manifest: Mapping[str, Any], document: Mapping[str, Any]
+) -> bool:
+    """Reproduce the qualified P312 executable, version, and package bytes."""
+
+    try:
+        runtime, _lock = qualified_python312_runtime(manifest, document)
+        lexical = Path(os.path.abspath(sys.executable))
+        current = Path(sys.executable).resolve(strict=True)
+        if (
+            lexical != current
+            or str(current) != runtime["executable"]
+            or sha256_file(current) != runtime["executable_sha256"]
+            or platform.python_version() != runtime["version"]
+        ):
+            return False
+        completed = subprocess.run(
+            [str(current), "-m", "pip", "freeze", "--all"],
+            cwd=Path(manifest["source_package_file"]).parents[2],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=60,
+        )
+        return bool(
+            completed.returncode == 0
+            and completed.stdout
+            and hashlib.sha256(completed.stdout).hexdigest()
+            == runtime["packages_sha256"]
+        )
+    except Exception:  # noqa: BLE001 - runtime authentication is fail closed.
+        return False
 
 
 def _revalidate_bound_qualification(
     root: Path, manifest: Mapping[str, Any]
-) -> None:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     preflight_record = validate_preflight_record(manifest, root / PREFLIGHT_NAME)
     qualification_path = Path(preflight_record["qualification"]["path"])
     document = load_canonical_json(
@@ -177,6 +231,7 @@ def _revalidate_bound_qualification(
         raise MaterialNQ1PilotError(
             "bound qualification evidence no longer authenticates"
         )
+    return qualified_python312_runtime(manifest, document)
 
 
 def initialize(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,7 +242,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "pilot root is nonempty before initialization; refusing overwrite"
         )
     source, lock, tree = _candidate_identity(args)
-    qualification = args.qualification_report.expanduser().resolve(strict=True)
+    qualification = Path(os.path.abspath(args.qualification_report.expanduser()))
     qualification_document = load_canonical_json(
         qualification, name="qualification report"
     )
@@ -205,6 +260,11 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
     )
     if not _qualification_matches(manifest, qualification_document, qualification):
         raise MaterialNQ1PilotError("qualification does not bind the exact candidate")
+    _runtime, qualified_lock = qualified_python312_runtime(
+        manifest, qualification_document
+    )
+    if lock != qualified_lock:
+        raise MaterialNQ1PilotError("live environment lock is not the qualified lock")
     publish_json_once(root / MANIFEST_NAME, manifest)
     return manifest
 
@@ -223,12 +283,17 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         and tree == manifest["source_tree_sha256"]
         and lock["sha256"] == manifest["environment_sha256"]
     )
-    qualification = args.qualification_report.expanduser().resolve(strict=True)
+    qualification = Path(os.path.abspath(args.qualification_report.expanduser()))
     qualification_document = load_canonical_json(
         qualification, name="qualification report"
     )
     if not _qualification_matches(manifest, qualification_document, qualification):
         raise MaterialNQ1PilotError("qualification no longer binds the candidate")
+    _runtime, qualified_lock = qualified_python312_runtime(
+        manifest, qualification_document
+    )
+    if lock != qualified_lock:
+        raise MaterialNQ1PilotError("live environment lock is not the qualified lock")
     inputs_reproduced = _authenticate_inputs(args) == manifest["input_hashes"]
     anchors = authenticate_anchor_source(manifest)
     record = build_preflight_record(
@@ -260,18 +325,39 @@ def _require_virgin_task_root(task_root: Path, task_id: str) -> None:
         create=True,
     )
     if task_root.exists() or task_root.is_symlink():
-        selected = _nonsymlink_directory(
-            task_root, name=f"{task_id} task root", create=False
+        raise MaterialNQ1PilotError(
+            "pilot task already has evidence; start a separately identified pilot"
         )
-        if any(selected.iterdir()):
-            raise MaterialNQ1PilotError(
-                "pilot task already has evidence; start a separately identified pilot"
-            )
+    try:
+        task_root.mkdir(mode=0o700)
+        (task_root / "scba").mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise MaterialNQ1PilotError(
+            "pilot task claim raced; start a separately identified pilot"
+        ) from error
+    _nonsymlink_directory(
+        task_root / "scba", name=f"{task_id} claimed SCBA root", create=False
+    )
 
 
 def _verify_live_candidate(
-    args: argparse.Namespace, manifest: Mapping[str, Any]
+    args: argparse.Namespace,
+    manifest: Mapping[str, Any],
+    *,
+    qualified_lock: Mapping[str, Any] | None = None,
 ) -> None:
+    if qualified_lock is None:
+        qualification_path = Path(
+            os.path.abspath(args.qualification_report.expanduser())
+        )
+        qualification = load_canonical_json(
+            qualification_path, name="live qualification report"
+        )
+        if not _qualification_matches(manifest, qualification, qualification_path):
+            raise MaterialNQ1PilotError("live qualification no longer authenticates")
+        _runtime, qualified_lock = qualified_python312_runtime(
+            manifest, qualification
+        )
     source, lock, tree = _candidate_identity(args)
     expected_source = {
         "commit": manifest["source_revision"],
@@ -282,7 +368,7 @@ def _verify_live_candidate(
     if (
         source != expected_source
         or tree != manifest["source_tree_sha256"]
-        or lock.get("sha256") != manifest["environment_sha256"]
+        or lock != qualified_lock
         or _authenticate_inputs(args) != manifest["input_hashes"]
     ):
         raise MaterialNQ1PilotError(
@@ -341,8 +427,8 @@ def _anchor_paths(manifest: Mapping[str, Any], task_id: str) -> tuple[Path, Path
 def run_task(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args)
     manifest = _load_manifest(root)
-    _revalidate_bound_qualification(root, manifest)
-    _verify_live_candidate(args, manifest)
+    _runtime, qualified_lock = _revalidate_bound_qualification(root, manifest)
+    _verify_live_candidate(args, manifest, qualified_lock=qualified_lock)
     task = _task(args.task_id)
     _verify_prior_gates(root, manifest, task.task_id)
 
@@ -379,6 +465,11 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
     )
     if status.get("state") not in {"passed", "scientific-failure"}:
         raise MaterialNQ1PilotError("task ended in an infrastructure state")
+
+    # Close the long-running task's runtime/source TOCTOU window before any
+    # receipt is published.  Drift is terminal for this pilot, never a retry.
+    _post_runtime, post_lock = _revalidate_bound_qualification(root, manifest)
+    _verify_live_candidate(args, manifest, qualified_lock=post_lock)
 
     receipt = build_task_receipt(
         manifest=manifest,

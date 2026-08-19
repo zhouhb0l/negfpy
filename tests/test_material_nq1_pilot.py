@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sys
 from pathlib import Path
@@ -90,19 +91,30 @@ def _qualification(path: Path, anchor_root: Path) -> None:
         }
         for name, digest in pilot._CORE_FILE_SHA256.items()
     }
+    lock_path = path.parent / "inputs/environment.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_bytes(b"@EXPLICIT\nsynthetic-lock\n")
+    lock_sha = pilot.sha256_file(lock_path)
     records: dict[str, object] = {}
-    for label, version in (("python310", "3.10.0"), ("python312", "3.12.0")):
+    for label, version in (
+        ("python310", "3.10.0"),
+        ("python312", pilot.PILOT_PYTHON_VERSION),
+    ):
         executable = repo / "tools" / label
         executable.parent.mkdir(parents=True, exist_ok=True)
         executable.write_bytes((label + "\n").encode("ascii"))
-        records[f"{label}_runtime"] = {
+        runtime_payload = {
             "schema": "negfpy.material-nq1-python-runtime.v1",
             "label": label,
             "version": version,
             "executable": str(executable),
             "executable_sha256": pilot.sha256_file(executable),
             "packages_sha256": "b" * 64,
-            "runtime_sha256": "c" * 64,
+        }
+        records[f"{label}_runtime"] = runtime_payload | {
+            "runtime_sha256": pilot.sha256_bytes(
+                pilot.canonical_json(runtime_payload)
+            ),
             "package_manifest": {
                 "path": f"{label}-packages.txt",
                 "sha256": "b" * 64,
@@ -186,7 +198,11 @@ def _qualification(path: Path, anchor_root: Path) -> None:
             "package_file": str(package_file),
         },
         "source_tree_sha256": "2" * 64,
-        "environment_lock": {"sha256": "3" * 64},
+        "environment_lock": {
+            "path": str(lock_path),
+            "sha256": lock_sha,
+            "format": "@EXPLICIT",
+        },
         "scientific_task_set_sha256": full_controls["task_set_sha256"],
         "material_input_hashes": records["material_input_preflight"][
             "source_hashes"
@@ -216,7 +232,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
             "package_file": str(package_file),
         },
         "source_tree_sha256": "2" * 64,
-        "environment_sha256": "3" * 64,
+        "environment_sha256": lock_sha,
         "scientific_controls": full_controls,
         "predictor_pilot_controls": pilot_controls,
         "checks": {
@@ -233,7 +249,8 @@ def _qualification(path: Path, anchor_root: Path) -> None:
             "base_qualification_evidence": {
                 "qualification_context": context,
                 "python_versions": {
-                    "python310": "3.10.0", "python312": "3.12.0",
+                    "python310": "3.10.0",
+                    "python312": pilot.PILOT_PYTHON_VERSION,
                 },
                 "records": records,
             },
@@ -261,12 +278,15 @@ def _qualification(path: Path, anchor_root: Path) -> None:
 def _manifest(tmp_path: Path) -> tuple[dict[str, object], Path, Path]:
     qualification = tmp_path / "qualification.json"
     _qualification(qualification, tmp_path / "anchors")
+    qualification_document = pilot.load_canonical_json(
+        qualification, name="synthetic qualification"
+    )
     manifest = pilot.build_pilot_manifest(
         source_revision="1" * 40,
         source_git_tree="e" * 40,
         source_package_file=tmp_path / "repo/src/negfpy/__init__.py",
         source_tree_sha256="2" * 64,
-        environment_sha256="3" * 64,
+        environment_sha256=qualification_document["environment_sha256"],
         qualification_sha256=pilot.sha256_file(qualification),
         input_hashes={
             "phase_a_fixture": "4" * 64,
@@ -281,6 +301,7 @@ def _manifest(tmp_path: Path) -> tuple[dict[str, object], Path, Path]:
     )
     manifest_path = tmp_path / "pilot-manifest.json"
     pilot.publish_json_once(manifest_path, manifest)
+    _preflight(tmp_path, manifest, manifest_path, qualification)
     return manifest, manifest_path, qualification
 
 
@@ -317,6 +338,94 @@ def _rewrite_json(path: Path, document: dict[str, object]) -> None:
     os.chmod(path, 0o644)
     path.write_bytes(pilot.canonical_json(document))
     os.chmod(path, 0o444)
+
+
+def _fixture_attempt_command(
+    candidate_root: Path,
+    root: Path,
+    task: object,
+    manifest: dict[str, object],
+    runtime: dict[str, object],
+) -> list[str]:
+    source = manifest["preflight"]["source"]
+    numerical = manifest["numerical_controls"]
+    outputs = manifest["outputs"]
+    command = [
+        str(runtime["executable"]),
+        str(candidate_root / "repo/scripts/validate_sparse_nq1_phase_c_scba.py"),
+        "--fixture", str(source["fixture_path"]),
+        "--fc3-full", str(source["fc3_full"]["path"]),
+        "--phase-b-artifacts", str(source["phase_b"]["root"]),
+        "--checkpoint", str(outputs["checkpoint"]),
+        "--output-json", str(outputs["json"]),
+        "--output-hdf5", str(outputs["hdf5"]),
+        "--campaign-manifest-sha256",
+        pilot.sha256_file(root / "campaign-manifest.json"),
+        "--source-tree-sha256", str(manifest["source_tree_sha256"]),
+        "--environment-sha256", str(manifest["environment_lock"]["sha256"]),
+        "--run-id", str(manifest["run_id"]),
+        "--coupling-scale", str(manifest["coupling_scale"]),
+        "--grid-step", str(numerical["grid_step"]),
+        "--grid-n-positive", str(numerical["grid_n_positive"]),
+        "--eta-lead", str(numerical["eta_lead"]),
+        "--mixing", str(numerical["mixing"]),
+        "--mixing-floor", str(numerical["mixing_floor"]),
+        "--temperature-bias", str(numerical["temperature_bias"]),
+    ]
+    if manifest["continuation_parent"] is not None:
+        command.extend([
+            "--continuation-parent-artifacts",
+            str(manifest["continuation_parent"]["artifacts"]),
+            "--continuation-axis", str(task.continuation_axis),
+            "--continuation-predictor", str(task.continuation_predictor),
+        ])
+    return command + ["--no-resume"]
+
+
+def _fixture_sha256sums(root: Path) -> bytes:
+    members = (
+        "campaign-manifest.json",
+        "status-running.json",
+        "outcomes/scba.json",
+        "outcomes/scba-fields.h5",
+        "checkpoint/sigma-pp.h5",
+        "scba-report.json",
+        "logs/scba.json",
+    )
+    return "".join(
+        f"{pilot.sha256_file(root / name)}  {name}\n"
+        for name in sorted(members)
+    ).encode("ascii")
+
+
+def _reseal_scba_after_log_change(root: Path) -> None:
+    report_path = root / "scba-report.json"
+    report = pilot.load_canonical_json(report_path, name="test SCBA report")
+    report["log_sha256"] = pilot.sha256_file(root / "logs/scba.json")
+    report["attempt_logs"] = [{
+        "path": "logs/scba.json",
+        "sha256": report["log_sha256"],
+    }]
+    _rewrite_json(report_path, report)
+    sums = root / "SHA256SUMS"
+    os.chmod(sums, 0o644)
+    sums.write_bytes(_fixture_sha256sums(root))
+    status_path = root / "status.json"
+    status = pilot.load_canonical_json(status_path, name="test SCBA status")
+    status["report_sha256"] = pilot.sha256_file(report_path)
+    status["sha256sums_sha256"] = pilot.sha256_file(sums)
+    _rewrite_json(status_path, status)
+
+
+def _reseal_scba_after_report_change(root: Path) -> None:
+    sums = root / "SHA256SUMS"
+    os.chmod(sums, 0o644)
+    sums.write_bytes(_fixture_sha256sums(root))
+    status_path = root / "status.json"
+    status = pilot.load_canonical_json(status_path, name="test SCBA status")
+    status["report_sha256"] = pilot.sha256_file(root / "scba-report.json")
+    status["sha256sums_sha256"] = pilot.sha256_file(sums)
+    _rewrite_json(status_path, status)
 
 
 def _scba_tree(
@@ -433,6 +542,12 @@ def _scba_tree(
             "campaign_manifest_sha256": "8" * 64,
         },
         "problem_input_hashes": {"problem": "a" * 64},
+        "memory": {
+            "predicted_peak_bytes": 1024,
+            "available_bytes": 32 * 1024,
+            "maximum_fraction": 0.7,
+            "guard_passed": True,
+        },
     }
     identity_sha = pilot.sha256_bytes(task.task_id.encode("ascii"))
     output_paths = {
@@ -448,7 +563,9 @@ def _scba_tree(
         "continuation_parent": continuation_parent,
         "born_initial": None,
         "source_tree_sha256": "2" * 64,
-        "environment_sha256": "3" * 64,
+        "environment_sha256": pilot.load_canonical_json(
+            candidate_root / "pilot-manifest.json", name="test pilot manifest"
+        )["environment_sha256"],
         "configuration_sha256": "b" * 64,
         "checkpoint_identity_sha256": identity_sha,
         "checkpoint_schema": "negfpy_sparse_material_scba_checkpoint",
@@ -466,7 +583,10 @@ def _scba_tree(
     }
     manifest = {
         "schema": "negfpy.sparse-nq1-phase-c-scba-campaign.v2",
-        "scientific_scope": "synthetic exact pilot test",
+        "scientific_scope": (
+            "authenticated silicon Nq=1 sparse material SCBA, fixed Nw=17 "
+            "development gate"
+        ),
         "source": {
             "commit": "1" * 40,
             "tree": "e" * 40,
@@ -474,11 +594,11 @@ def _scba_tree(
             "package_file": str(candidate_root / "repo/src/negfpy/__init__.py"),
         },
         "source_tree_sha256": "2" * 64,
-        "environment_lock": {
-            "path": str(candidate_root / "inputs/environment.lock"),
-            "sha256": "3" * 64,
-            "format": "@EXPLICIT",
-        },
+        "environment_lock": pilot.load_canonical_json(
+            candidate_root / "qualification.json", name="test qualification"
+        )["evidence"]["base_qualification_evidence"][
+            "qualification_context"
+        ]["environment_lock"],
         "driver": {
             "relative_path": "scripts/validate_sparse_nq1_phase_c_scba.py",
             "sha256": "9" * 64,
@@ -506,14 +626,14 @@ def _scba_tree(
         "outputs": output_paths,
         "python": {
             "executable": str(candidate_root / "repo/tools/python312"),
-            "version": "3.12.0",
+            "version": pilot.PILOT_PYTHON_VERSION,
         },
-        "distributions": {},
-        "thread_limits": {},
+        "distributions": dict(pilot.PILOT_DISTRIBUTIONS),
+        "thread_limits": dict(pilot.PILOT_THREAD_LIMITS),
     }
     pilot.publish_json_once(root / "campaign-manifest.json", manifest)
     manifest_sha = pilot.sha256_file(root / "campaign-manifest.json")
-    pilot.publish_json_once(root / "running.json", {
+    pilot.publish_json_once(root / "status-running.json", {
         "schema": "negfpy.sparse-nq1-phase-c-scba-status.v1",
         "campaign_manifest_sha256": manifest_sha,
         "state": "running",
@@ -605,10 +725,12 @@ def _scba_tree(
         "release_certified": False,
     }
     _fields(fields, metadata=hdf5_metadata)
+    outcome_source = copy.deepcopy(preflight_source)
+    outcome_source["memory"]["available_bytes"] = 48 * 1024
     outcome = {
         "schema": "negfpy.sparse-nq1-phase-c-scba-case.v1",
         "campaign_manifest_sha256": manifest_sha,
-        "preflight_source": preflight_source,
+        "preflight_source": outcome_source,
         "checkpoint": output_paths["checkpoint"],
         "checkpoint_sha256": pilot.sha256_file(checkpoint),
         "checkpoint_status": "completed" if converged else "scientific_failure",
@@ -639,9 +761,25 @@ def _scba_tree(
     attempt_log = {
         "attempt": 1,
         "resume": False,
-        "command": ["/python", "/repo/scripts/validate_sparse_nq1_phase_c_scba.py"],
+        "command": _fixture_attempt_command(
+            candidate_root,
+            root,
+            task,
+            manifest,
+            pilot.load_canonical_json(
+                candidate_root / "qualification.json", name="test qualification"
+            )["evidence"]["base_qualification_evidence"]["records"][
+                "python312_runtime"
+            ],
+        ),
         "supervision": supervision,
-        "stdout": "",
+        "stdout": json.dumps(
+            outcome,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) + "\n",
         "stderr": "",
     }
     pilot.publish_json_once(root / "logs/scba.json", attempt_log)
@@ -668,10 +806,14 @@ def _scba_tree(
         "infrastructure_failures": [],
         "controls_changed": False,
         "release_certified": False,
-        "next_gate": "synthetic",
+        "next_gate": (
+            "refine frequency/cutoff/eta and validate conservation"
+            if converged
+            else "inspect fixed-control scientific failure"
+        ),
     }
     pilot.publish_json_once(root / "scba-report.json", report)
-    (root / "SHA256SUMS").write_bytes(b"synthetic sums\n")
+    (root / "SHA256SUMS").write_bytes(_fixture_sha256sums(root))
     status = {
         "schema": "negfpy.sparse-nq1-phase-c-scba-status.v1",
         "campaign_manifest_sha256": manifest_sha,
@@ -744,7 +886,7 @@ def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
             identity_sha256=pilot.sha256_bytes(task_id.encode("ascii")),
             run_id=task_id,
             source_tree_sha256="2" * 64,
-            environment_sha256="3" * 64,
+            environment_sha256=manifest["environment_lock"]["sha256"],
             initial_state_sha256=initial,
             source_hashes=sources,
         )
@@ -785,6 +927,13 @@ def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
         pilot,
         "_replay_scientific_diagnostics",
         lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pilot,
+        "validate_preflight_record",
+        lambda _manifest, path: pilot.load_canonical_json(
+            path, name="synthetic bound preflight"
+        ),
     )
 
 
@@ -832,7 +981,24 @@ def _scheduler_receipts(
         os.chmod(raw, 0o444)
         pbs_stdout = scheduler_root / "task.stdout"
         pbs_stderr = scheduler_root / "task.stderr"
-        pbs_stdout.write_text("completed\n", encoding="utf-8")
+        pbs_stdout.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "state": "passed",
+                    "anchor_comparison_passed": (
+                        True if task["anchor_task_id"] is not None else None
+                    ),
+                    "release_certified": False,
+                },
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="ascii",
+        )
         pbs_stderr.write_bytes(b"")
         os.chmod(pbs_stdout, 0o444)
         os.chmod(pbs_stderr, 0o444)
@@ -982,6 +1148,27 @@ def test_pilot_is_exact_first_three_release_tasks() -> None:
         "coupling-square",
         "coupling-square",
     )
+    assert pilot.PILOT_PYTHON_VERSION == "3.12.13"
+    assert dict(pilot.PILOT_DISTRIBUTIONS) == {
+        "h5py": "3.16.0",
+        "numpy": "2.5.1",
+        "phonopy": "4.4.0",
+        "phono3py": "4.4.0",
+        "scipy": "1.18.0",
+        "spglib": "2.7.0",
+        "threadpoolctl": "3.6.0",
+    }
+    assert dict(pilot.PILOT_THREAD_LIMITS) == {
+        "BLIS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+    }
+    assert pilot.PILOT_PBS_PROJECT == "13004417"
+    assert pilot.PILOT_PBS_QUEUE == "normal"
+    assert pilot.PILOT_GIT_BIN == Path("/app/apps/git/2.39.2/bin")
 
 
 def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
@@ -991,7 +1178,11 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
         stderr_path=Path("/evidence/task.stderr"),
         workload={
             "repo_root": "/candidate",
-            "command": ["/python", "/candidate/pilot.py", "run-task"],
+            "command": [
+                "/staged/python/bin/python3.12",
+                "/candidate/pilot.py",
+                "run-task",
+            ],
         },
     ).decode("utf-8")
     scheduler_identity = (
@@ -1003,6 +1194,7 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     assert payload.startswith(scheduler_identity)
     assert payload.count("#PBS -P 13004417\n") == 1
     assert payload.count("#PBS -q normal\n") == 1
+    assert payload.count("#PBS -r n\n") == 1
     assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
     assert "#PBS -l walltime=50:00:00\n" in payload
     isolated_environment = (
@@ -1012,11 +1204,52 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     )
     assert isolated_environment in payload
     assert payload.count("export PYTHONNOUSERSITE=1\n") == 1
+    for line in (
+        "umask 077",
+        (
+            "export PATH=/app/apps/git/2.39.2/bin:/staged/python/bin:"
+            "/usr/bin:/bin"
+        ),
+        "export GIT_CONFIG_NOSYSTEM=1",
+        "export GIT_CONFIG_GLOBAL=/dev/null",
+        "export LC_ALL=C",
+        "export TZ=UTC",
+        "export PYTHONPATH=/candidate/src:/candidate/scripts",
+        "cd -- /candidate",
+        (
+            "exec /staged/python/bin/python3.12 /candidate/pilot.py run-task"
+        ),
+    ):
+        assert payload.count(line + "\n") == 1
+    for name in pilot.PILOT_THREAD_LIMITS:
+        assert payload.count(f"export {name}=1\n") == 1
     assert pilot.PILOT_PBS_NCPUS == 2
     assert pilot.PILOT_PBS_MEMORY == "16gb"
     assert pilot.PILOT_PBS_WALLTIME == "50:00:00"
     assert pilot.PILOT_WALL_LIMIT_SECONDS < 50 * 60 * 60
     assert pilot.PILOT_RSS_LIMIT_BYTES < 16 * 1000**3
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    (
+        Path("relative/output"),
+        Path("/bad path/output"),
+        Path("/bad\noutput"),
+        Path("/bad\0output"),
+    ),
+)
+def test_canonical_pbs_rejects_unsafe_directive_paths(bad_path: Path) -> None:
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="safe absolute PBS path"):
+        pilot._canonical_pbs_script(
+            task={"scheduler_job_name": "nq1p-g0001"},
+            stdout_path=bad_path,
+            stderr_path=Path("/evidence/task.stderr"),
+            workload={
+                "repo_root": "/candidate",
+                "command": ["/staged/python/bin/python3.12", "run-task"],
+            },
+        )
 
 
 def test_manifest_is_deterministic_and_explicitly_non_release(tmp_path: Path) -> None:
@@ -1093,14 +1326,33 @@ def test_prelaunch_requires_exact_live_inputs_and_a_virgin_task_root(
         "_authenticate_inputs",
         lambda _args: dict(manifest["input_hashes"]) | {"raw_fc3": "0" * 64},
     )
+    qualified_lock = pilot.load_canonical_json(
+        _qualification_path, name="test qualification"
+    )["evidence"]["base_qualification_evidence"]["qualification_context"][
+        "environment_lock"
+    ]
     with pytest.raises(pilot.MaterialNQ1PilotError, match="inputs changed"):
-        pilot_runner._verify_live_candidate(SimpleNamespace(), manifest)
+        pilot_runner._verify_live_candidate(
+            SimpleNamespace(), manifest, qualified_lock=qualified_lock
+        )
 
     task_root = tmp_path / "current-task"
     (task_root / "scba/checkpoint").mkdir(parents=True)
     (task_root / "scba/checkpoint/sigma-pp.h5").write_bytes(b"prior attempt")
     with pytest.raises(pilot.MaterialNQ1PilotError, match="already has evidence"):
         pilot_runner._require_virgin_task_root(task_root, "coupling-g0001")
+
+    empty_task_root = tmp_path / "empty-task"
+    empty_task_root.mkdir()
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="already has evidence"):
+        pilot_runner._require_virgin_task_root(
+            empty_task_root, "coupling-g0001"
+        )
+
+    claimed = tmp_path / "claimed-task"
+    pilot_runner._require_virgin_task_root(claimed, "coupling-g0001")
+    assert claimed.is_dir()
+    assert (claimed / "scba").is_dir()
 
     escaped_root = tmp_path / "escaped-pilot"
     outside = tmp_path / "outside"
@@ -1156,6 +1408,18 @@ def test_receipts_bind_parent_predictor_and_complete_tree(
     document = pilot.validate_task_receipt(manifest, child)
     assert document["state"] == "passed"
     assert document["parent_receipt"]["task_id"] == "coupling-g0001"
+    aliased_child = child.parent / ".." / child.parent.name / child.name
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.validate_task_receipt(manifest, aliased_child)
+
+    aliased_parent = parent.parent / ".." / parent.parent.name / parent.name
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.build_task_receipt(
+            manifest=manifest,
+            task_id=tasks[1].task_id,
+            scba_root=tmp_path / "tasks/coupling-g001/scba",
+            parent_receipt=aliased_parent,
+        )
 
     fields = tmp_path / "tasks/coupling-g001/scba/outcomes/scba-fields.h5"
     with fields.open("ab") as stream:
@@ -1184,10 +1448,13 @@ def test_receipt_rejects_forged_predictor_diagnostics_or_prior_infrastructure(
     case_root = tmp_path / mutation
     manifest, _manifest_path, _qualification_path = _manifest(case_root)
     tasks = pilot.predictor_pilot_tasks()
-    parent = _receipt(case_root, manifest, tasks[0], None)
     selected = tasks[1] if mutation == "wrong-transform" else tasks[0]
-    parent_path = parent if mutation == "wrong-transform" else None
-    root = case_root / "forged" / selected.task_id / "scba"
+    parent_path = (
+        _receipt(case_root, manifest, tasks[0], None)
+        if mutation == "wrong-transform"
+        else None
+    )
+    root = case_root / "tasks" / selected.task_id / "scba"
     _scba_tree(
         root,
         selected,
@@ -1223,7 +1490,7 @@ def test_receipt_rejects_legacy_or_extended_scba_manifest_schema(
     case_root = tmp_path / mutation
     manifest, _manifest_path, _qualification_path = _manifest(case_root)
     task = pilot.predictor_pilot_tasks()[0]
-    scba_root = case_root / "forged/scba"
+    scba_root = case_root / "tasks" / task.task_id / "scba"
     _scba_tree(scba_root, task)
     path = scba_root / "campaign-manifest.json"
     document = pilot.load_canonical_json(path, name="SCBA manifest")
@@ -1249,7 +1516,7 @@ def test_receipt_rejects_preflight_parent_mismatch(
     manifest, _manifest_path, _qualification_path = _manifest(tmp_path)
     tasks = pilot.predictor_pilot_tasks()
     parent = _receipt(tmp_path, manifest, tasks[0], None)
-    scba_root = tmp_path / "forged-child/scba"
+    scba_root = tmp_path / "tasks" / tasks[1].task_id / "scba"
     _scba_tree(scba_root, tasks[1], parent_receipt=parent)
     path = scba_root / "campaign-manifest.json"
     document = pilot.load_canonical_json(path, name="SCBA manifest")
@@ -1261,6 +1528,114 @@ def test_receipt_rejects_preflight_parent_mismatch(
             task_id=tasks[1].task_id,
             scba_root=scba_root,
             parent_receipt=parent,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation, expected",
+    (
+        ("inner-command", "fresh initial run"),
+        ("inner-stdout-no-lf", "fresh initial run"),
+        ("inner-stdout-double-lf", "fresh initial run"),
+        ("sha256sums-order", "checksum evidence"),
+        ("memory-zero", "available-memory observation"),
+        ("memory-nonobservation", "material identity changed"),
+        ("runtime-executable", "candidate identity changed"),
+        ("runtime-version", "candidate identity changed"),
+        ("runtime-distributions", "candidate identity changed"),
+        ("runtime-threads", "candidate identity changed"),
+        ("environment-lock", "candidate identity changed"),
+        ("scientific-scope", "scientific scope changed"),
+        ("next-gate", "misstates release certification"),
+        ("extra-empty-directory", "checksum evidence"),
+        ("legacy-running-name", "running marker"),
+    ),
+)
+def test_receipt_rejects_nonproducer_runtime_command_and_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    _mock_checkpoints(monkeypatch)
+    case_root = tmp_path / mutation
+    manifest, _manifest_path, _qualification = _manifest(case_root)
+    task = pilot.predictor_pilot_tasks()[0]
+    scba_root = case_root / "tasks" / task.task_id / "scba"
+    _scba_tree(scba_root, task)
+
+    if mutation in {
+        "inner-command",
+        "inner-stdout-no-lf",
+        "inner-stdout-double-lf",
+    }:
+        log_path = scba_root / "logs/scba.json"
+        log = pilot.load_canonical_json(log_path, name="test SCBA log")
+        assert log["command"][-1] == "--no-resume"
+        assert log["stdout"].endswith("\n")
+        assert not log["stdout"].endswith("\n\n")
+        if mutation == "inner-command":
+            log["command"] = log["command"][:-1]
+        elif mutation == "inner-stdout-no-lf":
+            log["stdout"] = log["stdout"][:-1]
+        else:
+            log["stdout"] += "\n"
+        _rewrite_json(log_path, log)
+        _reseal_scba_after_log_change(scba_root)
+    elif mutation == "sha256sums-order":
+        sums = scba_root / "SHA256SUMS"
+        lines = _fixture_sha256sums(scba_root).splitlines(keepends=True)
+        os.chmod(sums, 0o644)
+        sums.write_bytes(b"".join(reversed(lines)))
+        status_path = scba_root / "status.json"
+        status = pilot.load_canonical_json(status_path, name="test SCBA status")
+        status["sha256sums_sha256"] = pilot.sha256_file(sums)
+        _rewrite_json(status_path, status)
+    elif mutation in {"memory-zero", "memory-nonobservation"}:
+        campaign_path = scba_root / "campaign-manifest.json"
+        campaign = pilot.load_canonical_json(campaign_path, name="test SCBA manifest")
+        if mutation == "memory-zero":
+            campaign["preflight"]["source"]["memory"]["available_bytes"] = 0
+        else:
+            campaign["preflight"]["source"]["fixture_path"] += "-different"
+        _rewrite_json(campaign_path, campaign)
+    elif (
+        mutation.startswith("runtime-")
+        or mutation in {"environment-lock", "scientific-scope"}
+    ):
+        campaign_path = scba_root / "campaign-manifest.json"
+        campaign = pilot.load_canonical_json(campaign_path, name="test SCBA manifest")
+        if mutation == "runtime-executable":
+            campaign["python"]["executable"] = "/different/python3.12"
+        elif mutation == "runtime-version":
+            campaign["python"]["version"] = "3.12.12"
+        elif mutation == "runtime-distributions":
+            campaign["distributions"]["numpy"] = "0"
+        elif mutation == "runtime-threads":
+            campaign["thread_limits"]["OMP_NUM_THREADS"] = "2"
+        elif mutation == "environment-lock":
+            campaign["environment_lock"]["path"] += ".alternate"
+        else:
+            campaign["scientific_scope"] = "different"
+        _rewrite_json(campaign_path, campaign)
+    elif mutation == "next-gate":
+        report_path = scba_root / "scba-report.json"
+        report = pilot.load_canonical_json(report_path, name="test SCBA report")
+        report["next_gate"] = "release"
+        _rewrite_json(report_path, report)
+        _reseal_scba_after_report_change(scba_root)
+    elif mutation == "extra-empty-directory":
+        (scba_root / "unexpected-empty").mkdir()
+    else:
+        (scba_root / "status-running.json").rename(scba_root / "running.json")
+
+    with pytest.raises(pilot.MaterialNQ1PilotError, match=expected):
+        pilot.build_task_receipt(
+            manifest=manifest,
+            task_id=task.task_id,
+            scba_root=scba_root,
+            parent_receipt=None,
         )
 
 
@@ -1331,8 +1706,19 @@ def test_final_report_requires_two_anchors_and_g0025_completion(
     forged["authorizes"]["source_or_scientific_control_changes_allowed"] = True
     forged_path = tmp_path / "forged-report.json"
     pilot.publish_json_once(forged_path, forged)
-    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce"):
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
         pilot.validate_final_report(manifest, forged_path)
+    _rewrite_json(report_path, forged)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce"):
+        pilot.validate_final_report(manifest, report_path)
+    _rewrite_json(report_path, report)
+    aliased_report = report_path.parent / ".." / report_path.parent.name / report_path.name
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.validate_final_report(manifest, aliased_report)
+    os.chmod(report_path, 0o644)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="mode 0444"):
+        pilot.validate_final_report(manifest, report_path)
+    os.chmod(report_path, 0o444)
 
     comparison_path = comparisons["anchor-coupling-g0001"]
     comparison = pilot.load_canonical_json(comparison_path, name="test comparison")
@@ -1341,8 +1727,24 @@ def test_final_report_requires_two_anchors_and_g0025_completion(
     forged_comparison["passed"] = True
     forged_comparison_path = tmp_path / "comparisons/forged-passed.json"
     pilot.publish_json_once(forged_comparison_path, forged_comparison)
-    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce"):
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
         pilot.validate_comparison(manifest, forged_comparison_path)
+    _rewrite_json(comparison_path, forged_comparison)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce"):
+        pilot.validate_comparison(manifest, comparison_path)
+    _rewrite_json(comparison_path, comparison)
+    aliased_comparison = (
+        comparison_path.parent
+        / ".."
+        / comparison_path.parent.name
+        / comparison_path.name
+    )
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.validate_comparison(manifest, aliased_comparison)
+    os.chmod(comparison_path, 0o644)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="mode 0444"):
+        pilot.validate_comparison(manifest, comparison_path)
+    os.chmod(comparison_path, 0o444)
 
     self_scba = tmp_path / "tasks/coupling-g0001/scba"
     with pytest.raises(pilot.MaterialNQ1PilotError, match="frozen release-018 anchor"):
@@ -1359,6 +1761,25 @@ def test_final_report_requires_two_anchors_and_g0025_completion(
                 "outcome": pilot.sha256_file(self_scba / "outcomes/scba.json"),
             },
         )
+
+    audit_path = tmp_path / "pilot-audit.json"
+    audit = pilot.build_audit(
+        manifest=manifest,
+        root=tmp_path,
+        report_path=report_path,
+        audit_path=audit_path,
+    )
+    pilot.publish_json_once(audit_path, audit)
+    assert pilot.validate_audit(
+        manifest, root=tmp_path, audit_path=audit_path
+    ) == audit
+    aliased_audit = audit_path.parent / ".." / audit_path.parent.name / audit_path.name
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.validate_audit(manifest, root=tmp_path, audit_path=aliased_audit)
+    os.chmod(audit_path, 0o644)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="mode 0444"):
+        pilot.validate_audit(manifest, root=tmp_path, audit_path=audit_path)
+    os.chmod(audit_path, 0o444)
 
 
 def test_scheduler_receipt_requires_exact_unique_terminal_f0(
@@ -1378,39 +1799,81 @@ def test_scheduler_receipt_requires_exact_unique_terminal_f0(
     assert pilot.validate_scheduler_receipt(manifest, task_id, receipts[task_id])[
         "exit_status"
     ] == 0
-    invalid = pilot.load_canonical_json(receipts[task_id], name="scheduler")
-    invalid["exit_status"] = 2
-    invalid_path = tmp_path / "scheduler/invalid-exit.receipt.json"
-    pilot.publish_json_once(invalid_path, invalid)
-    with pytest.raises(pilot.MaterialNQ1PilotError, match="terminal F/0"):
-        pilot.validate_scheduler_receipt(manifest, task_id, invalid_path)
-
-    contradictory_raw = tmp_path / "scheduler/contradictory.qstat.txt"
-    original_raw = Path(invalid["raw_qstat_path"]).read_text(encoding="utf-8")
-    contradictory_raw.write_text(
-        original_raw + "    Exit_status = 2\n", encoding="utf-8"
+    aliased_scheduler = (
+        receipts[task_id].parent
+        / ".."
+        / receipts[task_id].parent.name
+        / receipts[task_id].name
     )
-    os.chmod(contradictory_raw, 0o444)
-    contradictory = pilot.load_canonical_json(receipts[task_id], name="scheduler")
-    contradictory["raw_qstat_path"] = str(contradictory_raw)
-    contradictory["raw_qstat_sha256"] = pilot.sha256_file(contradictory_raw)
-    contradictory_path = tmp_path / "scheduler/contradictory.receipt.json"
-    pilot.publish_json_once(contradictory_path, contradictory)
-    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce F/0"):
-        pilot.validate_scheduler_receipt(manifest, task_id, contradictory_path)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="path is not fixed"):
+        pilot.validate_scheduler_receipt(manifest, task_id, aliased_scheduler)
+    canonical_receipt_path = receipts[task_id]
+    original = pilot.load_canonical_json(canonical_receipt_path, name="scheduler")
+    invalid = copy.deepcopy(original)
+    invalid["exit_status"] = 2
+    _rewrite_json(canonical_receipt_path, invalid)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="terminal F/0"):
+        pilot.validate_scheduler_receipt(manifest, task_id, canonical_receipt_path)
+    _rewrite_json(canonical_receipt_path, original)
 
-    wrong_workload = pilot.load_canonical_json(receipts[task_id], name="scheduler")
+    contradictory_raw = Path(original["raw_qstat_path"])
+    original_raw = contradictory_raw.read_bytes()
+    os.chmod(contradictory_raw, 0o644)
+    contradictory_raw.write_bytes(original_raw + b"    Exit_status = 2\n")
+    os.chmod(contradictory_raw, 0o444)
+    contradictory = copy.deepcopy(original)
+    contradictory["raw_qstat_sha256"] = pilot.sha256_file(contradictory_raw)
+    _rewrite_json(canonical_receipt_path, contradictory)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="does not reproduce F/0"):
+        pilot.validate_scheduler_receipt(manifest, task_id, canonical_receipt_path)
+    os.chmod(contradictory_raw, 0o644)
+    contradictory_raw.write_bytes(original_raw)
+    os.chmod(contradictory_raw, 0o444)
+    _rewrite_json(canonical_receipt_path, original)
+
+    wrong_workload = copy.deepcopy(original)
     wrong_workload["task_receipt_path"] = str(task_receipts["coupling-g001"])
     wrong_workload["task_receipt_sha256"] = pilot.sha256_file(
         task_receipts["coupling-g001"]
     )
-    wrong_workload_path = tmp_path / "scheduler/wrong-workload.receipt.json"
-    pilot.publish_json_once(wrong_workload_path, wrong_workload)
-    with pytest.raises(pilot.MaterialNQ1PilotError, match="another workload"):
-        pilot.validate_scheduler_receipt(manifest, task_id, wrong_workload_path)
+    _rewrite_json(canonical_receipt_path, wrong_workload)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="task binding"):
+        pilot.validate_scheduler_receipt(manifest, task_id, canonical_receipt_path)
+    _rewrite_json(canonical_receipt_path, original)
 
-    original = pilot.load_canonical_json(receipts[task_id], name="scheduler")
-    attack_pbs = tmp_path / "scheduler/decoy-task.pbs"
+    canonical_pbs_stdout = Path(original["pbs_stdout_path"]).read_bytes()
+    assert canonical_pbs_stdout.endswith(b"\n")
+    assert not canonical_pbs_stdout.endswith(b"\n\n")
+    for stream_name, forged_bytes in (
+        ("pbs_stdout", b"completed\n"),
+        ("pbs_stdout", canonical_pbs_stdout[:-1]),
+        ("pbs_stdout", canonical_pbs_stdout + b"\n"),
+        ("pbs_stderr", b"unexpected stderr\n"),
+    ):
+        stream_path = Path(original[f"{stream_name}_path"])
+        original_stream = stream_path.read_bytes()
+        os.chmod(stream_path, 0o644)
+        stream_path.write_bytes(forged_bytes)
+        os.chmod(stream_path, 0o444)
+        forged_stream_receipt = copy.deepcopy(original)
+        forged_stream_receipt[f"{stream_name}_sha256"] = pilot.sha256_file(
+            stream_path
+        )
+        _rewrite_json(canonical_receipt_path, forged_stream_receipt)
+        with pytest.raises(
+            pilot.MaterialNQ1PilotError,
+            match="scheduler submission identity does not reproduce",
+        ):
+            pilot.validate_scheduler_receipt(
+                manifest, task_id, canonical_receipt_path
+            )
+        os.chmod(stream_path, 0o644)
+        stream_path.write_bytes(original_stream)
+        os.chmod(stream_path, 0o444)
+        _rewrite_json(canonical_receipt_path, original)
+
+    attack_pbs = Path(original["pbs_script_path"])
+    os.chmod(attack_pbs, 0o644)
     attack_pbs.write_text(
         "#!/bin/bash\n"
         f"#PBS -N {original['job_name']}\n"
@@ -1433,8 +1896,8 @@ def test_scheduler_receipt_requires_exact_unique_terminal_f0(
         "submission_command": attack_command,
         "submission_command_sha256": attack_command_sha,
     })
-    attack_pre_path = tmp_path / "scheduler/decoy-pre-submission.json"
-    pilot.publish_json_once(attack_pre_path, attack_pre)
+    attack_pre_path = Path(original["pre_submission_path"])
+    _rewrite_json(attack_pre_path, attack_pre)
     original_submission = pilot.load_canonical_json(
         original["submission_path"], name="submission"
     )
@@ -1448,8 +1911,8 @@ def test_scheduler_receipt_requires_exact_unique_terminal_f0(
         "qsub_stderr_path": original_submission["qsub_stderr_path"],
         "qsub_stderr_sha256": original_submission["qsub_stderr_sha256"],
     }
-    attack_submission_path = tmp_path / "scheduler/decoy-submission.json"
-    pilot.publish_json_once(attack_submission_path, attack_submission)
+    attack_submission_path = Path(original["submission_path"])
+    _rewrite_json(attack_submission_path, attack_submission)
     attack_receipt = original | {
         "pre_submission_path": str(attack_pre_path),
         "pre_submission_sha256": pilot.sha256_file(attack_pre_path),
@@ -1459,8 +1922,8 @@ def test_scheduler_receipt_requires_exact_unique_terminal_f0(
         "pbs_script_sha256": pilot.sha256_file(attack_pbs),
         "submission_command_sha256": attack_command_sha,
     }
-    attack_receipt_path = tmp_path / "scheduler/decoy.receipt.json"
-    pilot.publish_json_once(attack_receipt_path, attack_receipt)
+    attack_receipt_path = canonical_receipt_path
+    _rewrite_json(attack_receipt_path, attack_receipt)
     with pytest.raises(pilot.MaterialNQ1PilotError, match="canonical workload"):
         pilot.validate_scheduler_receipt(manifest, task_id, attack_receipt_path)
 
@@ -1513,6 +1976,58 @@ def test_cli_qualification_matcher_requires_recursive_shared_validation(
         "validate_predictor_qualification_report",
         lambda document, **_kwargs: dict(document),
     )
+    monkeypatch.setattr(
+        pilot_runner,
+        "_current_runtime_matches",
+        lambda _manifest, _document: True,
+    )
     assert pilot_runner._qualification_matches(
         manifest, qualification, qualification_path
     )
+    os.chmod(qualification_path, 0o644)
+    assert not pilot_runner._qualification_matches(
+        manifest, qualification, qualification_path
+    )
+    os.chmod(qualification_path, 0o444)
+
+
+def test_current_runtime_replays_qualified_package_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, _manifest_path, qualification_path = _manifest(tmp_path)
+    qualification = pilot.load_canonical_json(
+        qualification_path, name="qualification"
+    )
+    package_bytes = b"numpy==2.5.1\n"
+    runtime = {
+        "executable": str(Path(sys.executable).resolve()),
+        "executable_sha256": pilot.sha256_file(Path(sys.executable).resolve()),
+        "version": pilot.PILOT_PYTHON_VERSION,
+        "packages_sha256": pilot.sha256_bytes(package_bytes),
+    }
+    monkeypatch.setattr(
+        pilot_runner,
+        "qualified_python312_runtime",
+        lambda _manifest, _qualification: (runtime, {}),
+    )
+    monkeypatch.setattr(
+        pilot_runner.platform,
+        "python_version",
+        lambda: pilot.PILOT_PYTHON_VERSION,
+    )
+    monkeypatch.setattr(
+        pilot_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=b"forged==1\n"
+        ),
+    )
+    assert not pilot_runner._current_runtime_matches(manifest, qualification)
+    monkeypatch.setattr(
+        pilot_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=package_bytes
+        ),
+    )
+    assert pilot_runner._current_runtime_matches(manifest, qualification)
