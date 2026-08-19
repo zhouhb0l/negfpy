@@ -43,6 +43,8 @@ MATERIAL_NQ1_EXCLUDED_CLAIMS = (
     "quartic and four-phonon diagrams",
 )
 
+ContinuationPredictor = Literal["identity", "coupling-square"]
+
 
 def _canonical(value: Any) -> bytes:
     return (
@@ -85,8 +87,9 @@ class MaterialSCBATask:
     initialization: Literal["zero", "born", "continuation"]
     continuation_parent: str | None = None
     continuation_axis: Literal["coupling", "temperature_bias"] | None = None
+    continuation_predictor: ContinuationPredictor | None = None
 
-    schema: ClassVar[str] = "negfpy.material-nq1-scba-task.v2"
+    schema: ClassVar[str] = "negfpy.material-nq1-scba-task.v3"
 
     def __post_init__(self) -> None:
         for name in ("task_id", "role"):
@@ -125,10 +128,29 @@ class MaterialSCBATask:
                 "coupling", "temperature_bias"
             }:
                 raise ValueError("continuation tasks require one parent and axis")
+            if self.continuation_predictor not in {
+                "identity", "coupling-square"
+            }:
+                raise ValueError(
+                    "continuation tasks require an explicit predictor"
+                )
+            if (
+                self.continuation_axis == "temperature_bias"
+                and self.continuation_predictor != "identity"
+            ):
+                raise ValueError(
+                    "temperature-bias continuation requires identity predictor"
+                )
             if self.continuation_parent == self.task_id:
                 raise ValueError("a continuation task cannot be its own parent")
-        elif self.continuation_parent is not None or self.continuation_axis is not None:
-            raise ValueError("non-continuation tasks cannot name a parent or axis")
+        elif (
+            self.continuation_parent is not None
+            or self.continuation_axis is not None
+            or self.continuation_predictor is not None
+        ):
+            raise ValueError(
+                "non-continuation tasks cannot name a parent, axis, or predictor"
+            )
 
     @property
     def grid_cutoff(self) -> float:
@@ -165,6 +187,7 @@ class MaterialSCBATask:
             "initialization": self.initialization,
             "continuation_parent": self.continuation_parent,
             "continuation_axis": self.continuation_axis,
+            "continuation_predictor": self.continuation_predictor,
         }
 
     @property
@@ -205,6 +228,9 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
             initialization="zero" if previous is None else "continuation",
             continuation_parent=previous,
             continuation_axis=None if previous is None else "coupling",
+            continuation_predictor=(
+                None if previous is None else "coupling-square"
+            ),
             **base,
         ))
         previous = task_id
@@ -220,6 +246,7 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
             initialization="continuation",
             continuation_parent=equilibrium,
             continuation_axis="temperature_bias",
+            continuation_predictor="identity",
             **{k: v for k, v in base.items() if k != "temperature_bias_kelvin"},
         ))
         tasks.append(MaterialSCBATask(
@@ -230,6 +257,7 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
             initialization="continuation",
             continuation_parent=half_id,
             continuation_axis="temperature_bias",
+            continuation_predictor="identity",
             **{k: v for k, v in base.items() if k != "temperature_bias_kelvin"},
         ))
 
@@ -307,7 +335,7 @@ def silicon_nq1_release_manifest(
             raise ValueError(f"{name} must be a lowercase SHA256")
     tasks = silicon_nq1_release_tasks()
     payload = {
-        "schema": "negfpy.material-nq1-scba-campaign.v2",
+        "schema": "negfpy.material-nq1-scba-campaign.v3",
         "scientific_scope": "silicon N_q=1 algebraic material validation",
         "source_revision": source_revision,
         "source_tree_sha256": source_tree_sha256,
@@ -326,6 +354,7 @@ def silicon_nq1_release_manifest(
 
 
 __all__ = [
+    "ContinuationPredictor",
     "HARMONIC_CONSERVATIVE_BOUND",
     "MATERIAL_NQ1_ACCEPTANCE",
     "MATERIAL_NQ1_EXCLUDED_CLAIMS",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 import sys
+from copy import deepcopy
+from pathlib import Path
 
+import pytest
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -88,3 +90,214 @@ def test_infrastructure_resume_uses_append_only_attempt_artifacts(
     assert len(campaign._attempt_logs(artifacts)) == 2
     assert len(campaign._failure_records(artifacts)) == 2
     assert campaign._attempt_paths(artifacts)[0] == 3
+
+
+def test_manifest_and_execution_command_preserve_predictor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    output = {
+        "checkpoint": str(artifacts / "checkpoint/sigma-pp.h5"),
+        "json": str(artifacts / "outcomes/scba.json"),
+        "hdf5": str(artifacts / "outcomes/scba-fields.h5"),
+    }
+    parent = {
+        "artifacts": str(tmp_path / "parent"),
+        "initialization": {"predictor": "coupling-square"},
+    }
+    manifest = {
+        "schema": campaign.SCHEMA,
+        "source": {"commit": "candidate"},
+        "source_tree_sha256": "a" * 64,
+        "environment_lock": {"sha256": "b" * 64},
+        "driver": {"sha256": "c" * 64},
+        "preflight": {"continuation_parent": parent},
+        "run_id": "child",
+        "coupling_scale": 0.02,
+        "continuation_parent": parent,
+        "continuation_axis": "coupling",
+        "continuation_predictor": "coupling-square",
+        "born_initial": None,
+        "numerical_controls": {
+            "grid_step": 0.1,
+            "grid_n_positive": 75,
+            "grid_cutoff": 7.5,
+            "eta_lead": 0.025,
+            "mixing": 0.2,
+            "mixing_floor": 0.001,
+            "temperature_bias": 0.0,
+        },
+        "outputs": output,
+    }
+    monkeypatch.setattr(campaign, "_manifest", lambda **kwargs: manifest)
+    observed: dict[str, object] = {}
+
+    def supervise(command, **kwargs):
+        observed["command"] = command
+        kwargs["stdout_path"].write_text("")
+        kwargs["stderr_path"].write_text("")
+        return {"returncode": 2, "watchdog_trigger": None}
+
+    monkeypatch.setattr(campaign, "_supervise_scba", supervise)
+    monkeypatch.setattr(
+        campaign, "_publish_report", lambda *args: {"state": "passed"}
+    )
+    status = campaign.run_campaign(
+        repo=tmp_path,
+        fixture=tmp_path / "fixture",
+        fc3_full=tmp_path / "fc3",
+        phase_b=tmp_path / "phase-b",
+        artifacts=artifacts,
+        expected_commit="candidate",
+        environment_lock=tmp_path / "lock",
+        run_id="child",
+        coupling_scale=0.02,
+        continuation_parent_artifacts=tmp_path / "parent",
+        continuation_axis="coupling",
+        continuation_predictor="coupling-square",
+    )
+    assert status == {"state": "passed"}
+    command = list(observed["command"])
+    index = command.index("--continuation-predictor")
+    assert command[index + 1] == "coupling-square"
+    assert "--no-resume" in command
+
+
+def test_resume_rejects_changed_predictor_before_checkpoint_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    source = {"commit": "candidate"}
+    lock = {"sha256": "b" * 64}
+    _write(artifacts / "campaign-manifest.json", {
+        "schema": campaign.SCHEMA,
+        "source": source,
+        "environment_lock": lock,
+        "driver": {"sha256": "c" * 64},
+        "coupling_scale": 0.02,
+        "continuation_axis": "coupling",
+        "continuation_predictor": "identity",
+    })
+    recorded = campaign._load_json(
+        artifacts / "campaign-manifest.json", "test manifest"
+    )
+    expected = dict(recorded)
+    expected["continuation_predictor"] = "coupling-square"
+    monkeypatch.setattr(campaign, "_manifest", lambda **kwargs: expected)
+    with pytest.raises(
+        campaign.common.CampaignError, match="exact requested identity"
+    ):
+        campaign.run_campaign(
+            repo=tmp_path,
+            fixture=tmp_path / "fixture",
+            fc3_full=tmp_path / "fc3",
+            phase_b=tmp_path / "phase-b",
+            artifacts=artifacts,
+            expected_commit="candidate",
+            environment_lock=tmp_path / "lock",
+            run_id="child",
+            coupling_scale=0.02,
+            continuation_parent_artifacts=tmp_path / "parent",
+            continuation_axis="coupling",
+            continuation_predictor="coupling-square",
+            resume=True,
+        )
+
+
+@pytest.mark.parametrize("changed", ["run_id", "source", "input"])
+def test_terminal_status_never_bypasses_exact_request_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed: str,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    expected = {
+        "schema": campaign.SCHEMA,
+        "source": {
+            "commit": "1" * 40,
+            "tree": "2" * 40,
+            "dirty": False,
+        },
+        "run_id": "requested-run",
+        "preflight": {
+            "source": {
+                "fixture_path": "/inputs/fixture",
+                "problem_input_hashes": {"problem": "3" * 64},
+            },
+            "run_id": "requested-run",
+        },
+    }
+    recorded = deepcopy(expected)
+    if changed == "run_id":
+        recorded["run_id"] = "other-run"
+    elif changed == "source":
+        recorded["source"]["tree"] = "4" * 40
+    else:
+        recorded["preflight"]["source"]["fixture_path"] = "/other/fixture"
+    _write(artifacts / "campaign-manifest.json", recorded)
+    _write(artifacts / "status.json", {"state": "passed"})
+    calls: list[bool] = []
+
+    def requested_manifest(**kwargs):
+        calls.append(bool(kwargs.get("allow_existing_outputs")))
+        return expected
+
+    monkeypatch.setattr(campaign, "_manifest", requested_manifest)
+    monkeypatch.setattr(
+        campaign,
+        "_authenticated_terminal_status",
+        lambda *args: pytest.fail("terminal status used before request authentication"),
+    )
+    with pytest.raises(
+        campaign.common.CampaignError, match="exact requested identity"
+    ):
+        campaign.run_campaign(
+            repo=tmp_path,
+            fixture=tmp_path / "fixture",
+            fc3_full=tmp_path / "fc3",
+            phase_b=tmp_path / "phase-b",
+            artifacts=artifacts,
+            expected_commit="1" * 40,
+            environment_lock=tmp_path / "lock",
+            run_id="requested-run",
+            coupling_scale=0.02,
+        )
+    assert calls == [True]
+
+
+def test_existing_nonterminal_manifest_requires_explicit_resume_even_without_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    manifest = {
+        "schema": campaign.SCHEMA,
+        "run_id": "abrupt-run",
+        "preflight": {"run_id": "abrupt-run"},
+    }
+    _write(artifacts / "campaign-manifest.json", manifest)
+    checkpoint = artifacts / "checkpoint/sigma-pp.h5"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"abrupt checkpoint\n")
+    monkeypatch.setattr(campaign, "_manifest", lambda **kwargs: manifest)
+    monkeypatch.setattr(
+        campaign,
+        "_supervise_scba",
+        lambda *args, **kwargs: pytest.fail("nonexplicit resume ran the child"),
+    )
+    with pytest.raises(
+        campaign.common.CampaignError, match="requires explicit --resume"
+    ):
+        campaign.run_campaign(
+            repo=tmp_path,
+            fixture=tmp_path / "fixture",
+            fc3_full=tmp_path / "fc3",
+            phase_b=tmp_path / "phase-b",
+            artifacts=artifacts,
+            expected_commit="1" * 40,
+            environment_lock=tmp_path / "lock",
+            run_id="abrupt-run",
+            coupling_scale=0.02,
+        )

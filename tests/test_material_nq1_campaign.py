@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from negfpy.anharmonic._material_nq1_campaign import (
@@ -28,11 +30,30 @@ def test_release_task_graph_is_complete_topological_and_preregistered() -> None:
     assert all(
         task.mixing_floor == MATERIAL_NQ1_MIXING_FLOOR for task in tasks
     )
-    assert all(task.as_dict()["schema"].endswith(".v2") for task in tasks)
+    assert all(task.as_dict()["schema"].endswith(".v3") for task in tasks)
     by_id = {task.task_id: task for task in tasks}
     for index, task in enumerate(tasks):
         if task.continuation_parent is not None:
             assert tasks.index(by_id[task.continuation_parent]) < index
+            assert task.continuation_predictor in {
+                "identity", "coupling-square"
+            }
+        else:
+            assert task.continuation_predictor is None
+    assert all(
+        task.continuation_predictor == "coupling-square"
+        for task in tasks[1:9]
+    )
+    assert all(
+        task.continuation_predictor == "identity"
+        for task in tasks
+        if task.continuation_axis == "temperature_bias"
+    )
+    assert sum(
+        task.continuation_predictor == "coupling-square" for task in tasks
+    ) == 8
+    assert sum(task.continuation_predictor == "identity" for task in tasks) == 4
+    assert sum(task.continuation_predictor is None for task in tasks) == 7
     assert by_id["bias-positive-half"].continuation_parent == "coupling-g100"
     assert by_id["bias-positive-full"].continuation_parent == "bias-positive-half"
     assert by_id["bias-negative-half"].temperature_bias_kelvin == -10.0
@@ -87,7 +108,7 @@ def test_campaign_manifest_hashes_all_tasks_inputs_and_acceptance() -> None:
     assert first == second
     assert len(first["campaign_sha256"]) == 64
     assert len(first["tasks"]) == 19
-    assert first["schema"] == "negfpy.material-nq1-scba-campaign.v2"
+    assert first["schema"] == "negfpy.material-nq1-scba-campaign.v3"
     assert all(
         task["mixing_floor"] == MATERIAL_NQ1_MIXING_FLOOR
         for task in first["tasks"]
@@ -116,6 +137,27 @@ def test_invalid_continuation_and_negative_temperature_fail_closed() -> None:
     }
     with pytest.raises(ValueError, match="require one parent"):
         MaterialSCBATask(initialization="continuation", **base)
+    with pytest.raises(ValueError, match="explicit predictor"):
+        MaterialSCBATask(
+            initialization="continuation",
+            continuation_parent="parent",
+            continuation_axis="coupling",
+            **base,
+        )
+    with pytest.raises(ValueError, match="requires identity predictor"):
+        MaterialSCBATask(
+            initialization="continuation",
+            continuation_parent="parent",
+            continuation_axis="temperature_bias",
+            continuation_predictor="coupling-square",
+            **base,
+        )
+    with pytest.raises(ValueError, match="cannot name a parent, axis, or predictor"):
+        MaterialSCBATask(
+            initialization="zero",
+            continuation_predictor="identity",
+            **base,
+        )
     with pytest.raises(ValueError, match="negative"):
         MaterialSCBATask(
             initialization="zero",
@@ -126,3 +168,18 @@ def test_invalid_continuation_and_negative_temperature_fail_closed() -> None:
             initialization="zero",
             **{**base, "mixing_floor": 0.3},
         )
+
+
+def test_predictor_is_serialized_and_changes_task_identity() -> None:
+    identity = next(
+        task for task in silicon_nq1_release_tasks()
+        if task.task_id == "bias-positive-half"
+    )
+    square = replace(
+        identity,
+        continuation_axis="coupling",
+        continuation_predictor="coupling-square",
+    )
+    assert identity.as_dict()["continuation_predictor"] == "identity"
+    assert square.as_dict()["continuation_predictor"] == "coupling-square"
+    assert identity.task_sha256 != square.task_sha256

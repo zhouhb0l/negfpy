@@ -9,21 +9,15 @@ or infrastructure failure is retried with changed controls.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
-from pathlib import Path
 import platform
-import subprocess
 import sys
-import tempfile
-from typing import Any, Mapping
-
-import negfpy
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
-
 
 # The material SCBA fixed point is substantially more expensive than the
 # lightweight Born gate.  Keep its infrastructure watchdog explicit and
@@ -35,7 +29,7 @@ SCBA_WALL_LIMIT_SECONDS = 48 * 60 * 60
 SCBA_RSS_LIMIT_BYTES = 8 * 1024**3
 
 
-SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v1"
+SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v2"
 STATUS_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-status.v1"
 REPORT_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-report.v1"
 
@@ -61,6 +55,7 @@ def _manifest(
     expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    continuation_predictor: str | None = None,
     born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
@@ -68,6 +63,7 @@ def _manifest(
     mixing: float | None = None,
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
+    allow_existing_outputs: bool = False,
 ) -> dict[str, Any]:
     repo = repo.resolve()
     artifacts = artifacts.resolve()
@@ -83,13 +79,15 @@ def _manifest(
         coupling_scale=coupling_scale,
         continuation_parent_artifacts=continuation_parent_artifacts,
         continuation_axis=continuation_axis,
+        continuation_predictor=continuation_predictor,
         born_initial_hdf5=born_initial_hdf5,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
         temperature_bias=temperature_bias,
+        allow_existing_outputs=allow_existing_outputs,
     )
     driver = repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"
-    if not driver.is_file():
+    if not driver.is_file() or driver.is_symlink():
         raise common.CampaignError(f"missing SCBA case driver: {driver}")
     return {
         "schema": SCHEMA,
@@ -103,6 +101,7 @@ def _manifest(
         "coupling_scale": coupling_scale,
         "continuation_parent": preflight["continuation_parent"],
         "continuation_axis": continuation_axis,
+        "continuation_predictor": continuation_predictor,
         "born_initial": preflight["born_initial"],
         "numerical_controls": preflight["numerical_controls"],
         "fixed_controls_no_retuning": True,
@@ -125,6 +124,229 @@ def _attempt_logs(artifacts: Path) -> tuple[Path, ...]:
 
 def _failure_records(artifacts: Path) -> tuple[Path, ...]:
     return tuple(sorted(artifacts.glob("infrastructure-failure*.json")))
+
+
+def _manifest_authentication_view(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize only the explicitly non-reproducible free-memory observation."""
+
+    try:
+        stable = json.loads(
+            json.dumps(
+                value,
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise common.CampaignError("SCBA manifest is not strict JSON") from error
+    if not isinstance(stable, dict):  # pragma: no cover - Mapping API guard
+        raise common.CampaignError("SCBA manifest is not an object")
+    source = stable.get("preflight", {}).get("source")
+    if isinstance(source, dict) and "memory" in source:
+        memory = source["memory"]
+        if not isinstance(memory, dict) or "available_bytes" not in memory:
+            raise common.CampaignError(
+                "SCBA preflight memory identity is incomplete"
+            )
+        available = memory["available_bytes"]
+        if (
+            isinstance(available, bool)
+            or not isinstance(available, int)
+            or available <= 0
+        ):
+            raise common.CampaignError(
+                "SCBA preflight available-memory observation is invalid"
+            )
+        memory["available_bytes"] = "runtime-observation"
+    return stable
+
+
+def _regular_file(path: Path, label: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise common.CampaignError(f"{label} is not a regular file: {path}")
+    return path
+
+
+def _authenticated_terminal_status(
+    artifacts: Path,
+    manifest: Mapping[str, Any],
+    manifest_path: Path,
+    status_path: Path,
+) -> dict[str, Any]:
+    """Authenticate a terminal publication before treating it as idempotent."""
+
+    manifest_sha = _sha256(manifest_path)
+    status = _load_json(status_path, "terminal SCBA status")
+    status_keys = {
+        "schema",
+        "campaign_manifest_sha256",
+        "state",
+        "scba_converged",
+        "release_certified",
+        "report_sha256",
+        "sha256sums_sha256",
+        "automatic_retry",
+    }
+    if set(status) != status_keys or status.get("schema") != STATUS_SCHEMA:
+        raise common.CampaignError("terminal SCBA status contract is invalid")
+    state = status.get("state")
+    converged = status.get("scba_converged")
+    if (
+        state not in {"passed", "scientific-failure"}
+        or type(converged) is not bool
+        or converged != (state == "passed")
+        or status.get("release_certified") is not False
+        or status.get("automatic_retry") is not False
+        or status.get("campaign_manifest_sha256") != manifest_sha
+    ):
+        raise common.CampaignError("terminal SCBA status identity is invalid")
+
+    report_path = _regular_file(artifacts / "scba-report.json", "SCBA report")
+    sums_path = _regular_file(artifacts / "SHA256SUMS", "SCBA SHA256SUMS")
+    if (
+        status.get("report_sha256") != _sha256(report_path)
+        or status.get("sha256sums_sha256") != _sha256(sums_path)
+    ):
+        raise common.CampaignError("terminal SCBA status digest binding differs")
+    report = _load_json(report_path, "SCBA report")
+    report_keys = {
+        "schema",
+        "campaign_manifest_sha256",
+        "state",
+        "scba_converged",
+        "checkpoint_sha256",
+        "outcome_sha256",
+        "fields_hdf5_sha256",
+        "log_sha256",
+        "supervision",
+        "automatic_retry",
+        "attempt_logs",
+        "infrastructure_failures",
+        "controls_changed",
+        "release_certified",
+        "next_gate",
+    }
+    if (
+        set(report) != report_keys
+        or report.get("schema") != REPORT_SCHEMA
+        or report.get("campaign_manifest_sha256") != manifest_sha
+        or report.get("state") != state
+        or report.get("scba_converged") is not converged
+        or report.get("automatic_retry") is not False
+        or report.get("controls_changed") is not False
+        or report.get("release_certified") is not False
+    ):
+        raise common.CampaignError("terminal SCBA report contract is invalid")
+
+    outputs = manifest.get("outputs")
+    if not isinstance(outputs, Mapping):
+        raise common.CampaignError("SCBA manifest output paths are invalid")
+    try:
+        checkpoint = _regular_file(
+            Path(outputs["checkpoint"]), "terminal SCBA checkpoint"
+        )
+        output_json = _regular_file(
+            Path(outputs["json"]), "terminal SCBA outcome"
+        )
+        output_hdf5 = _regular_file(
+            Path(outputs["hdf5"]), "terminal SCBA fields"
+        )
+    except (KeyError, TypeError) as error:
+        raise common.CampaignError("SCBA manifest output paths are invalid") from error
+    outcome = _load_json(output_json, "SCBA outcome")
+    manifest_preflight = manifest.get("preflight")
+    manifest_source = (
+        manifest_preflight.get("source")
+        if isinstance(manifest_preflight, Mapping)
+        else None
+    )
+    outcome_source = outcome.get("preflight_source")
+    try:
+        source_matches = (
+            isinstance(manifest_source, Mapping)
+            and isinstance(outcome_source, Mapping)
+            and case._stable_material_identity(outcome_source)
+            == case._stable_material_identity(manifest_source)
+        )
+    except case.SCBACaseError as error:
+        raise common.CampaignError(
+            f"terminal SCBA material identity is invalid: {error}"
+        ) from error
+    outcome_checkpoint = outcome.get("checkpoint")
+    if (
+        outcome.get("campaign_manifest_sha256") != manifest_sha
+        or outcome.get("scba_executed") is not True
+        or outcome.get("release_certified") is not False
+        or outcome.get("result", {}).get("converged") is not converged
+        or not source_matches
+        or outcome.get("continuation_parent")
+        != manifest.get("continuation_parent")
+        or outcome.get("born_initial") != manifest.get("born_initial")
+        or not isinstance(outcome_checkpoint, str)
+        or Path(outcome_checkpoint).expanduser().resolve() != checkpoint.resolve()
+        or outcome.get("checkpoint_sha256") != _sha256(checkpoint)
+        or outcome.get("hdf5", {}).get("sha256") != _sha256(output_hdf5)
+        or report.get("checkpoint_sha256") != _sha256(checkpoint)
+        or report.get("outcome_sha256") != _sha256(output_json)
+        or report.get("fields_hdf5_sha256") != _sha256(output_hdf5)
+    ):
+        raise common.CampaignError("terminal SCBA output binding differs")
+
+    attempt_logs = _attempt_logs(artifacts)
+    failures = _failure_records(artifacts)
+    for path in (*attempt_logs, *failures):
+        _regular_file(path, "SCBA terminal inventory member")
+    expected_attempts = [
+        {"path": path.relative_to(artifacts).as_posix(), "sha256": _sha256(path)}
+        for path in attempt_logs
+    ]
+    expected_failures = [
+        {"path": path.relative_to(artifacts).as_posix(), "sha256": _sha256(path)}
+        for path in failures
+    ]
+    if (
+        report.get("attempt_logs") != expected_attempts
+        or report.get("infrastructure_failures") != expected_failures
+    ):
+        raise common.CampaignError("terminal SCBA attempt inventory differs")
+    matching_logs = [
+        path for path in attempt_logs if _sha256(path) == report.get("log_sha256")
+    ]
+    if len(matching_logs) != 1:
+        raise common.CampaignError("terminal SCBA report log binding is ambiguous")
+    terminal_log = _load_json(matching_logs[0], "terminal SCBA subprocess log")
+    if terminal_log.get("supervision") != report.get("supervision"):
+        raise common.CampaignError("terminal SCBA supervision binding differs")
+
+    running_path = _regular_file(
+        artifacts / "status-running.json", "SCBA running status"
+    )
+    running = _load_json(running_path, "SCBA running status")
+    expected_running = {
+        "schema": STATUS_SCHEMA,
+        "campaign_manifest_sha256": manifest_sha,
+        "state": "running",
+        "automatic_retry": False,
+        "release_certified": False,
+    }
+    if running != expected_running:
+        raise common.CampaignError("SCBA running status binding differs")
+    files = (
+        (manifest_path, running_path, output_json, output_hdf5, checkpoint, report_path)
+        + attempt_logs
+        + failures
+    )
+    expected_sums = "".join(
+        f"{_sha256(path)}  {path.relative_to(artifacts).as_posix()}\n"
+        for path in sorted(
+            files, key=lambda item: item.relative_to(artifacts).as_posix()
+        )
+    ).encode("ascii")
+    if sums_path.read_bytes() != expected_sums:
+        raise common.CampaignError("terminal SCBA SHA256SUMS inventory differs")
+    return status
 
 
 def _attempt_paths(artifacts: Path) -> tuple[int, Path, Path, Path]:
@@ -234,90 +456,57 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
     status_path = artifacts / "status.json"
     running_path = artifacts / "status-running.json"
-    if status_path.exists():
-        return _load_json(status_path, "terminal SCBA status")
-    prior_failures = _failure_records(artifacts)
-    if prior_failures and not resume:
-        raise common.CampaignError("an infrastructure interruption is archived; pass --resume to continue the identical checkpoint")
-    if manifest_path.exists():
+    manifest_arguments = {
+        "repo": repo,
+        "fixture": fixture,
+        "fc3_full": fc3_full,
+        "phase_b": phase_b,
+        "artifacts": artifacts,
+        "expected_commit": expected_commit,
+        "environment_lock": environment_lock,
+        "run_id": run_id,
+        "coupling_scale": coupling_scale,
+        "continuation_parent_artifacts": continuation_parent_artifacts,
+        "continuation_axis": continuation_axis,
+        "continuation_predictor": continuation_predictor,
+        "born_initial_hdf5": born_initial_hdf5,
+        "grid_step": grid_step,
+        "grid_n_positive": grid_n_positive,
+        "eta_lead": eta_lead,
+        "mixing": mixing,
+        "mixing_floor": mixing_floor,
+        "temperature_bias": temperature_bias,
+    }
+    existing_manifest = manifest_path.exists() or manifest_path.is_symlink()
+    if existing_manifest:
         manifest = _load_json(manifest_path, "SCBA campaign manifest")
-        if manifest.get("source") != common._source_identity(repo, expected_commit):
-            raise common.CampaignError("source changed during SCBA resume")
-        if manifest.get("environment_lock") != common._validate_lock(environment_lock):
-            raise common.CampaignError("environment lock changed during SCBA resume")
-        if manifest.get("driver", {}).get("sha256") != _sha256(repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"):
-            raise common.CampaignError("SCBA driver changed during resume")
-        if manifest.get("coupling_scale") != coupling_scale:
-            raise common.CampaignError("coupling scale changed during SCBA resume")
-        if manifest.get("continuation_axis") != continuation_axis:
-            raise common.CampaignError("continuation axis changed during SCBA resume")
-        _resume_identity, _resume_problem, _resume_config = case.authenticate_scba_inputs(
-            fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b,
-            coupling_scale=coupling_scale, grid_step=grid_step,
-            grid_n_positive=grid_n_positive, eta_lead=eta_lead,
-            mixing=mixing, mixing_floor=mixing_floor,
-            temperature_bias=temperature_bias,
+        expected_manifest = _manifest(
+            **manifest_arguments, allow_existing_outputs=True
         )
-        observed_controls = {
-            "grid_step": float(_resume_problem.grid.step),
-            "grid_n_positive": int(_resume_problem.grid.n_positive),
-            "grid_cutoff": float(_resume_problem.grid.cutoff),
-            "eta_lead": float(_resume_config.eta_lead),
-            "mixing": float(_resume_config.mixing),
-            "mixing_floor": float(_resume_config.mixing_floor),
-            "temperature_bias": float(
-                _resume_problem.left.temperature - _resume_problem.right.temperature
-            ),
-        }
-        if manifest.get("numerical_controls") != observed_controls:
-            raise common.CampaignError("numerical controls changed during SCBA resume")
-        if continuation_parent_artifacts is None:
-            supplied_parent = None
-        else:
-            parent_identity, parent_problem, parent_config = case.authenticate_scba_inputs(
-                fixture=fixture, fc3_full=fc3_full,
-                phase_b_artifacts=phase_b, coupling_scale=coupling_scale,
-                grid_step=grid_step, grid_n_positive=grid_n_positive,
-                eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
-                temperature_bias=temperature_bias,
+        if _manifest_authentication_view(manifest) != _manifest_authentication_view(
+            expected_manifest
+        ):
+            raise common.CampaignError(
+                "existing SCBA campaign differs from the exact requested identity"
             )
-            _initial, supplied_parent = case._continuation_initial_state(
-                parent_artifacts=continuation_parent_artifacts,
-                identity=parent_identity, problem=parent_problem,
-                config=parent_config,
-                source_tree_sha256=manifest["source_tree_sha256"],
-                environment_sha256=manifest["environment_lock"]["sha256"],
-                child_coupling_scale=coupling_scale,
-                continuation_axis=continuation_axis,
+        if status_path.exists() or status_path.is_symlink():
+            return _authenticated_terminal_status(
+                artifacts, manifest, manifest_path, status_path
             )
-        if manifest.get("continuation_parent") != supplied_parent:
-            raise common.CampaignError("continuation parent changed during SCBA resume")
-        if born_initial_hdf5 is None:
-            supplied_born = None
-        else:
-            _initial, _parent, supplied_born = case._authenticated_initial_state(
-                continuation_parent_artifacts=None,
-                continuation_axis=None,
-                born_initial_hdf5=born_initial_hdf5,
-                identity=_resume_identity,
-                problem=_resume_problem,
-                config=_resume_config,
-                source_tree_sha256=manifest["source_tree_sha256"],
-                environment_sha256=manifest["environment_lock"]["sha256"],
-                coupling_scale=coupling_scale,
+        if not resume:
+            raise common.CampaignError(
+                "an existing nonterminal SCBA campaign requires explicit --resume"
             )
-        if manifest.get("born_initial") != supplied_born:
-            raise common.CampaignError("Born initial-state artifact changed during SCBA resume")
     else:
         if any(artifacts.iterdir()):
             raise common.CampaignError("nonempty artifact directory has no manifest; refusing overwrite")
-        manifest = _manifest(repo=repo, fixture=fixture, fc3_full=fc3_full, phase_b=phase_b, artifacts=artifacts, expected_commit=expected_commit, environment_lock=environment_lock, run_id=run_id, coupling_scale=coupling_scale, continuation_parent_artifacts=continuation_parent_artifacts, continuation_axis=continuation_axis, born_initial_hdf5=born_initial_hdf5, grid_step=grid_step, grid_n_positive=grid_n_positive, eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor, temperature_bias=temperature_bias)
+        manifest = _manifest(**manifest_arguments)
         common._publish_once(manifest_path, _canonical(manifest))
     manifest_sha = _sha256(manifest_path)
     if not running_path.exists():
@@ -339,12 +528,17 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         command_parts.extend([
             "--continuation-parent-artifacts", str(parent["artifacts"]),
             "--continuation-axis", str(manifest["continuation_axis"]),
+            "--continuation-predictor", str(
+                manifest["continuation_predictor"]
+            ),
         ])
     born_initial = manifest.get("born_initial")
     if born_initial is not None:
         command_parts.extend([
             "--born-initial-hdf5", str(born_initial["path"])
         ])
+    if not resume:
+        command_parts.append("--no-resume")
     command = tuple(command_parts)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_path = log_path.with_suffix(".stdout.tmp")
@@ -390,6 +584,10 @@ def main() -> int:
     parser.add_argument(
         "--continuation-axis", choices=("coupling", "temperature_bias")
     )
+    parser.add_argument(
+        "--continuation-predictor",
+        choices=tuple(sorted(case.CONTINUATION_PREDICTORS)),
+    )
     parser.add_argument("--born-initial-hdf5", type=Path)
     parser.add_argument("--grid-step", type=float)
     parser.add_argument("--grid-n-positive", type=int)
@@ -402,10 +600,10 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if status.get("state") == "passed" else 2
     except Exception as error:

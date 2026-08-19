@@ -122,7 +122,7 @@ def build_material_nq1_mpi_campaign(
                 **dict(input_hashes),
             },
             payload={
-                "schema": "negfpy.material-nq1-mpi-task.v2",
+                "schema": "negfpy.material-nq1-mpi-task.v3",
                 "dependencies": list(task_dependencies(task)),
                 "scientific_task": task.as_dict()
                 | {"task_sha256": task.task_sha256},
@@ -140,7 +140,7 @@ def build_material_nq1_mpi_campaign(
             **dict(input_hashes),
         },
         metadata={
-            "schema": "negfpy.material-nq1-mpi-campaign.v2",
+            "schema": "negfpy.material-nq1-mpi-campaign.v3",
             "scientific_scope": release["scientific_scope"],
             "release_campaign_sha256": release["campaign_sha256"],
             "release_certified": False,

@@ -29,10 +29,10 @@ def _validator(path, task):
 def test_material_mpi_waves_preserve_dependencies_and_fanout() -> None:
     campaign = _campaign()
     assert campaign.manifest.metadata["schema"] == (
-        "negfpy.material-nq1-mpi-campaign.v2"
+        "negfpy.material-nq1-mpi-campaign.v3"
     )
     assert all(
-        spec.payload["schema"] == "negfpy.material-nq1-mpi-task.v2"
+        spec.payload["schema"] == "negfpy.material-nq1-mpi-task.v3"
         for spec in campaign.manifest.tasks
     )
     assert len(campaign.scientific_tasks) == 19
@@ -52,6 +52,12 @@ def test_material_mpi_waves_preserve_dependencies_and_fanout() -> None:
     assert campaign.waves[10] == ("bias-positive-full", "bias-negative-full")
     assert task_dependencies(campaign.task("endpoint-zero-start")) == (
         "coupling-g100",
+    )
+    assert campaign.task("coupling-g001").continuation_predictor == (
+        "coupling-square"
+    )
+    assert campaign.task("bias-positive-half").continuation_predictor == (
+        "identity"
     )
 
 

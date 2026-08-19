@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import math
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -18,6 +17,7 @@ import run_material_nq1_release_mpi as mpi_driver
 import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
 from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
+from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
     check_harmonic_embedding_buffer,
@@ -26,7 +26,7 @@ from negfpy.anharmonic._material_nq1_validation import (
 from negfpy.anharmonic._provenance import code_provenance
 
 
-SCHEMA = "negfpy.material-nq1-release-validation.v1"
+SCHEMA = "negfpy.material-nq1-release-validation.v2"
 FIELD_DATASETS = (
     "green/retarded", "green/lesser", "green/greater",
     "sigma_pp/retarded", "sigma_pp/lesser", "sigma_pp/greater",
@@ -37,7 +37,57 @@ class MaterialReleaseValidationError(RuntimeError):
     """The campaign cannot be authenticated or evaluated."""
 
 
-def _load_receipts(root: Path, campaign: Any) -> dict[str, dict[str, Any]]:
+def _strictly_reproduce_continuation(
+    *,
+    recorded_parent: Mapping[str, Any],
+    task: Any,
+    authenticated_parent_scba: Path,
+    child_inputs: tuple[Mapping[str, Any], Any, Any],
+    source_tree_sha256: str,
+    environment_sha256: str,
+) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    child_identity, child_problem, child_config = child_inputs
+    try:
+        derived_initial, derived_parent = case._continuation_initial_state(
+            parent_artifacts=authenticated_parent_scba,
+            identity=child_identity,
+            problem=child_problem,
+            config=child_config,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+            child_coupling_scale=task.coupling_scale,
+            continuation_axis=task.continuation_axis,
+            continuation_predictor=task.continuation_predictor,
+        )
+    except (TypeError, case.SCBACaseError) as error:
+        raise MaterialReleaseValidationError(
+            f"cannot independently reproduce continuation state: {error}"
+        ) from error
+    if derived_parent is None or derived_parent != recorded_parent:
+        raise MaterialReleaseValidationError(
+            "recorded continuation state differs from authenticated parent state"
+        )
+    if derived_initial is None:
+        raise MaterialReleaseValidationError(
+            "authenticated continuation did not produce an initial state"
+        )
+    return (
+        case._validate_continuation_initialization(derived_parent),
+        derived_initial,
+        derived_parent,
+    )
+
+
+def _load_receipts(
+    root: Path,
+    campaign: Any,
+    *,
+    authenticated_inputs: Mapping[
+        str, tuple[Mapping[str, Any], Any, Any]
+    ] | None = None,
+    source_tree_sha256: str | None = None,
+    environment_sha256: str | None = None,
+) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
     for path in sorted(root.glob("waves/*/task-artifacts/*.json")):
         raw = mpi_driver._load_canonical(path, "material task receipt")
@@ -64,25 +114,111 @@ def _load_receipts(root: Path, campaign: Any) -> dict[str, dict[str, Any]]:
             raise MaterialReleaseValidationError(
                 "material task receipt path is not canonical"
             )
+        task = campaign.task(task_id)
+        parent_scba = None
+        child_inputs = None
+        if task.continuation_parent is not None:
+            if (
+                authenticated_inputs is None
+                or task_id not in authenticated_inputs
+                or source_tree_sha256 is None
+                or environment_sha256 is None
+                or task.continuation_parent not in records
+            ):
+                raise MaterialReleaseValidationError(
+                    "continuation receipt lacks authenticated derivation context"
+                )
+            parent_scba = (
+                records[task.continuation_parent]["data"] / "scba"
+            )
+            child_inputs = authenticated_inputs[task_id]
         evidence = mpi_driver._receipt_evidence(
             path,
             spec,
             expected_campaign_manifest_sha256=campaign.manifest.manifest_sha256,
             expected_task_identity_sha256=phase.task_identity_sha256(spec),
+            authenticated_parent_scba=parent_scba,
+            authenticated_child_inputs=child_inputs,
+            expected_source_tree_sha256=source_tree_sha256,
+            expected_environment_sha256=environment_sha256,
         )
         data = path.with_suffix(".data")
         scba = data / "scba"
         outcome = mpi_driver._load_canonical(
             scba / "outcomes/scba.json", "SCBA scientific outcome"
         )
+        scba_manifest = mpi_driver._load_canonical(
+            scba / "campaign-manifest.json", "SCBA campaign manifest"
+        )
         fields = scba / "outcomes/scba-fields.h5"
         if mpi_driver._sha256(fields) != outcome.get("hdf5", {}).get("sha256"):
             raise MaterialReleaseValidationError("SCBA field archive hash changed")
+        try:
+            with h5py.File(fields, "r") as handle:
+                metadata_bytes = bytes(
+                    np.asarray(handle["metadata_json"][...], dtype=np.uint8)
+                )
+            archive_metadata = json.loads(metadata_bytes)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise MaterialReleaseValidationError(
+                "SCBA field archive metadata is invalid"
+            ) from error
+        if (
+            not isinstance(archive_metadata, dict)
+            or metadata_bytes != mpi_driver._canonical(archive_metadata)
+        ):
+            raise MaterialReleaseValidationError(
+                "SCBA field archive metadata is not canonical"
+            )
+        if task.continuation_parent is not None:
+            assert parent_scba is not None
+            assert child_inputs is not None
+            (
+                initialization,
+                independently_derived_state,
+                independently_derived_parent,
+            ) = _strictly_reproduce_continuation(
+                recorded_parent=scba_manifest["continuation_parent"],
+                task=task,
+                authenticated_parent_scba=parent_scba,
+                child_inputs=child_inputs,
+                source_tree_sha256=source_tree_sha256,
+                environment_sha256=environment_sha256,
+            )
+            child_identity, child_problem, child_config = child_inputs
+            child_checkpoint = case.load_scba_checkpoint_v2_self_validating(
+                scba / "checkpoint/sigma-pp.h5"
+            )
+            expected_checkpoint_identity = make_scba_checkpoint_identity_v2(
+                task.task_id,
+                child_problem,
+                child_config,
+                environment_sha256=environment_sha256,
+                initial_sigma_pp=independently_derived_state,
+                source_hashes=case._source_hashes(
+                    child_identity, independently_derived_parent
+                ),
+                source_tree_sha256=source_tree_sha256,
+            )
+            if (
+                child_checkpoint.identity != expected_checkpoint_identity
+                or
+                evidence["continuation_initialization"] != initialization
+                or outcome.get("continuation_parent")
+                != scba_manifest["continuation_parent"]
+                or archive_metadata.get("continuation_parent")
+                != scba_manifest["continuation_parent"]
+            ):
+                raise MaterialReleaseValidationError(
+                    "strict continuation state reproduction disagrees with evidence"
+                )
         records[task_id] = {
             "receipt_path": path,
             "data": data,
             "evidence": evidence,
             "outcome": outcome,
+            "scba_manifest": scba_manifest,
+            "archive_metadata": archive_metadata,
             "fields": fields,
         }
     expected = {task.task_id for task in campaign.scientific_tasks}
@@ -93,6 +229,102 @@ def _load_receipts(root: Path, campaign: Any) -> dict[str, dict[str, Any]]:
             f"campaign receipt set is incomplete (missing={missing}, extra={extra})"
         )
     return records
+
+
+def _continuation_authentication(
+    task: Any,
+    record: Mapping[str, Any],
+    campaign: Any,
+) -> dict[str, Any]:
+    expected_parent_id = task.continuation_parent
+    expected_axis = task.continuation_axis
+    expected_predictor = task.continuation_predictor
+    manifest_parent = record["scba_manifest"].get("continuation_parent")
+    outcome_parent = record["outcome"].get("continuation_parent")
+    archive_parent = record["archive_metadata"].get("continuation_parent")
+    receipt_initialization = record["evidence"].get(
+        "continuation_initialization"
+    )
+    if expected_parent_id is None:
+        checks = {
+            "task_predictor_absent": (
+                expected_axis is None and expected_predictor is None
+            ),
+            "manifest_parent_absent": manifest_parent is None,
+            "outcome_parent_absent": outcome_parent is None,
+            "archive_parent_absent": archive_parent is None,
+            "receipt_initialization_absent": receipt_initialization is None,
+        }
+        return {
+            "parent_task_id": None,
+            "axis": None,
+            "predictor": None,
+            "parent_coupling_scale": None,
+            "child_coupling_scale": task.coupling_scale,
+            "factor": None,
+            "checks": checks,
+            "passed": all(checks.values()),
+        }
+
+    parent_task = campaign.task(expected_parent_id)
+    expected_factor = (
+        1.0
+        if expected_predictor == "identity"
+        else (task.coupling_scale / parent_task.coupling_scale) ** 2
+    )
+    initialization = (
+        manifest_parent.get("initialization")
+        if isinstance(manifest_parent, Mapping)
+        else None
+    )
+    checks = {
+        "manifest_outcome_equal": manifest_parent == outcome_parent,
+        "manifest_archive_equal": manifest_parent == archive_parent,
+        "receipt_initialization_equal": (
+            initialization == receipt_initialization
+        ),
+        "parent_task_id": (
+            isinstance(manifest_parent, Mapping)
+            and manifest_parent.get("run_id") == expected_parent_id
+        ),
+        "axis": (
+            isinstance(manifest_parent, Mapping)
+            and manifest_parent.get("continuation_axis") == expected_axis
+        ),
+        "parent_coupling_scale": (
+            isinstance(manifest_parent, Mapping)
+            and manifest_parent.get("coupling_scale")
+            == parent_task.coupling_scale
+        ),
+        "predictor": (
+            isinstance(initialization, Mapping)
+            and initialization.get("predictor") == expected_predictor
+        ),
+        "initialization_parent_coupling": (
+            isinstance(initialization, Mapping)
+            and initialization.get("parent_coupling_scale")
+            == parent_task.coupling_scale
+        ),
+        "initialization_child_coupling": (
+            isinstance(initialization, Mapping)
+            and initialization.get("child_coupling_scale")
+            == task.coupling_scale
+        ),
+        "factor": (
+            isinstance(initialization, Mapping)
+            and initialization.get("factor") == expected_factor
+        ),
+    }
+    return {
+        "parent_task_id": expected_parent_id,
+        "axis": expected_axis,
+        "predictor": expected_predictor,
+        "parent_coupling_scale": parent_task.coupling_scale,
+        "child_coupling_scale": task.coupling_scale,
+        "factor": expected_factor,
+        "checks": checks,
+        "passed": all(checks.values()),
+    }
 
 
 def _scaled_change(left: float, right: float, floor: float) -> float:
@@ -218,20 +450,15 @@ def _pole_comparison(
 
 def validate(args: argparse.Namespace) -> dict[str, Any]:
     repo = args.repo_root.expanduser().resolve(strict=True)
-    root = args.campaign.expanduser().resolve(strict=True)
+    root = mpi_driver._absolute_nonsymlink_path(
+        args.campaign, label="material release campaign", directory=True
+    )
     source = common._source_identity(repo, args.expected_commit)
     lock = common._validate_lock(args.environment_lock)
     provenance = code_provenance()
     source_tree = provenance.get("source_tree_sha256")
     if not isinstance(source_tree, str) or len(source_tree) != 64:
         raise MaterialReleaseValidationError("source tree SHA256 is unavailable")
-    qualification = mpi_driver._validate_qualification(
-        args.qualification_report,
-        source=source,
-        source_tree_sha256=source_tree,
-        environment_sha256=lock["sha256"],
-    )
-
     base_task = next(
         item for item in silicon_nq1_release_tasks()
         if item.task_id == "coupling-g100"
@@ -242,6 +469,17 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         phase_b_artifacts=args.phase_b_artifacts,
         task=base_task,
     )
+    scientific_input_hashes = mpi_driver._pilot_input_hashes(repo, identity)
+    release_authorization = mpi_driver._validate_release_authorization(
+        repo=repo,
+        qualification_path=args.qualification_report,
+        pilot_audit_path=args.pilot_audit,
+        source=source,
+        source_tree_sha256=source_tree,
+        environment_sha256=lock["sha256"],
+        scientific_input_hashes=scientific_input_hashes,
+    )
+    qualification = release_authorization["qualification"]
     mode_set = build_observation_mode_set(
         problem,
         observation_layers=(4,),
@@ -267,10 +505,19 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         raise MaterialReleaseValidationError(
             "harmonic embedding-buffer preflight changed"
         )
-    input_hashes = case._source_hashes(identity) | {
+    input_hashes = dict(scientific_input_hashes) | {
         "observation_modes": mpi_driver._sha256(modes_path),
         "harmonic_buffer_preflight": mpi_driver._sha256(buffer_path),
         "candidate_qualification": qualification["sha256"],
+        "predictor_pilot_manifest": release_authorization[
+            "pilot_manifest"
+        ]["sha256"],
+        "predictor_pilot_report": release_authorization[
+            "pilot_report"
+        ]["sha256"],
+        "predictor_pilot_audit": release_authorization[
+            "pilot_audit"
+        ]["sha256"],
     }
     campaign = mpi_driver.build_material_nq1_mpi_campaign(
         source_revision=source["commit"],
@@ -284,11 +531,34 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     ).load_task_manifest(manifest_path)
     if loaded_manifest.manifest_sha256 != campaign.manifest.manifest_sha256:
         raise MaterialReleaseValidationError("campaign manifest does not reproduce")
-    records = _load_receipts(root, campaign)
+    authenticated_inputs: dict[str, tuple[Any, Any, Any]] = {
+        base_task.task_id: (identity, problem, _config)
+    }
+    for task in campaign.scientific_tasks:
+        if (
+            task.continuation_parent is not None
+            and task.task_id not in authenticated_inputs
+        ):
+            authenticated_inputs[task.task_id] = (
+                mpi_driver._authenticate_task_inputs(
+                    fixture=args.fixture,
+                    fc3_full=args.fc3_full,
+                    phase_b_artifacts=args.phase_b_artifacts,
+                    task=task,
+                )
+            )
+    records = _load_receipts(
+        root,
+        campaign,
+        authenticated_inputs=authenticated_inputs,
+        source_tree_sha256=source_tree,
+        environment_sha256=lock["sha256"],
+    )
 
     per_run: dict[str, Any] = {}
     poles: dict[str, tuple[dict[str, Any], ...]] = {}
     individual_passed = True
+    predictors_passed = True
     provenance_identities: list[dict[str, Any]] = []
     for task in campaign.scientific_tasks:
         outcome = records[task.task_id]["outcome"]
@@ -296,6 +566,8 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         diagnostics = result.get("diagnostics", {})
         metrics = diagnostics.get("metrics", {})
         metadata = result.get("solver_metadata", {})
+        continuation = _continuation_authentication(task, records[task.task_id], campaign)
+        predictors_passed = predictors_passed and continuation["passed"]
         pole = _pole_records(records[task.task_id]["fields"], mode_set)
         poles[task.task_id] = pole
         current_scale = float(metadata.get("current_scale", float("nan")))
@@ -346,6 +618,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             and metadata.get("hilbert_backend") == "fft"
             and metadata.get("package_version_consistent") is True
             and _material_preflight_passed(outcome.get("preflight_source", {}))
+            and continuation["passed"]
         )
         individual_passed = individual_passed and run_passed
         per_run[task.task_id] = {
@@ -363,6 +636,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "mode_poles": list(pole),
             "provenance": provenance_record,
+            "continuation_initialization": continuation,
             "passed": run_passed,
         }
 
@@ -452,6 +726,11 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "bias_reversal_and_linear_conductance": bias_passed,
         "resolved_observation_modes_nonempty": bool(mode_set.subspaces),
         "harmonic_embedding_buffer": archived_buffer.get("passed") is True,
+        "continuation_predictors_authenticated": predictors_passed,
+        "predictor_pilot_release_authorization": (
+            release_authorization["passed"] is True
+            and release_authorization["identical_controls"] is True
+        ),
         "nq1_scope_only": True,
     }
     release_certified = all(gates.values())
@@ -462,6 +741,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "source_tree_sha256": source_tree,
         "environment_lock": lock,
         "candidate_qualification": qualification,
+        "release_authorization": release_authorization,
         "campaign_manifest_sha256": campaign.manifest.manifest_sha256,
         "observation_modes": archived_modes,
         "harmonic_buffer_preflight": archived_buffer,
@@ -499,11 +779,12 @@ def main() -> int:
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--environment-lock", type=Path, required=True)
     parser.add_argument("--qualification-report", type=Path, required=True)
+    parser.add_argument("--pilot-audit", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         report = validate(args)
-        mpi_driver._atomic_json(args.output.expanduser().resolve(), report)
+        mpi_driver._atomic_json(args.output, report)
     except Exception as error:
         print(
             f"material Nq=1 release validation error: {type(error).__name__}: {error}",

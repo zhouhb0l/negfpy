@@ -15,24 +15,26 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
-import platform
-import resource
+import re
 import sys
 import tempfile
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import numpy as np
-
-import validate_sparse_nq1_phase_c_born as phase_c
 import validate_sparse_nq1_phase_b as phase_b
-from negfpy.anharmonic import SCBAConfig, SignedFrequencyGrid
+import validate_sparse_nq1_phase_c_born as phase_c
+
+from negfpy.anharmonic import KeldyshSpectrum, SCBAConfig, SignedFrequencyGrid
 from negfpy.anharmonic._born_initial import load_born_initial_state
+from negfpy.anharmonic._checkpoint import CheckpointDependencyError
 from negfpy.anharmonic._checkpoint_v2 import (
     checkpoint_initial_sigma_v2,
-    load_scba_checkpoint_v2_self_validating,
     load_scba_checkpoint_v2,
+    load_scba_checkpoint_v2_self_validating,
+    make_scba_checkpoint_identity_v2,
     solve_sparse_scba_checkpointed,
 )
 from negfpy.anharmonic._material_nq1_problem import (
@@ -44,8 +46,6 @@ from negfpy.anharmonic._provenance import (
     problem_input_hashes,
 )
 from negfpy.anharmonic.exceptions import SCBAConvergenceError
-from negfpy.anharmonic._checkpoint import CheckpointDependencyError
-
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-case.v1"
 ARCHIVE_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-fields.v1"
@@ -53,6 +53,11 @@ PREFLIGHT_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-preflight.v1"
 CHECKPOINT_SCHEMA = "negfpy_sparse_material_scba_checkpoint"
 SCBA_RELEASE_CONTRACT = "dense_v0.1"
 MIN_OUTPUT_FREE_BYTES = 2 * 1024**3
+CONTINUATION_INITIALIZATION_SCHEMA = (
+    "negfpy.material-nq1-continuation-initialization.v1"
+)
+CONTINUATION_PREDICTORS = frozenset({"identity", "coupling-square"})
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SCBACaseError(RuntimeError):
@@ -169,6 +174,9 @@ def _source_hashes(
         "phase_b_campaign_manifest": phase_b["campaign_manifest_sha256"],
     }
     if continuation_parent is not None:
+        initialization = _validate_continuation_initialization(
+            continuation_parent
+        )
         result.update({
             "continuation_parent_campaign_manifest": continuation_parent[
                 "campaign_manifest_sha256"
@@ -178,6 +186,9 @@ def _source_hashes(
             ],
             "continuation_parent_report": continuation_parent["report_sha256"],
             "continuation_parent_status": continuation_parent["status_sha256"],
+            "continuation_parent_initialization": initialization[
+                "initialization_sha256"
+            ],
         })
     if born_initial is not None:
         result.update({
@@ -187,6 +198,129 @@ def _source_hashes(
             "born_initial_state": born_initial["initial_state_sha256"],
         })
     return result
+
+
+def _validate_continuation_initialization(
+    continuation_parent: Mapping[str, Any],
+) -> dict[str, Any]:
+    initialization = continuation_parent.get("initialization")
+    expected = {
+        "schema",
+        "predictor",
+        "parent_coupling_scale",
+        "child_coupling_scale",
+        "factor",
+        "untransformed_initial_sigma_sha256",
+        "transformed_consumed_initial_sigma_sha256",
+        "initialization_sha256",
+    }
+    if not isinstance(initialization, Mapping) or set(initialization) != expected:
+        raise SCBACaseError("continuation initialization provenance is incomplete")
+    if initialization.get("schema") != CONTINUATION_INITIALIZATION_SCHEMA:
+        raise SCBACaseError("continuation initialization schema is invalid")
+    predictor = initialization.get("predictor")
+    if predictor not in CONTINUATION_PREDICTORS:
+        raise SCBACaseError("continuation initialization predictor is invalid")
+    numeric: dict[str, float] = {}
+    for name in ("parent_coupling_scale", "child_coupling_scale", "factor"):
+        value = initialization.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise SCBACaseError(
+                f"continuation initialization {name} is invalid"
+            )
+        numeric[name] = float(value)
+    expected_factor = (
+        1.0
+        if predictor == "identity"
+        else (
+            numeric["child_coupling_scale"]
+            / numeric["parent_coupling_scale"]
+        ) ** 2
+    )
+    if numeric["factor"] != expected_factor:
+        raise SCBACaseError("continuation initialization factor is inconsistent")
+    for name in (
+        "untransformed_initial_sigma_sha256",
+        "transformed_consumed_initial_sigma_sha256",
+        "initialization_sha256",
+    ):
+        if (
+            not isinstance(initialization.get(name), str)
+            or _SHA256.fullmatch(str(initialization[name])) is None
+        ):
+            raise SCBACaseError(
+                f"continuation initialization {name} is invalid"
+            )
+    if (
+        predictor == "identity"
+        and initialization["untransformed_initial_sigma_sha256"]
+        != initialization["transformed_consumed_initial_sigma_sha256"]
+    ):
+        raise SCBACaseError("identity continuation changed the consumed state")
+    if (
+        continuation_parent.get("coupling_scale")
+        != numeric["parent_coupling_scale"]
+    ):
+        raise SCBACaseError(
+            "continuation initialization parent coupling is inconsistent"
+        )
+    if (
+        continuation_parent.get("initial_sigma_sha256")
+        != initialization["transformed_consumed_initial_sigma_sha256"]
+    ):
+        raise SCBACaseError(
+            "continuation initialization consumed-state hash is inconsistent"
+        )
+    if (
+        continuation_parent.get("continuation_axis") == "temperature_bias"
+        and predictor != "identity"
+    ):
+        raise SCBACaseError(
+            "temperature-bias continuation requires identity predictor"
+        )
+    payload = {
+        name: initialization[name]
+        for name in expected - {"initialization_sha256"}
+    }
+    if hashlib.sha256(_canonical(payload)).hexdigest() != initialization[
+        "initialization_sha256"
+    ]:
+        raise SCBACaseError("continuation initialization hash is invalid")
+    return dict(initialization)
+
+
+def _continuation_initialization_record(
+    *,
+    predictor: str,
+    parent_coupling_scale: float,
+    child_coupling_scale: float,
+    factor: float,
+    problem: Any,
+    untransformed: KeldyshSpectrum,
+    transformed: KeldyshSpectrum,
+) -> dict[str, Any]:
+    payload = {
+        "schema": CONTINUATION_INITIALIZATION_SCHEMA,
+        "predictor": predictor,
+        "parent_coupling_scale": float(parent_coupling_scale),
+        "child_coupling_scale": float(child_coupling_scale),
+        "factor": float(factor),
+        "untransformed_initial_sigma_sha256": initial_self_energy_hash(
+            problem, untransformed
+        ),
+        "transformed_consumed_initial_sigma_sha256": initial_self_energy_hash(
+            problem, transformed
+        ),
+    }
+    record = payload | {
+        "initialization_sha256": hashlib.sha256(_canonical(payload)).hexdigest()
+    }
+    return record
 
 
 def authenticate_scba_inputs(
@@ -265,6 +399,87 @@ def authenticate_scba_inputs(
     return identity, problem, config
 
 
+def _stable_material_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove only the instantaneous free-memory observation from an identity."""
+
+    stable = _plain(value)
+    if not isinstance(stable, dict):  # pragma: no cover - guarded by the type API
+        raise SCBACaseError("material input identity is not a mapping")
+    memory = stable.get("memory")
+    if memory is not None:
+        if not isinstance(memory, dict) or "available_bytes" not in memory:
+            raise SCBACaseError("material input memory identity is incomplete")
+        available = memory["available_bytes"]
+        if isinstance(available, bool) or not isinstance(available, int) or available <= 0:
+            raise SCBACaseError("material input available-memory observation is invalid")
+        memory["available_bytes"] = "runtime-observation"
+    return stable
+
+
+def _reconstruct_parent_inputs(
+    manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], Any, SCBAConfig]:
+    """Rebuild a parent's exact problem/configuration from its sealed input paths."""
+
+    preflight = manifest.get("preflight")
+    if not isinstance(preflight, Mapping):
+        raise SCBACaseError("continuation parent preflight is missing")
+    source = preflight.get("source")
+    controls = manifest.get("numerical_controls")
+    if not isinstance(source, Mapping) or not isinstance(controls, Mapping):
+        raise SCBACaseError("continuation parent input identity is incomplete")
+
+    def authenticated_path(value: Any, *, label: str) -> Path:
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise SCBACaseError(f"continuation parent {label} path is invalid")
+        path = Path(value).expanduser()
+        if not path.is_absolute() or path.is_symlink():
+            raise SCBACaseError(
+                f"continuation parent {label} path is not canonical"
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as error:
+            raise SCBACaseError(
+                f"continuation parent {label} path is unavailable"
+            ) from error
+        if resolved != path:
+            raise SCBACaseError(
+                f"continuation parent {label} path is not canonical"
+            )
+        return path
+
+    try:
+        fixture_value = source["fixture_path"]
+        fc3_value = source["fc3_full"]["path"]
+        phase_b_value = source["phase_b"]["root"]
+        parent_scale = manifest["coupling_scale"]
+        grid_step = controls["grid_step"]
+        grid_n_positive = controls["grid_n_positive"]
+        eta_lead = controls["eta_lead"]
+        mixing = controls["mixing"]
+        mixing_floor = controls["mixing_floor"]
+        temperature_bias = controls["temperature_bias"]
+    except (KeyError, TypeError) as error:
+        raise SCBACaseError(
+            "continuation parent input paths or controls are incomplete"
+        ) from error
+    return authenticate_scba_inputs(
+        fixture=authenticated_path(fixture_value, label="fixture"),
+        fc3_full=authenticated_path(fc3_value, label="full FC3"),
+        phase_b_artifacts=authenticated_path(
+            phase_b_value, label="Phase-B artifacts"
+        ),
+        coupling_scale=parent_scale,
+        grid_step=grid_step,
+        grid_n_positive=grid_n_positive,
+        eta_lead=eta_lead,
+        mixing=mixing,
+        mixing_floor=mixing_floor,
+        temperature_bias=temperature_bias,
+    )
+
+
 def _continuation_initial_state(
     *,
     parent_artifacts: Path | None,
@@ -275,18 +490,31 @@ def _continuation_initial_state(
     environment_sha256: str,
     child_coupling_scale: float,
     continuation_axis: str | None,
+    continuation_predictor: str | None,
 ) -> tuple[Any | None, dict[str, Any] | None]:
     """Authenticate a completed lower-coupling campaign and load its state."""
 
     if parent_artifacts is None:
-        if continuation_axis is not None:
+        if continuation_axis is not None or continuation_predictor is not None:
             raise SCBACaseError(
-                "continuation_axis requires continuation parent artifacts"
+                "continuation axis and predictor require parent artifacts"
             )
         return None, None
     if continuation_axis not in {"coupling", "temperature_bias"}:
         raise SCBACaseError(
             "a continuation parent requires axis 'coupling' or 'temperature_bias'"
+        )
+    if continuation_predictor not in CONTINUATION_PREDICTORS:
+        raise SCBACaseError(
+            "a continuation parent requires predictor 'identity' or "
+            "'coupling-square'"
+        )
+    if (
+        continuation_axis == "temperature_bias"
+        and continuation_predictor != "identity"
+    ):
+        raise SCBACaseError(
+            "temperature-bias continuation requires identity predictor"
         )
     root = parent_artifacts.expanduser().resolve(strict=True)
     if not root.is_dir():
@@ -314,7 +542,7 @@ def _continuation_initial_state(
     report_sha = _sha256_file(report_path)
     checkpoint_sha_before = _sha256_file(checkpoint_path)
 
-    if manifest.get("schema") != "negfpy.sparse-nq1-phase-c-scba-campaign.v1":
+    if manifest.get("schema") != "negfpy.sparse-nq1-phase-c-scba-campaign.v2":
         raise SCBACaseError("continuation parent campaign schema is invalid")
     if status.get("schema") != "negfpy.sparse-nq1-phase-c-scba-status.v1":
         raise SCBACaseError("continuation parent status schema is invalid")
@@ -356,6 +584,59 @@ def _continuation_initial_state(
     parent_controls = manifest.get("numerical_controls")
     if not isinstance(parent_controls, dict):
         raise SCBACaseError("continuation parent numerical controls are missing")
+    parent_preflight = manifest.get("preflight")
+    if (
+        not isinstance(parent_preflight, Mapping)
+        or parent_preflight.get("schema") != PREFLIGHT_SCHEMA
+    ):
+        raise SCBACaseError("continuation parent preflight is invalid")
+    parent_run_id = manifest.get("run_id")
+    if (
+        not isinstance(parent_run_id, str)
+        or not parent_run_id
+        or parent_preflight.get("run_id") != parent_run_id
+    ):
+        raise SCBACaseError(
+            "continuation parent manifest/preflight run id is inconsistent"
+        )
+    if (
+        parent_preflight.get("coupling_scale") != parent_scale
+        or parent_preflight.get("numerical_controls") != parent_controls
+        or parent_preflight.get("continuation_parent")
+        != manifest.get("continuation_parent")
+        or parent_preflight.get("born_initial") != manifest.get("born_initial")
+    ):
+        raise SCBACaseError(
+            "continuation parent manifest/preflight scientific identity differs"
+        )
+    if (
+        parent_preflight.get("source_tree_sha256")
+        != manifest.get("source_tree_sha256")
+        or parent_preflight.get("environment_sha256")
+        != manifest.get("environment_lock", {}).get("sha256")
+    ):
+        raise SCBACaseError(
+            "continuation parent manifest/preflight source identity differs"
+        )
+    preflight_checkpoint = parent_preflight.get("checkpoint_path")
+    if (
+        not isinstance(preflight_checkpoint, str)
+        or Path(preflight_checkpoint).expanduser().resolve() != checkpoint_path
+    ):
+        raise SCBACaseError(
+            "continuation parent preflight checkpoint path is inconsistent"
+        )
+    manifest_outputs = manifest.get("outputs")
+    preflight_outputs = parent_preflight.get("outputs")
+    if (
+        not isinstance(manifest_outputs, Mapping)
+        or not isinstance(preflight_outputs, Mapping)
+        or preflight_outputs.get("json") != manifest_outputs.get("json")
+        or preflight_outputs.get("hdf5") != manifest_outputs.get("hdf5")
+    ):
+        raise SCBACaseError(
+            "continuation parent manifest/preflight output paths differ"
+        )
     current_controls = {
         "grid_step": float(problem.grid.step),
         "grid_n_positive": int(problem.grid.n_positive),
@@ -402,6 +683,60 @@ def _continuation_initial_state(
         raise SCBACaseError("continuation parent environment hash differs")
 
     try:
+        reconstructed_identity, reconstructed_problem, reconstructed_config = (
+            _reconstruct_parent_inputs(manifest)
+        )
+    except SCBACaseError:
+        raise
+    except Exception as error:
+        raise SCBACaseError(
+            f"continuation parent inputs cannot be reconstructed: {error}"
+        ) from error
+    recorded_source = parent_preflight.get("source")
+    if not isinstance(recorded_source, Mapping) or _stable_material_identity(
+        recorded_source
+    ) != _stable_material_identity(reconstructed_identity):
+        raise SCBACaseError(
+            "continuation parent material input identity does not reproduce"
+        )
+    reconstructed_hashes = problem_input_hashes(reconstructed_problem)
+    reconstructed_configuration = configuration_hash(reconstructed_config)
+    reconstructed_controls = {
+        "grid_step": float(reconstructed_problem.grid.step),
+        "grid_n_positive": int(reconstructed_problem.grid.n_positive),
+        "grid_cutoff": float(reconstructed_problem.grid.cutoff),
+        "eta_lead": float(reconstructed_config.eta_lead),
+        "mixing": float(reconstructed_config.mixing),
+        "mixing_floor": float(reconstructed_config.mixing_floor),
+        "temperature_bias": float(
+            reconstructed_problem.left.temperature
+            - reconstructed_problem.right.temperature
+        ),
+    }
+    if reconstructed_controls != parent_controls:
+        raise SCBACaseError(
+            "continuation parent declared controls do not reconstruct"
+        )
+    if (
+        recorded_source.get("problem_input_hashes") != reconstructed_hashes
+        or parent_preflight.get("configuration_sha256")
+        != reconstructed_configuration
+        or parent_preflight.get("controls") != _plain(reconstructed_config)
+    ):
+        raise SCBACaseError(
+            "continuation parent problem/configuration preflight does not reproduce"
+        )
+    reconstructed_dimensions = {
+        "n_frequency": reconstructed_problem.grid.n_points,
+        "ndof": reconstructed_problem.ndof,
+        "nnz": reconstructed_problem.vertex.nnz,
+    }
+    if parent_preflight.get("dimensions") != reconstructed_dimensions:
+        raise SCBACaseError(
+            "continuation parent problem dimensions do not reproduce"
+        )
+
+    try:
         parent = load_scba_checkpoint_v2_self_validating(checkpoint_path)
     except Exception as error:
         raise SCBACaseError(
@@ -416,20 +751,62 @@ def _continuation_initial_state(
             f"{checkpoint_path} has status {parent.status!r}"
         )
     parent_identity = parent.identity
+    if (
+        parent_identity.run_id != parent_run_id
+        or parent_identity.run_id != parent_preflight.get("run_id")
+    ):
+        raise SCBACaseError(
+            "continuation parent checkpoint run id differs from its manifest/preflight"
+        )
+    if (
+        parent_preflight.get("checkpoint_identity_sha256")
+        != parent_identity.identity_sha256
+    ):
+        raise SCBACaseError(
+            "continuation parent preflight does not bind its checkpoint identity"
+        )
     current_hashes = problem_input_hashes(problem)
     current_sources = _source_hashes(identity)
     if parent_identity.source_tree_sha256 != source_tree_sha256:
         raise SCBACaseError("continuation parent source-tree hash differs")
     if parent_identity.environment_sha256 != environment_sha256:
         raise SCBACaseError("continuation parent environment hash differs")
-    if parent_identity.configuration_sha256 != configuration_hash(config):
-        raise SCBACaseError("continuation parent SCBA configuration differs")
+    if parent_identity.configuration_sha256 != reconstructed_configuration:
+        raise SCBACaseError(
+            "continuation parent reconstructed SCBA configuration differs"
+        )
+    if dict(parent_identity.problem_hashes) != reconstructed_hashes:
+        raise SCBACaseError(
+            "continuation parent reconstructed problem identity differs"
+        )
+    reconstructed_checkpoint_identity = make_scba_checkpoint_identity_v2(
+        parent_run_id,
+        reconstructed_problem,
+        reconstructed_config,
+        environment_sha256=environment_sha256,
+        source_tree_sha256=source_tree_sha256,
+        source_hashes=_source_hashes(
+            reconstructed_identity,
+            parent_preflight.get("continuation_parent"),
+            parent_preflight.get("born_initial"),
+        ),
+    )
+    if dict(parent_identity.source_hashes) != dict(
+        reconstructed_checkpoint_identity.source_hashes
+    ):
+        raise SCBACaseError(
+            "continuation parent reconstructed material/source identity differs"
+        )
     for name, digest in current_sources.items():
-        if parent_identity.source_hashes.get(name) != digest:
+        if reconstructed_checkpoint_identity.source_hashes.get(name) != digest:
             raise SCBACaseError(
                 f"continuation parent material/source hash differs for {name!r}"
             )
-    if parent_identity.grid_sha256 != current_hashes["frequency_grid"]:
+    if parent_identity.grid_sha256 != reconstructed_hashes["frequency_grid"]:
+        raise SCBACaseError(
+            "continuation parent reconstructed frequency grid differs"
+        )
+    if reconstructed_hashes["frequency_grid"] != current_hashes["frequency_grid"]:
         raise SCBACaseError("continuation parent frequency grid differs")
     stable = ["device", "frequency_grid", "solver_scale"]
     if continuation_axis == "coupling":
@@ -445,13 +822,37 @@ def _continuation_initial_state(
             f"continuation parent shape {parent.shape} does not match {expected_shape}"
         )
     try:
-        initial = checkpoint_initial_sigma_v2(parent)
+        untransformed = checkpoint_initial_sigma_v2(parent)
     except CheckpointDependencyError as error:  # defensive; status checked above
         raise SCBACaseError(str(error)) from error
-    return initial, {
+    parent_coupling_scale = float(parent_scale)
+    if continuation_predictor == "identity":
+        factor = 1.0
+        initial = untransformed
+    else:
+        factor = (child_coupling_scale / parent_coupling_scale) ** 2
+        if not math.isfinite(factor) or factor <= 0.0:
+            raise SCBACaseError(
+                "coupling-square continuation factor must be finite and positive"
+            )
+        initial = KeldyshSpectrum(
+            retarded=np.zeros_like(untransformed.retarded),
+            lesser=untransformed.lesser * factor,
+            greater=untransformed.greater * factor,
+        )
+    initialization = _continuation_initialization_record(
+        predictor=continuation_predictor,
+        parent_coupling_scale=parent_coupling_scale,
+        child_coupling_scale=child_coupling_scale,
+        factor=factor,
+        problem=problem,
+        untransformed=untransformed,
+        transformed=initial,
+    )
+    record = {
         "artifacts": str(root),
         "run_id": manifest.get("run_id"),
-        "coupling_scale": float(parent_scale),
+        "coupling_scale": parent_coupling_scale,
         "continuation_axis": continuation_axis,
         "campaign_manifest_sha256": manifest_sha,
         "status_sha256": status_sha,
@@ -459,13 +860,17 @@ def _continuation_initial_state(
         "checkpoint_sha256": checkpoint_sha_after,
         "checkpoint_identity_sha256": parent_identity.identity_sha256,
         "initial_sigma_sha256": initial_self_energy_hash(problem, initial),
+        "initialization": initialization,
     }
+    _validate_continuation_initialization(record)
+    return initial, record
 
 
 def _authenticated_initial_state(
     *,
     continuation_parent_artifacts: Path | None,
     continuation_axis: str | None,
+    continuation_predictor: str | None,
     born_initial_hdf5: Path | None,
     identity: Mapping[str, Any],
     problem: Any,
@@ -479,8 +884,10 @@ def _authenticated_initial_state(
             "continuation and Born initial states are mutually exclusive"
         )
     if born_initial_hdf5 is not None:
-        if continuation_axis is not None:
-            raise SCBACaseError("Born initialization cannot name a continuation axis")
+        if continuation_axis is not None or continuation_predictor is not None:
+            raise SCBACaseError(
+                "Born initialization cannot name a continuation axis or predictor"
+            )
         try:
             initial, born_record = load_born_initial_state(
                 born_initial_hdf5,
@@ -502,6 +909,7 @@ def _authenticated_initial_state(
         environment_sha256=environment_sha256,
         child_coupling_scale=coupling_scale,
         continuation_axis=continuation_axis,
+        continuation_predictor=continuation_predictor,
     )
     return initial, parent, None
 
@@ -556,6 +964,7 @@ def preflight_scba_inputs(
     coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    continuation_predictor: str | None = None,
     born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
@@ -563,10 +972,17 @@ def preflight_scba_inputs(
     mixing: float | None = None,
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
+    allow_existing_outputs: bool = False,
 ) -> dict[str, Any]:
+    if not isinstance(allow_existing_outputs, bool):
+        raise SCBACaseError("allow_existing_outputs must be boolean")
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
-        if path.exists() or path.is_symlink():
+        if path.is_symlink():
+            raise SCBACaseError(f"{label} is a symlink; refusing use")
+        if path.exists() and not allow_existing_outputs:
             raise SCBACaseError(f"{label} already exists; refusing overwrite")
+        if path.exists() and not path.is_file():
+            raise SCBACaseError(f"{label} is not a regular file")
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
@@ -577,6 +993,7 @@ def preflight_scba_inputs(
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
         continuation_axis=continuation_axis,
+        continuation_predictor=continuation_predictor,
         born_initial_hdf5=born_initial_hdf5,
         identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
@@ -638,6 +1055,7 @@ def run_scba_case(
     run_id: str, resume: bool = True, coupling_scale: float = 1.0,
     continuation_parent_artifacts: Path | None = None,
     continuation_axis: str | None = None,
+    continuation_predictor: str | None = None,
     born_initial_hdf5: Path | None = None,
     grid_step: float | None = None,
     grid_n_positive: int | None = None,
@@ -656,6 +1074,7 @@ def run_scba_case(
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
         continuation_axis=continuation_axis,
+        continuation_predictor=continuation_predictor,
         born_initial_hdf5=born_initial_hdf5,
         identity=identity, problem=problem,
         config=config, source_tree_sha256=source_tree_sha256,
@@ -733,6 +1152,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--continuation-axis", choices=("coupling", "temperature_bias")
     )
+    parser.add_argument(
+        "--continuation-predictor", choices=tuple(sorted(CONTINUATION_PREDICTORS))
+    )
     parser.add_argument("--born-initial-hdf5", type=Path)
     parser.add_argument("--grid-step", type=float)
     parser.add_argument("--grid-n-positive", type=int)
@@ -756,6 +1178,7 @@ def main() -> int:
                 run_id=args.run_id, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
                 continuation_axis=args.continuation_axis,
+                continuation_predictor=args.continuation_predictor,
                 born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
@@ -773,6 +1196,7 @@ def main() -> int:
                 run_id=args.run_id, resume=not args.no_resume, coupling_scale=args.coupling_scale,
                 continuation_parent_artifacts=args.continuation_parent_artifacts,
                 continuation_axis=args.continuation_axis,
+                continuation_predictor=args.continuation_predictor,
                 born_initial_hdf5=args.born_initial_hdf5,
                 grid_step=args.grid_step, grid_n_positive=args.grid_n_positive,
                 eta_lead=args.eta_lead, mixing=args.mixing,
