@@ -2600,6 +2600,7 @@ def _canonical_pbs_script(
         f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
         "export PYTHONDONTWRITEBYTECODE=1",
+        "export PYTHONNOUSERSITE=1",
         "export PYTHONHASHSEED=0",
         *(f"export {name}=1" for name in thread_names),
         f"export PYTHONPATH={shlex.quote(repo + '/src:' + repo + '/scripts')}",

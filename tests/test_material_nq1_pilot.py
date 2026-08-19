@@ -996,6 +996,13 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     ).decode("utf-8")
     assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
     assert "#PBS -l walltime=50:00:00\n" in payload
+    isolated_environment = (
+        "export PYTHONDONTWRITEBYTECODE=1\n"
+        "export PYTHONNOUSERSITE=1\n"
+        "export PYTHONHASHSEED=0\n"
+    )
+    assert isolated_environment in payload
+    assert payload.count("export PYTHONNOUSERSITE=1\n") == 1
     assert pilot.PILOT_PBS_NCPUS == 2
     assert pilot.PILOT_PBS_MEMORY == "16gb"
     assert pilot.PILOT_PBS_WALLTIME == "50:00:00"

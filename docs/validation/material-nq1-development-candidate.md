@@ -85,7 +85,9 @@ and qualified execution while preserving the interrupted tree.
 Each one-task pilot PBS allocation is frozen at 2 CPUs, 16 GB, and 50 hours,
 while the child supervisor remains capped at one computational worker, 8 GiB
 resident memory, and 48 hours. This preserves scheduler headroom without
-changing the scientific solver controls.
+changing the scientific solver controls. The byte-authenticated PBS environment
+also disables the Python user site so the qualified staged package set cannot
+be shadowed by account-local packages.
 
 The two completed release-018 results at `g=0.001` and `g=0.01` are comparison
 anchors only. They may be authenticated and compared after the corresponding
