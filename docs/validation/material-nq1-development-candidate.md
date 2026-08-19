@@ -87,7 +87,8 @@ while the child supervisor remains capped at one computational worker, 8 GiB
 resident memory, and 48 hours. This preserves scheduler headroom without
 changing the scientific solver controls. The byte-authenticated PBS environment
 also disables the Python user site so the qualified staged package set cannot
-be shadowed by account-local packages.
+be shadowed by account-local packages. Every task submission is pinned to the
+Aspire project `13004417` and the `normal` queue.
 
 The two completed release-018 results at `g=0.001` and `g=0.01` are comparison
 anchors only. They may be authenticated and compared after the corresponding

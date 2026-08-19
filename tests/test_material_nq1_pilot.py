@@ -994,6 +994,15 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
             "command": ["/python", "/candidate/pilot.py", "run-task"],
         },
     ).decode("utf-8")
+    scheduler_identity = (
+        "#!/bin/bash\n"
+        "#PBS -N nq1p-g0001\n"
+        "#PBS -P 13004417\n"
+        "#PBS -q normal\n"
+    )
+    assert payload.startswith(scheduler_identity)
+    assert payload.count("#PBS -P 13004417\n") == 1
+    assert payload.count("#PBS -q normal\n") == 1
     assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
     assert "#PBS -l walltime=50:00:00\n" in payload
     isolated_environment = (

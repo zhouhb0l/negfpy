@@ -2591,6 +2591,8 @@ def _canonical_pbs_script(
     lines = [
         "#!/bin/bash",
         f"#PBS -N {task['scheduler_job_name']}",
+        "#PBS -P 13004417",
+        "#PBS -q normal",
         f"#PBS -o {stdout_path}",
         f"#PBS -e {stderr_path}",
         (
