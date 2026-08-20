@@ -82,7 +82,9 @@ PILOT_PBS_MEMORY = "16gb"
 PILOT_PBS_WALLTIME = "50:00:00"
 PILOT_PBS_PROJECT = "13004417"
 PILOT_PBS_QUEUE = "normal"
-PILOT_GIT_BIN = Path("/app/apps/git/2.39.2/bin")
+# Aspire2A exposes /app as a symlink; use its canonical lexical path so the
+# fail-closed ancestry checks do not reject the approved scheduler runtime.
+PILOT_GIT_BIN = Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
 PILOT_PYTHON_VERSION = "3.12.13"
 PILOT_DISTRIBUTIONS = MappingProxyType({
     "h5py": "3.16.0",

@@ -1168,7 +1168,7 @@ def test_pilot_is_exact_first_three_release_tasks() -> None:
     }
     assert pilot.PILOT_PBS_PROJECT == "13004417"
     assert pilot.PILOT_PBS_QUEUE == "normal"
-    assert pilot.PILOT_GIT_BIN == Path("/app/apps/git/2.39.2/bin")
+    assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
 
 
 def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
@@ -1207,7 +1207,7 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     for line in (
         "umask 077",
         (
-            "export PATH=/app/apps/git/2.39.2/bin:/staged/python/bin:"
+            "export PATH=/scratch/GPFS/app/apps/git/2.39.2/bin:/staged/python/bin:"
             "/usr/bin:/bin"
         ),
         "export GIT_CONFIG_NOSYSTEM=1",
