@@ -827,6 +827,11 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
             release._canonical(runtime_payload)
         ).hexdigest()
         runtime_environment = dict(environment)
+        # Each staged Python runtime carries its own Open MPI/PRRTE prefix.
+        # Keep the full-suite subprocesses isolated from whichever runtime
+        # happened to launch the qualifier (the 3.10 and 3.12 bundles have
+        # distinct MPI libraries and help-file trees).
+        runtime_environment["OPAL_PREFIX"] = str(executable.parent.parent)
         runtime_environment["NEGFPY_QUALIFICATION_RUNTIME_SHA256"] = runtime_sha
         runtime_environments[label] = runtime_environment
         evidence[f"{label}_runtime"] = runtime_payload | {
