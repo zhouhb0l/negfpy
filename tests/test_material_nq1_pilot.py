@@ -1196,11 +1196,19 @@ def test_pilot_is_exact_first_three_release_tasks() -> None:
     assert pilot.PILOT_PBS_PROJECT == "13004417"
     assert pilot.PILOT_PBS_QUEUE == "normal"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
+    assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
+        "coupling-g0001": "nq1pf-g0001",
+        "coupling-g001": "nq1pf-g001",
+        "coupling-g0025": "nq1pf-g0025",
+    }
+    assert all(
+        len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
+    )
 
 
 def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
     payload = pilot._canonical_pbs_script(
-        task={"scheduler_job_name": "nq1p-g0001"},
+        task={"scheduler_job_name": "nq1pf-g0001"},
         stdout_path=Path("/evidence/task.stdout"),
         stderr_path=Path("/evidence/task.stderr"),
         workload={
@@ -1214,7 +1222,7 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     ).decode("utf-8")
     scheduler_identity = (
         "#!/bin/bash\n"
-        "#PBS -N nq1p-g0001\n"
+        "#PBS -N nq1pf-g0001\n"
         "#PBS -P 13004417\n"
         "#PBS -q normal\n"
     )
@@ -1269,7 +1277,7 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
 def test_canonical_pbs_rejects_unsafe_directive_paths(bad_path: Path) -> None:
     with pytest.raises(pilot.MaterialNQ1PilotError, match="safe absolute PBS path"):
         pilot._canonical_pbs_script(
-            task={"scheduler_job_name": "nq1p-g0001"},
+            task={"scheduler_job_name": "nq1pf-g0001"},
             stdout_path=bad_path,
             stderr_path=Path("/evidence/task.stderr"),
             workload={
