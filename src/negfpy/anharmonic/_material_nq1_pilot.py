@@ -29,7 +29,10 @@ from typing import Any
 import h5py
 import numpy as np
 
-from ._checkpoint_v2 import load_scba_checkpoint_v2_self_validating
+from ._checkpoint_v2 import (
+    load_scba_checkpoint_v2_self_validating,
+    make_scba_checkpoint_identity_v2,
+)
 from ._material_nq1_campaign import (
     MATERIAL_NQ1_ACCEPTANCE,
     MATERIAL_NQ1_EXCLUDED_CLAIMS,
@@ -38,7 +41,13 @@ from ._material_nq1_campaign import (
 )
 from .current import _evaluate_current_report
 from .diagnostics import check_solution
-from .types import AnharmonicResult, DiagnosticReport, KeldyshSpectrum
+from .types import (
+    AnharmonicResult,
+    CubicSCBAProblem,
+    DiagnosticReport,
+    KeldyshSpectrum,
+    SCBAConfig,
+)
 
 PILOT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot.v1"
 PREFLIGHT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-preflight.v1"
@@ -1282,13 +1291,42 @@ def _validate_result_arrays(
         raise MaterialNQ1PilotError("cannot authenticate SCBA result arrays") from error
 
 
+def _complete_checkpoint_source_hashes(
+    *,
+    scba_manifest: Mapping[str, Any],
+    problem: CubicSCBAProblem,
+    config: SCBAConfig,
+    explicit_source_hashes: Mapping[str, str],
+) -> dict[str, str]:
+    """Rebuild the producer's complete explicit and material-derived sources."""
+
+    preflight = scba_manifest.get("preflight")
+    if not isinstance(preflight, Mapping):
+        raise MaterialNQ1PilotError("SCBA preflight is unavailable for provenance")
+    try:
+        reconstructed = make_scba_checkpoint_identity_v2(
+            str(scba_manifest["run_id"]),
+            problem,
+            config,
+            environment_sha256=str(preflight["environment_sha256"]),
+            source_tree_sha256=str(scba_manifest["source_tree_sha256"]),
+            source_hashes=explicit_source_hashes,
+        )
+    except Exception as error:
+        raise MaterialNQ1PilotError(
+            "SCBA complete material/source identity could not be reconstructed"
+        ) from error
+    return dict(reconstructed.source_hashes)
+
+
 def _replay_scientific_diagnostics(
     *,
     scba_manifest: Mapping[str, Any],
     outcome: Mapping[str, Any],
     fields_path: Path,
     checkpoint: Any,
-) -> None:
+    explicit_source_hashes: Mapping[str, str],
+) -> dict[str, str]:
     """Rebuild the exact problem/result and independently rerun diagnostics."""
 
     try:
@@ -1314,6 +1352,12 @@ def _replay_scientific_diagnostics(
             raise MaterialNQ1PilotError(
                 "SCBA problem/configuration does not independently reconstruct"
             )
+        complete_source_hashes = _complete_checkpoint_source_hashes(
+            scba_manifest=scba_manifest,
+            problem=problem,
+            config=config,
+            explicit_source_hashes=explicit_source_hashes,
+        )
         with h5py.File(fields_path, "r") as handle:
             spectra = {
                 name: KeldyshSpectrum(
@@ -1375,6 +1419,7 @@ def _replay_scientific_diagnostics(
         raise MaterialNQ1PilotError(
             "independently replayed scientific diagnostics do not pass or reproduce"
         )
+    return complete_source_hashes
 
 
 def _validate_supervision(
@@ -1954,7 +1999,6 @@ def build_task_receipt(
     }
     if (
         observed_base_inputs != expected_base_inputs
-        or checkpoint_identity.source_hashes != expected_source_hashes
         or status_document.get("campaign_manifest_sha256") != hashes["manifest"]
         or report_document.get("campaign_manifest_sha256") != hashes["manifest"]
         or status_document.get("report_sha256") != hashes["report"]
@@ -2036,12 +2080,17 @@ def build_task_receipt(
         raise MaterialNQ1PilotError("failed task checkpoint is not scientifically terminal")
     _validate_result_arrays(paths["fields"], outcome, checkpoint, task)
     _validate_scientific_result(outcome, checkpoint, task, converged=converged)
-    _replay_scientific_diagnostics(
+    complete_source_hashes = _replay_scientific_diagnostics(
         scba_manifest=scba_manifest,
         outcome=outcome,
         fields_path=paths["fields"],
         checkpoint=checkpoint,
+        explicit_source_hashes=expected_source_hashes,
     )
+    if dict(checkpoint_identity.source_hashes) != complete_source_hashes:
+        raise MaterialNQ1PilotError(
+            "SCBA checkpoint complete material/source identity changed"
+        )
     expected_parent = task["continuation_parent"]
     if expected_parent is None:
         if parent_receipt is not None or scba_manifest.get("continuation_parent") is not None:

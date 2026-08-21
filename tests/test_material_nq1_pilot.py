@@ -11,13 +11,28 @@ import h5py
 import numpy as np
 import pytest
 
+from negfpy.anharmonic import (
+    CubicSCBAProblem,
+    HarmonicReservoir,
+    SCBAConfig,
+    SignedFrequencyGrid,
+)
 from negfpy.anharmonic import _material_nq1_pilot as pilot
 from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
+from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
+from negfpy.anharmonic.toy import pinned_scalar_chain
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import run_material_nq1_predictor_pilot as pilot_runner
+
+_SYNTHETIC_DERIVED_SOURCE_HASHES = {
+    "cubic_vertex_physics": "a" * 64,
+    "cubic_vertex_storage": "b" * 64,
+    "vertex_metadata.phase_b.archive_sha256": "c" * 64,
+    "vertex_metadata.phase_b.campaign_manifest_sha256": "d" * 64,
+}
 
 
 def _qualification(path: Path, anchor_root: Path) -> None:
@@ -848,7 +863,11 @@ def _receipt(
     return path
 
 
-def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mock_checkpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_hash_mutation: str | None = None,
+) -> None:
     def load(path: Path):
         root = Path(path).parents[1]
         outcome = pilot.load_canonical_json(
@@ -865,7 +884,7 @@ def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
             "phase_b_artifact_set": "6" * 64,
             "phase_b_mapped_hdf5": "7" * 64,
             "phase_b_campaign_manifest": "8" * 64,
-        }
+        } | dict(_SYNTHETIC_DERIVED_SOURCE_HASHES)
         sigma = np.ones((3, 2, 2), dtype=np.complex128)
         initial = pilot._explicit_zero_initial_sha256(sigma.shape)
         if continuation is not None:
@@ -882,6 +901,12 @@ def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
                     "initialization_sha256"
                 ],
             })
+        if source_hash_mutation == "missing-derived":
+            sources.pop("cubic_vertex_physics")
+        elif source_hash_mutation == "altered-derived":
+            sources["cubic_vertex_storage"] = "f" * 64
+        elif source_hash_mutation == "extra-derived":
+            sources["vertex_metadata.unexpected.source_sha256"] = "f" * 64
         identity = SimpleNamespace(
             identity_sha256=pilot.sha256_bytes(task_id.encode("ascii")),
             run_id=task_id,
@@ -926,7 +951,9 @@ def _mock_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pilot,
         "_replay_scientific_diagnostics",
-        lambda **_kwargs: None,
+        lambda *, explicit_source_hashes, **_kwargs: (
+            dict(explicit_source_hashes) | dict(_SYNTHETIC_DERIVED_SOURCE_HASHES)
+        ),
     )
     monkeypatch.setattr(
         pilot,
@@ -1396,6 +1423,60 @@ def test_streamed_six_field_comparison_is_strict(
     assert not pilot.compare_fields(first, second)["passed"]
 
 
+def test_complete_checkpoint_sources_reconstruct_material_derived_hashes() -> None:
+    device, lead, _dense = pinned_scalar_chain(1, pinning=1.0, cubic=0.2)
+    vertex = SparseCubicVertex(
+        ndof=1,
+        indices=np.asarray([[0, 0, 0]], dtype=np.int64),
+        coefficients=np.asarray([0.2], dtype=np.float64),
+        metadata={
+            "material": {"source_sha256": "a" * 64},
+            "phase_b": {"archive_sha256": "b" * 64},
+        },
+    )
+    problem = CubicSCBAProblem(
+        device=device,
+        left=HarmonicReservoir(lead, 0.8),
+        right=HarmonicReservoir(lead, 0.6),
+        vertex=vertex,
+        grid=SignedFrequencyGrid(step=0.2, n_positive=5),
+    )
+    config = SCBAConfig(
+        eta_lead=0.025,
+        max_iterations=800,
+        min_iterations=3,
+        consecutive_passes=3,
+    )
+    explicit = {
+        "phase_a_fixture": "4" * 64,
+        "raw_fc3": "5" * 64,
+        "phase_b_artifact_set": "6" * 64,
+        "phase_b_mapped_hdf5": "7" * 64,
+        "phase_b_campaign_manifest": "8" * 64,
+    }
+    complete = pilot._complete_checkpoint_source_hashes(
+        scba_manifest={
+            "run_id": "coupling-g0001",
+            "source_tree_sha256": "2" * 64,
+            "preflight": {"environment_sha256": "3" * 64},
+        },
+        problem=problem,
+        config=config,
+        explicit_source_hashes=explicit,
+    )
+
+    expected_derived = {
+        "cubic_vertex_physics": vertex.cubic_physics_sha256,
+        "cubic_vertex_storage": vertex.vertex_storage_sha256,
+        "vertex_metadata.material.source_sha256": "a" * 64,
+        "vertex_metadata.phase_b.archive_sha256": "b" * 64,
+        "vertex_metadata.permutation_symmetry.cubic_physics_sha256": (
+            vertex.cubic_physics_sha256
+        ),
+    }
+    assert complete == explicit | expected_derived
+
+
 def test_receipts_bind_parent_predictor_and_complete_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1426,6 +1507,34 @@ def test_receipts_bind_parent_predictor_and_complete_tree(
         stream.write(b"mutation")
     with pytest.raises(pilot.MaterialNQ1PilotError, match="bindings|reproduce|tree"):
         pilot.validate_task_receipt(manifest, child)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing-derived", "altered-derived", "extra-derived"),
+)
+def test_receipt_requires_exact_complete_checkpoint_source_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    _mock_checkpoints(monkeypatch, source_hash_mutation=mutation)
+    manifest, _manifest_path, _qualification_path = _manifest(tmp_path)
+    task = pilot.predictor_pilot_tasks()[0]
+    scba_root = tmp_path / "tasks" / task.task_id / "scba"
+    _scba_tree(scba_root, task)
+
+    with pytest.raises(
+        pilot.MaterialNQ1PilotError,
+        match="complete material/source identity changed",
+    ):
+        pilot.build_task_receipt(
+            manifest=manifest,
+            task_id=task.task_id,
+            scba_root=scba_root,
+            parent_receipt=None,
+        )
 
 
 @pytest.mark.parametrize(

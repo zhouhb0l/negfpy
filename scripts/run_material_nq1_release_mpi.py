@@ -839,6 +839,120 @@ def _independently_authenticate_continuation(
     )
 
 
+def _reconstruct_task_checkpoint_identity(
+    *,
+    scientific_task: Mapping[str, Any],
+    scba_manifest: Mapping[str, Any],
+    task_data: Path,
+    authenticated_task_inputs: tuple[Mapping[str, Any], Any, Any],
+    authenticated_parent_scba: Path | None,
+    source_tree_sha256: str,
+    environment_sha256: str,
+) -> tuple[Any, dict[str, Any] | None, dict[str, Any] | None]:
+    """Rebuild one checkpoint identity for zero, continuation, or Born start."""
+
+    identity, problem, config = authenticated_task_inputs
+    task_id = scientific_task.get("task_id")
+    initialization_mode = scientific_task.get("initialization")
+    continuation_parent = scientific_task.get("continuation_parent")
+    continuation_axis = scientific_task.get("continuation_axis")
+    continuation_predictor = scientific_task.get("continuation_predictor")
+    recorded_parent = scba_manifest.get("continuation_parent")
+    recorded_born = scba_manifest.get("born_initial")
+    initial_state = None
+    derived_parent = None
+    derived_born = None
+    continuation_initialization = None
+
+    if initialization_mode == "continuation":
+        if continuation_parent is None or authenticated_parent_scba is None:
+            raise MaterialCampaignError(
+                "continuation checkpoint lacks its authenticated parent"
+            )
+        if recorded_born is not None:
+            raise MaterialCampaignError(
+                "continuation checkpoint unexpectedly names a Born state"
+            )
+        if not isinstance(recorded_parent, Mapping):
+            raise MaterialCampaignError(
+                "continuation checkpoint lacks recorded parent provenance"
+            )
+        (
+            continuation_initialization,
+            initial_state,
+            derived_parent,
+        ) = _independently_authenticate_continuation(
+            recorded_parent=recorded_parent,
+            scientific_task=scientific_task,
+            authenticated_parent_scba=authenticated_parent_scba,
+            child_identity=identity,
+            child_problem=problem,
+            child_config=config,
+            source_tree_sha256=source_tree_sha256,
+            environment_sha256=environment_sha256,
+        )
+    elif initialization_mode == "born":
+        born_path = task_data / "born-initial.h5"
+        if (
+            continuation_parent is not None
+            or continuation_axis is not None
+            or continuation_predictor is not None
+            or authenticated_parent_scba is not None
+            or recorded_parent is not None
+            or not isinstance(recorded_born, Mapping)
+            or recorded_born.get("path") != os.fspath(born_path.resolve())
+        ):
+            raise MaterialCampaignError("Born checkpoint initialization changed")
+        try:
+            initial_state, derived_born = load_born_initial_state(
+                born_path,
+                problem,
+                config,
+                source_tree_sha256=source_tree_sha256,
+                environment_sha256=environment_sha256,
+                source_hashes=case._source_hashes(identity),
+            )
+        except Exception as error:
+            raise MaterialCampaignError(
+                f"cannot independently authenticate Born state: {error}"
+            ) from error
+        if derived_born != recorded_born:
+            raise MaterialCampaignError(
+                "recorded Born state differs from authenticated file"
+            )
+    elif initialization_mode == "zero":
+        if (
+            continuation_parent is not None
+            or continuation_axis is not None
+            or continuation_predictor is not None
+            or authenticated_parent_scba is not None
+            or recorded_parent is not None
+            or recorded_born is not None
+            or (task_data / "born-initial.h5").exists()
+        ):
+            raise MaterialCampaignError("zero checkpoint initialization changed")
+    else:
+        raise MaterialCampaignError("material task initialization mode is unsupported")
+
+    try:
+        expected_identity = make_scba_checkpoint_identity_v2(
+            str(task_id),
+            problem,
+            config,
+            environment_sha256=environment_sha256,
+            initial_sigma_pp=initial_state,
+            source_hashes=case._source_hashes(
+                identity, derived_parent, derived_born
+            ),
+            source_tree_sha256=source_tree_sha256,
+        )
+    except Exception as error:
+        raise MaterialCampaignError(
+            f"cannot reconstruct complete checkpoint identity: {error}"
+        ) from error
+    return expected_identity, continuation_initialization, derived_born
+
+
 def _receipt_evidence(
     path: Path,
     spec: Any,
@@ -984,66 +1098,46 @@ def _receipt_evidence(
         raise MaterialCampaignError(
             "material task continuation initialization changed"
         )
-    if initialization is not None:
-        if (
-            authenticated_parent_scba is None
-            or authenticated_child_inputs is None
-            or expected_source_tree_sha256 is None
-            or expected_environment_sha256 is None
-        ):
-            raise MaterialCampaignError(
-                "continuation receipt lacks authenticated derivation context"
-            )
-        child_identity, child_problem, child_config = authenticated_child_inputs
-        (
-            independently_derived,
-            independently_derived_state,
-            independently_derived_parent,
-        ) = _independently_authenticate_continuation(
-            recorded_parent=scba_manifest["continuation_parent"],
-            scientific_task=scientific_payload,
-            authenticated_parent_scba=authenticated_parent_scba,
-            child_identity=child_identity,
-            child_problem=child_problem,
-            child_config=child_config,
-            source_tree_sha256=expected_source_tree_sha256,
-            environment_sha256=expected_environment_sha256,
+    if (
+        authenticated_child_inputs is None
+        or expected_source_tree_sha256 is None
+        or expected_environment_sha256 is None
+    ):
+        raise MaterialCampaignError(
+            "material receipt lacks authenticated checkpoint context"
         )
-        if independently_derived != initialization:
-            raise MaterialCampaignError(
-                "continuation receipt state was not independently reproduced"
-            )
-        try:
-            terminal_checkpoint = case.load_scba_checkpoint_v2_self_validating(
-                checkpoint
-            )
-        except Exception as error:
-            raise MaterialCampaignError(
-                f"material task checkpoint is invalid: {error}"
-            ) from error
-        expected_checkpoint_identity = make_scba_checkpoint_identity_v2(
-            spec.task_id,
-            child_problem,
-            child_config,
-            environment_sha256=expected_environment_sha256,
-            initial_sigma_pp=independently_derived_state,
-            source_hashes=case._source_hashes(
-                child_identity, independently_derived_parent
-            ),
-            source_tree_sha256=expected_source_tree_sha256,
+    (
+        expected_checkpoint_identity,
+        independently_derived_initialization,
+        independently_derived_born,
+    ) = _reconstruct_task_checkpoint_identity(
+        scientific_task=scientific_payload,
+        scba_manifest=scba_manifest,
+        task_data=data,
+        authenticated_task_inputs=authenticated_child_inputs,
+        authenticated_parent_scba=authenticated_parent_scba,
+        source_tree_sha256=expected_source_tree_sha256,
+        environment_sha256=expected_environment_sha256,
+    )
+    if (
+        independently_derived_initialization != initialization
+        or independently_derived_born != receipt["born_initial"]
+    ):
+        raise MaterialCampaignError(
+            "material receipt initialization was not independently reproduced"
         )
-        if (
-            terminal_checkpoint.identity != expected_checkpoint_identity
-            or
-            terminal_checkpoint.identity.source_hashes.get(
-                "continuation_parent_initialization"
-            ) != initialization["initialization_sha256"]
-            or terminal_checkpoint.identity.initial_state_sha256
-            != initialization["transformed_consumed_initial_sigma_sha256"]
-        ):
-            raise MaterialCampaignError(
-                "checkpoint identity does not bind continuation initialization"
-            )
+    try:
+        terminal_checkpoint = case.load_scba_checkpoint_v2_self_validating(
+            checkpoint
+        )
+    except Exception as error:
+        raise MaterialCampaignError(
+            f"material task checkpoint is invalid: {error}"
+        ) from error
+    if terminal_checkpoint.identity != expected_checkpoint_identity:
+        raise MaterialCampaignError(
+            "material checkpoint complete identity did not reproduce"
+        )
     converged = bool(report.get("scba_converged"))
     if bool(status.get("scba_converged")) != converged:
         raise MaterialCampaignError("SCBA convergence flags disagree")
@@ -1057,6 +1151,8 @@ def _receipt_evidence(
         "scientific_task_sha256": receipt["scientific_task_sha256"],
         "scba_campaign_manifest_sha256": scba_manifest_sha,
         "continuation_initialization": initialization,
+        "born_initial": independently_derived_born,
+        "checkpoint_identity_sha256": expected_checkpoint_identity.identity_sha256,
     }
 
 
@@ -1280,7 +1376,7 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             "negfpy.anharmonic._material_nq1_mpi"
         )._phase_manifest(campaign, campaign.wave_index(spec.task_id))
         parent_scba = None
-        child_inputs = None
+        authenticated_task_inputs = task_inputs(scientific)
         if scientific.continuation_parent is not None:
             dependency_receipts = importlib.import_module(
                 "negfpy.anharmonic._material_nq1_mpi"
@@ -1293,14 +1389,13 @@ def run(args: argparse.Namespace, communicator: Any) -> int:
             parent_scba = _dependency_scba_directory(
                 dependency_receipts[scientific.continuation_parent]
             )
-            child_inputs = task_inputs(scientific)
         return _receipt_evidence(
             path,
             spec,
             expected_campaign_manifest_sha256=campaign.manifest.manifest_sha256,
             expected_task_identity_sha256=phase.task_identity_sha256(spec),
             authenticated_parent_scba=parent_scba,
-            authenticated_child_inputs=child_inputs,
+            authenticated_child_inputs=authenticated_task_inputs,
             expected_source_tree_sha256=source_tree,
             expected_environment_sha256=lock["sha256"],
             expected_python312_runtime=qualification["python312_runtime"],

@@ -17,7 +17,6 @@ import run_material_nq1_release_mpi as mpi_driver
 import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
 
-from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
 from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
 from negfpy.anharmonic._material_nq1_validation import (
     build_observation_mode_set,
@@ -117,14 +116,19 @@ def _load_receipts(
             )
         task = campaign.task(task_id)
         parent_scba = None
-        child_inputs = None
+        if (
+            authenticated_inputs is None
+            or task_id not in authenticated_inputs
+            or source_tree_sha256 is None
+            or environment_sha256 is None
+        ):
+            raise MaterialReleaseValidationError(
+                "receipt lacks authenticated checkpoint reconstruction context"
+            )
+        task_inputs = authenticated_inputs[task_id]
         if task.continuation_parent is not None:
             if (
-                authenticated_inputs is None
-                or task_id not in authenticated_inputs
-                or source_tree_sha256 is None
-                or environment_sha256 is None
-                or task.continuation_parent not in records
+                task.continuation_parent not in records
             ):
                 raise MaterialReleaseValidationError(
                     "continuation receipt lacks authenticated derivation context"
@@ -132,14 +136,13 @@ def _load_receipts(
             parent_scba = (
                 records[task.continuation_parent]["data"] / "scba"
             )
-            child_inputs = authenticated_inputs[task_id]
         evidence = mpi_driver._receipt_evidence(
             path,
             spec,
             expected_campaign_manifest_sha256=campaign.manifest.manifest_sha256,
             expected_task_identity_sha256=phase.task_identity_sha256(spec),
             authenticated_parent_scba=parent_scba,
-            authenticated_child_inputs=child_inputs,
+            authenticated_child_inputs=task_inputs,
             expected_source_tree_sha256=source_tree_sha256,
             expected_environment_sha256=environment_sha256,
             expected_python312_runtime=python312_runtime,
@@ -172,48 +175,19 @@ def _load_receipts(
             raise MaterialReleaseValidationError(
                 "SCBA field archive metadata is not canonical"
             )
-        if task.continuation_parent is not None:
-            assert parent_scba is not None
-            assert child_inputs is not None
-            (
-                initialization,
-                independently_derived_state,
-                independently_derived_parent,
-            ) = _strictly_reproduce_continuation(
-                recorded_parent=scba_manifest["continuation_parent"],
-                task=task,
-                authenticated_parent_scba=parent_scba,
-                child_inputs=child_inputs,
-                source_tree_sha256=source_tree_sha256,
-                environment_sha256=environment_sha256,
+        if (
+            outcome.get("continuation_parent")
+            != scba_manifest.get("continuation_parent")
+            or archive_metadata.get("continuation_parent")
+            != scba_manifest.get("continuation_parent")
+            or outcome.get("born_initial") != scba_manifest.get("born_initial")
+            or archive_metadata.get("born_initial")
+            != scba_manifest.get("born_initial")
+            or evidence["born_initial"] != scba_manifest.get("born_initial")
+        ):
+            raise MaterialReleaseValidationError(
+                "strict reconstructed initialization disagrees with evidence"
             )
-            child_identity, child_problem, child_config = child_inputs
-            child_checkpoint = case.load_scba_checkpoint_v2_self_validating(
-                scba / "checkpoint/sigma-pp.h5"
-            )
-            expected_checkpoint_identity = make_scba_checkpoint_identity_v2(
-                task.task_id,
-                child_problem,
-                child_config,
-                environment_sha256=environment_sha256,
-                initial_sigma_pp=independently_derived_state,
-                source_hashes=case._source_hashes(
-                    child_identity, independently_derived_parent
-                ),
-                source_tree_sha256=source_tree_sha256,
-            )
-            if (
-                child_checkpoint.identity != expected_checkpoint_identity
-                or
-                evidence["continuation_initialization"] != initialization
-                or outcome.get("continuation_parent")
-                != scba_manifest["continuation_parent"]
-                or archive_metadata.get("continuation_parent")
-                != scba_manifest["continuation_parent"]
-            ):
-                raise MaterialReleaseValidationError(
-                    "strict continuation state reproduction disagrees with evidence"
-                )
         records[task_id] = {
             "receipt_path": path,
             "data": data,
@@ -529,10 +503,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         base_task.task_id: (identity, problem, _config)
     }
     for task in campaign.scientific_tasks:
-        if (
-            task.continuation_parent is not None
-            and task.task_id not in authenticated_inputs
-        ):
+        if task.task_id not in authenticated_inputs:
             authenticated_inputs[task.task_id] = (
                 mpi_driver._authenticate_task_inputs(
                     fixture=args.fixture,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import importlib
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -50,6 +50,50 @@ def test_strict_receipt_loader_rejects_correct_name_in_wrong_wave(
         match="path is not canonical",
     ):
         validation._load_receipts(tmp_path, campaign)
+
+
+@pytest.mark.parametrize("task_id", ("coupling-g0001", "endpoint-born-start"))
+def test_strict_receipt_loader_requires_authenticated_inputs_for_all_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task_id: str,
+) -> None:
+    campaign = _campaign()
+    spec = campaign.manifest.task(task_id)
+    wave_index = campaign.wave_index(task_id)
+    phase = _phase_manifest(campaign, wave_index)
+    name = (
+        f"{phase.ordinal(spec):06d}-"
+        f"{phase.task_identity_sha256(spec)[:16]}.json"
+    )
+    receipt = tmp_path / "waves" / f"{wave_index:03d}" / "task-artifacts" / name
+    receipt.parent.mkdir(parents=True)
+    receipt.write_bytes(validation.mpi_driver._canonical({"task_id": task_id}))
+    authenticated = ({"task_id": task_id}, object(), object())
+    captured: dict[str, object] = {}
+
+    def stop_after_context(_path: Path, _spec: object, **kwargs: object):
+        captured.update(kwargs)
+        raise validation.mpi_driver.MaterialCampaignError("context captured")
+
+    monkeypatch.setattr(
+        validation.mpi_driver, "_receipt_evidence", stop_after_context
+    )
+    with pytest.raises(
+        validation.mpi_driver.MaterialCampaignError,
+        match="context captured",
+    ):
+        validation._load_receipts(
+            tmp_path,
+            campaign,
+            authenticated_inputs={task_id: authenticated},
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
+    assert captured["authenticated_child_inputs"] is authenticated
+    assert captured["expected_source_tree_sha256"] == "a" * 64
+    assert captured["expected_environment_sha256"] == "b" * 64
+    assert captured["authenticated_parent_scba"] is None
 
 
 def _fields(path: Path, perturbation: float = 0.0) -> None:

@@ -5,21 +5,146 @@ import importlib
 import inspect
 import sys
 import textwrap
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from negfpy.anharmonic import (
+    CubicSCBAProblem,
+    HarmonicReservoir,
+    SCBAConfig,
+    SignedFrequencyGrid,
+)
 from negfpy.anharmonic._material_nq1_mpi import (
     build_material_nq1_mpi_campaign,
 )
 from negfpy.anharmonic._mpi_tasks import TaskSpec
+from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
+from negfpy.anharmonic.toy import pinned_scalar_chain
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 driver = importlib.import_module("run_material_nq1_release_mpi")
+_REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY = (
+    driver._reconstruct_task_checkpoint_identity
+)
+_REAL_LOAD_CHECKPOINT = driver.case.load_scba_checkpoint_v2_self_validating
+
+
+_COMPLETE_SOURCE_HASHES = {
+    "phase_a_fixture": "1" * 64,
+    "raw_fc3": "2" * 64,
+    "phase_b_artifact_set": "3" * 64,
+    "phase_b_mapped_hdf5": "4" * 64,
+    "phase_b_campaign_manifest": "5" * 64,
+    "cubic_vertex_physics": "6" * 64,
+    "cubic_vertex_storage": "7" * 64,
+    "vertex_metadata.phase_b.archive_sha256": "8" * 64,
+}
+
+
+def _checkpoint_identity(task_id: str, **changes: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "run_id": task_id,
+        "identity_sha256": "d" * 64,
+        "source_hashes": dict(_COMPLETE_SOURCE_HASHES),
+        "initial_state_sha256": "9" * 64,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _checkpoint_identity_from_manifest(
+    manifest: Mapping[str, object],
+) -> SimpleNamespace:
+    source_hashes = dict(_COMPLETE_SOURCE_HASHES)
+    initial_state_sha256 = "9" * 64
+    born = manifest.get("born_initial")
+    if isinstance(born, Mapping):
+        source_hashes.update({
+            "born_initial_file": born["file_sha256"],
+            "born_initial_identity": born["identity_sha256"],
+            "born_initial_manifest": born["manifest_sha256"],
+            "born_initial_state": born["initial_state_sha256"],
+        })
+        initial_state_sha256 = str(born["initial_state_sha256"])
+    return _checkpoint_identity(
+        str(manifest["run_id"]),
+        source_hashes=source_hashes,
+        initial_state_sha256=initial_state_sha256,
+    )
+
+
+def _small_authenticated_inputs():
+    device, lead, _dense = pinned_scalar_chain(1, pinning=1.0, cubic=0.2)
+    vertex = SparseCubicVertex(
+        ndof=1,
+        indices=np.asarray([[0, 0, 0]], dtype=np.int64),
+        coefficients=np.asarray([0.2], dtype=np.float64),
+        metadata={"phase_b": {"archive_sha256": "8" * 64}},
+    )
+    problem = CubicSCBAProblem(
+        device=device,
+        left=HarmonicReservoir(lead, 0.8),
+        right=HarmonicReservoir(lead, 0.6),
+        vertex=vertex,
+        grid=SignedFrequencyGrid(step=0.2, n_positive=5),
+    )
+    config = SCBAConfig(
+        eta_lead=0.025,
+        max_iterations=800,
+        min_iterations=3,
+        consecutive_passes=3,
+    )
+    material_identity = {
+        "fixture": {"fixture_manifest_sha256": "1" * 64},
+        "fc3_full": {"raw_sha256": "2" * 64},
+        "phase_b": {
+            "artifact_set_sha256": "3" * 64,
+            "archive": {"sha256": "4" * 64},
+            "campaign_manifest_sha256": "5" * 64,
+        },
+    }
+    return material_identity, problem, config
+
+
+@pytest.fixture(autouse=True)
+def _bounded_checkpoint_identity_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reconstruct(**kwargs: object):
+        scientific = kwargs["scientific_task"]
+        manifest = kwargs["scba_manifest"]
+        assert isinstance(scientific, Mapping)
+        assert isinstance(manifest, Mapping)
+        initialization = manifest.get("continuation_parent")
+        continuation = (
+            None
+            if initialization is None
+            else initialization.get("initialization")
+        )
+        return (
+            _checkpoint_identity_from_manifest(manifest),
+            continuation,
+            manifest.get("born_initial"),
+        )
+
+    def load(path: Path):
+        manifest = driver._load_canonical(
+            Path(path).parents[1] / "campaign-manifest.json",
+            "test SCBA manifest",
+        )
+        return SimpleNamespace(identity=_checkpoint_identity_from_manifest(manifest))
+
+    monkeypatch.setattr(driver, "_reconstruct_task_checkpoint_identity", reconstruct)
+    monkeypatch.setattr(
+        driver.case, "load_scba_checkpoint_v2_self_validating", load
+    )
 
 
 def _write(path: Path, value: dict[str, object]) -> None:
@@ -27,14 +152,14 @@ def _write(path: Path, value: dict[str, object]) -> None:
     path.write_bytes(driver._canonical(value))
 
 
-def _fixture(tmp_path: Path):
+def _fixture(tmp_path: Path, *, task_id: str = "coupling-g0001"):
     campaign = build_material_nq1_mpi_campaign(
         source_revision="candidate",
         source_tree_sha256="a" * 64,
         environment_sha256="b" * 64,
         input_hashes={"fc2": "c" * 64, "fc3": "d" * 64},
     )
-    scientific = campaign.task("coupling-g0001")
+    scientific = campaign.task(task_id)
     spec = campaign.manifest.task(scientific.task_id)
     phase_module = importlib.import_module("negfpy.anharmonic._material_nq1_mpi")
     phase = phase_module._phase_manifest(
@@ -47,6 +172,17 @@ def _fixture(tmp_path: Path):
     checkpoint = scba / "checkpoint" / "sigma-pp.h5"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"authenticated checkpoint fixture\n")
+    born_record = None
+    if scientific.initialization == "born":
+        born_path = data / "born-initial.h5"
+        born_path.write_bytes(b"authenticated Born fixture\n")
+        born_record = {
+            "path": str(born_path.resolve()),
+            "file_sha256": driver._sha256(born_path),
+            "identity_sha256": "a" * 64,
+            "manifest_sha256": "b" * 64,
+            "initial_state_sha256": "c" * 64,
+        }
     controls = {
         "grid_step": scientific.grid_step,
         "grid_n_positive": scientific.grid_n_positive,
@@ -63,6 +199,7 @@ def _fixture(tmp_path: Path):
         "continuation_parent": None,
         "continuation_axis": None,
         "continuation_predictor": None,
+        "born_initial": born_record,
         "preflight": {"continuation_parent": None},
         "numerical_controls": controls,
         "watchdog": {"automatic_retry": False},
@@ -111,7 +248,7 @@ def _fixture(tmp_path: Path):
         "scba_status_sha256": driver._sha256(scba / "status.json"),
         "scba_report_sha256": driver._sha256(scba / "scba-report.json"),
         "checkpoint_sha256": driver._sha256(checkpoint),
-        "born_initial": None,
+        "born_initial": born_record,
         "continuation_parent_task_id": None,
         "continuation_initialization": None,
         "release_certified": False,
@@ -120,15 +257,299 @@ def _fixture(tmp_path: Path):
     bindings = {
         "expected_campaign_manifest_sha256": campaign.manifest.manifest_sha256,
         "expected_task_identity_sha256": task_identity,
+        "authenticated_child_inputs": ({"authenticated": True}, object(), object()),
+        "expected_source_tree_sha256": "a" * 64,
+        "expected_environment_sha256": "b" * 64,
     }
     return receipt_path, spec, scba, checkpoint, bindings
 
 
-def test_material_receipt_authenticates_entire_terminal_tree(tmp_path: Path) -> None:
-    receipt, spec, _scba, _checkpoint, bindings = _fixture(tmp_path)
+@pytest.mark.parametrize("task_id", ("coupling-g0001", "endpoint-born-start"))
+def test_material_receipt_authenticates_entire_terminal_tree(
+    tmp_path: Path, task_id: str,
+) -> None:
+    receipt, spec, _scba, _checkpoint, bindings = _fixture(
+        tmp_path, task_id=task_id
+    )
     evidence = driver._receipt_evidence(receipt, spec, **bindings)
-    assert evidence["task_id"] == "coupling-g0001"
+    assert evidence["task_id"] == task_id
     assert evidence["state"] == "passed"
+
+
+@pytest.mark.parametrize("task_id", ("coupling-g0001", "endpoint-born-start"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-derived",
+        "altered-derived",
+        "extra-derived",
+        "altered-explicit",
+        "altered-initial-state",
+    ),
+)
+def test_material_receipt_rejects_inexact_complete_checkpoint_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task_id: str,
+    mutation: str,
+) -> None:
+    receipt, spec, _scba, _checkpoint, bindings = _fixture(
+        tmp_path, task_id=task_id
+    )
+    manifest = driver._load_canonical(
+        _scba / "campaign-manifest.json", "test SCBA manifest"
+    )
+    expected = _checkpoint_identity_from_manifest(manifest)
+    source_hashes = dict(expected.source_hashes)
+    initial_state_sha256 = expected.initial_state_sha256
+    if mutation == "missing-derived":
+        source_hashes.pop("cubic_vertex_physics")
+    elif mutation == "altered-derived":
+        source_hashes["cubic_vertex_storage"] = "f" * 64
+    elif mutation == "extra-derived":
+        source_hashes["vertex_metadata.unexpected.source_sha256"] = "f" * 64
+    elif mutation == "altered-explicit":
+        source_hashes["phase_a_fixture"] = "f" * 64
+    else:
+        initial_state_sha256 = "f" * 64
+    observed = _checkpoint_identity(
+        task_id,
+        source_hashes=source_hashes,
+        initial_state_sha256=initial_state_sha256,
+    )
+    monkeypatch.setattr(
+        driver.case,
+        "load_scba_checkpoint_v2_self_validating",
+        lambda _path: SimpleNamespace(identity=observed),
+    )
+
+    with pytest.raises(
+        driver.MaterialCampaignError,
+        match="complete identity did not reproduce",
+    ):
+        driver._receipt_evidence(receipt, spec, **bindings)
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    (
+        "born_initial_file",
+        "born_initial_identity",
+        "born_initial_manifest",
+        "born_initial_state",
+    ),
+)
+def test_born_receipt_rejects_each_checkpoint_source_binding_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_name: str,
+) -> None:
+    receipt, spec, scba, _checkpoint, bindings = _fixture(
+        tmp_path, task_id="endpoint-born-start"
+    )
+    manifest = driver._load_canonical(
+        scba / "campaign-manifest.json", "test SCBA manifest"
+    )
+    expected = _checkpoint_identity_from_manifest(manifest)
+    source_hashes = dict(expected.source_hashes)
+    source_hashes[source_name] = "f" * 64
+    observed = _checkpoint_identity(
+        "endpoint-born-start",
+        source_hashes=source_hashes,
+        initial_state_sha256=expected.initial_state_sha256,
+    )
+    monkeypatch.setattr(
+        driver.case,
+        "load_scba_checkpoint_v2_self_validating",
+        lambda _path: SimpleNamespace(identity=observed),
+    )
+
+    with pytest.raises(
+        driver.MaterialCampaignError,
+        match="complete identity did not reproduce",
+    ):
+        driver._receipt_evidence(receipt, spec, **bindings)
+
+
+def test_material_receipt_rejects_plain_text_checkpoint_even_when_hash_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, spec, _scba, _checkpoint, bindings = _fixture(tmp_path)
+    monkeypatch.setattr(
+        driver.case,
+        "load_scba_checkpoint_v2_self_validating",
+        _REAL_LOAD_CHECKPOINT,
+    )
+
+    with pytest.raises(driver.MaterialCampaignError, match="checkpoint is invalid"):
+        driver._receipt_evidence(receipt, spec, **bindings)
+
+
+def test_checkpoint_reconstruction_authenticates_zero_and_born_modes(
+    tmp_path: Path,
+) -> None:
+    campaign = build_material_nq1_mpi_campaign(
+        source_revision="candidate",
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        input_hashes={"fc2": "c" * 64, "fc3": "d" * 64},
+    )
+    authenticated = _small_authenticated_inputs()
+    material_identity, problem, config = authenticated
+    explicit = driver.case._source_hashes(material_identity)
+    zero = campaign.task("coupling-g0001")
+    zero_data = tmp_path / "zero"
+    zero_data.mkdir()
+    zero_identity, zero_continuation, zero_born = (
+        _REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY(
+            scientific_task=zero.as_dict(),
+            scba_manifest={"continuation_parent": None, "born_initial": None},
+            task_data=zero_data,
+            authenticated_task_inputs=authenticated,
+            authenticated_parent_scba=None,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
+    )
+    expected_derived = {
+        "cubic_vertex_physics": problem.vertex.cubic_physics_sha256,
+        "cubic_vertex_storage": problem.vertex.vertex_storage_sha256,
+        "vertex_metadata.phase_b.archive_sha256": "8" * 64,
+        "vertex_metadata.permutation_symmetry.cubic_physics_sha256": (
+            problem.vertex.cubic_physics_sha256
+        ),
+    }
+    assert dict(zero_identity.source_hashes) == explicit | expected_derived
+    assert zero_continuation is None
+    assert zero_born is None
+
+    born = campaign.task("endpoint-born-start")
+    born_data = tmp_path / "born"
+    born_data.mkdir()
+    born_path = born_data / "born-initial.h5"
+    driver.write_born_initial_state(
+        born_path,
+        problem,
+        config,
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        source_hashes=explicit,
+    )
+    _initial, born_record = driver.load_born_initial_state(
+        born_path,
+        problem,
+        config,
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        source_hashes=explicit,
+    )
+    born_identity, born_continuation, derived_born = (
+        _REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY(
+            scientific_task=born.as_dict(),
+            scba_manifest={
+                "continuation_parent": None,
+                "born_initial": born_record,
+            },
+            task_data=born_data,
+            authenticated_task_inputs=authenticated,
+            authenticated_parent_scba=None,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
+    )
+    assert born_continuation is None
+    assert derived_born == born_record
+    assert born_identity.initial_state_sha256 == born_record[
+        "initial_state_sha256"
+    ]
+    for name, digest in {
+        "born_initial_file": born_record["file_sha256"],
+        "born_initial_identity": born_record["identity_sha256"],
+        "born_initial_manifest": born_record["manifest_sha256"],
+        "born_initial_state": born_record["initial_state_sha256"],
+    }.items():
+        assert born_identity.source_hashes[name] == digest
+
+
+def test_checkpoint_reconstruction_rejects_unexpected_zero_or_changed_born(
+    tmp_path: Path,
+) -> None:
+    campaign = build_material_nq1_mpi_campaign(
+        source_revision="candidate",
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        input_hashes={"fc2": "c" * 64, "fc3": "d" * 64},
+    )
+    authenticated = _small_authenticated_inputs()
+    material_identity, problem, config = authenticated
+    zero_data = tmp_path / "zero"
+    zero_data.mkdir()
+    (zero_data / "born-initial.h5").write_bytes(b"unexpected\n")
+    with pytest.raises(driver.MaterialCampaignError, match="zero.*changed"):
+        _REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY(
+            scientific_task=campaign.task("coupling-g0001").as_dict(),
+            scba_manifest={"continuation_parent": None, "born_initial": None},
+            task_data=zero_data,
+            authenticated_task_inputs=authenticated,
+            authenticated_parent_scba=None,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
+
+    born_data = tmp_path / "born"
+    born_data.mkdir()
+    born_path = born_data / "born-initial.h5"
+    explicit = driver.case._source_hashes(material_identity)
+    driver.write_born_initial_state(
+        born_path,
+        problem,
+        config,
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        source_hashes=explicit,
+    )
+    _initial, born_record = driver.load_born_initial_state(
+        born_path,
+        problem,
+        config,
+        source_tree_sha256="a" * 64,
+        environment_sha256="b" * 64,
+        source_hashes=explicit,
+    )
+    changed_born = dict(born_record)
+    changed_born["file_sha256"] = "f" * 64
+    with pytest.raises(driver.MaterialCampaignError, match="recorded Born state"):
+        _REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY(
+            scientific_task=campaign.task("endpoint-born-start").as_dict(),
+            scba_manifest={
+                "continuation_parent": None,
+                "born_initial": changed_born,
+            },
+            task_data=born_data,
+            authenticated_task_inputs=authenticated,
+            authenticated_parent_scba=None,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
+
+    born_path.write_bytes(b"tampered Born state\n")
+    with pytest.raises(
+        driver.MaterialCampaignError,
+        match="cannot independently authenticate Born state",
+    ):
+        _REAL_RECONSTRUCT_TASK_CHECKPOINT_IDENTITY(
+            scientific_task=campaign.task("endpoint-born-start").as_dict(),
+            scba_manifest={
+                "continuation_parent": None,
+                "born_initial": born_record,
+            },
+            task_data=born_data,
+            authenticated_task_inputs=authenticated,
+            authenticated_parent_scba=None,
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+        )
 
 
 def test_material_receipt_rejects_checkpoint_mutation(tmp_path: Path) -> None:

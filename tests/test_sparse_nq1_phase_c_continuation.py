@@ -341,6 +341,127 @@ def test_coupling_square_scales_authenticated_keldysh_state_exactly(
     )
 
 
+def test_release_checkpoint_identity_reconstructs_real_continuation_sources(
+    tmp_path: Path,
+) -> None:
+    parent_root = tmp_path / "parent"
+    parent_problem, config = _write_parent(parent_root, parent_scale=0.001)
+    child = replace(
+        parent_problem,
+        vertex=SparseCubicVertex(
+            ndof=parent_problem.vertex.ndof,
+            indices=parent_problem.vertex.indices,
+            coefficients=10.0 * parent_problem.vertex.coefficients,
+            metadata=parent_problem.vertex.metadata,
+        ),
+    )
+    scientific_task = {
+        "task_id": "coupling-g001",
+        "initialization": "continuation",
+        "coupling_scale": 0.01,
+        "continuation_parent": "parent",
+        "continuation_axis": "coupling",
+        "continuation_predictor": "coupling-square",
+    }
+    _initial, parent_record = driver._continuation_initial_state(
+        parent_artifacts=parent_root,
+        identity=_identity(),
+        problem=child,
+        config=config,
+        source_tree_sha256=SOURCE_TREE,
+        environment_sha256=ENVIRONMENT,
+        child_coupling_scale=scientific_task["coupling_scale"],
+        continuation_axis=scientific_task["continuation_axis"],
+        continuation_predictor=scientific_task["continuation_predictor"],
+    )
+    assert parent_record is not None
+    task_data = tmp_path / "child"
+    task_data.mkdir()
+    expected, initialization, born = (
+        mpi_driver._reconstruct_task_checkpoint_identity(
+            scientific_task=scientific_task,
+            scba_manifest={
+                "continuation_parent": parent_record,
+                "born_initial": None,
+            },
+            task_data=task_data,
+            authenticated_task_inputs=(_identity(), child, config),
+            authenticated_parent_scba=parent_root,
+            source_tree_sha256=SOURCE_TREE,
+            environment_sha256=ENVIRONMENT,
+        )
+    )
+    assert initialization == parent_record["initialization"]
+    assert born is None
+    assert expected.initial_state_sha256 == parent_record["initial_sigma_sha256"]
+    expected_parent_sources = {
+        "continuation_parent_campaign_manifest": parent_record[
+            "campaign_manifest_sha256"
+        ],
+        "continuation_parent_checkpoint": parent_record["checkpoint_sha256"],
+        "continuation_parent_report": parent_record["report_sha256"],
+        "continuation_parent_status": parent_record["status_sha256"],
+        "continuation_parent_initialization": parent_record[
+            "initialization"
+        ]["initialization_sha256"],
+    }
+    for name, digest in expected_parent_sources.items():
+        assert expected.source_hashes[name] == digest
+    assert expected.source_hashes["cubic_vertex_physics"] == (
+        child.vertex.cubic_physics_sha256
+    )
+    assert expected.source_hashes["cubic_vertex_storage"] == (
+        child.vertex.vertex_storage_sha256
+    )
+
+    mutations = {
+        "campaign_manifest_sha256": "f" * 64,
+        "checkpoint_sha256": "f" * 64,
+        "report_sha256": "f" * 64,
+        "status_sha256": "f" * 64,
+    }
+    for name, digest in mutations.items():
+        changed_parent = dict(parent_record)
+        changed_parent[name] = digest
+        with pytest.raises(
+            mpi_driver.MaterialCampaignError,
+            match="differs from authenticated parent state",
+        ):
+            mpi_driver._reconstruct_task_checkpoint_identity(
+                scientific_task=scientific_task,
+                scba_manifest={
+                    "continuation_parent": changed_parent,
+                    "born_initial": None,
+                },
+                task_data=task_data,
+                authenticated_task_inputs=(_identity(), child, config),
+                authenticated_parent_scba=parent_root,
+                source_tree_sha256=SOURCE_TREE,
+                environment_sha256=ENVIRONMENT,
+            )
+
+    changed_parent = dict(parent_record)
+    changed_initialization = dict(parent_record["initialization"])
+    changed_initialization["initialization_sha256"] = "f" * 64
+    changed_parent["initialization"] = changed_initialization
+    with pytest.raises(
+        mpi_driver.MaterialCampaignError,
+        match="differs from authenticated parent state",
+    ):
+        mpi_driver._reconstruct_task_checkpoint_identity(
+            scientific_task=scientific_task,
+            scba_manifest={
+                "continuation_parent": changed_parent,
+                "born_initial": None,
+            },
+            task_data=task_data,
+            authenticated_task_inputs=(_identity(), child, config),
+            authenticated_parent_scba=parent_root,
+            source_tree_sha256=SOURCE_TREE,
+            environment_sha256=ENVIRONMENT,
+        )
+
+
 def test_receipt_and_strict_validation_reject_correct_factor_wrong_state(
     tmp_path: Path,
 ) -> None:
