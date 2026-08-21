@@ -182,6 +182,7 @@ def _pilot_controls(full_controls: Mapping[str, Any]) -> dict[str, Any]:
             **dict(full_controls["acceptance"]),
             "anchor_field_rtol": pilot.FIELD_RTOL,
             "anchor_field_atol": pilot.FIELD_ATOL,
+            "anchor_residual_factor": pilot.ANCHOR_RESIDUAL_FACTOR,
             "anchor_current_rtol": pilot.CURRENT_RTOL,
             "anchor_current_atol": pilot.CURRENT_ATOL,
         },
