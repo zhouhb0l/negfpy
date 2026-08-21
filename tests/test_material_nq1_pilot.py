@@ -84,6 +84,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
             **dict(pilot.MATERIAL_NQ1_ACCEPTANCE),
             "anchor_field_rtol": pilot.FIELD_RTOL,
             "anchor_field_atol": pilot.FIELD_ATOL,
+            "anchor_residual_factor": pilot.ANCHOR_RESIDUAL_FACTOR,
             "anchor_current_rtol": pilot.CURRENT_RTOL,
             "anchor_current_atol": pilot.CURRENT_ATOL,
         },
@@ -1126,7 +1127,13 @@ def _synthetic_anchor_contract(
             "converged": True,
             "release_certified": False,
             "currents": {"left": 0.0, "right": 0.0, "collision_power": 0.0},
-            "diagnostics": {"passed": True},
+            "diagnostics": {
+                "passed": True,
+                "metrics": {
+                    "history_last_sigma_residual": 0.0,
+                    "history_last_green_residual": 0.0,
+                },
+            },
             "solver_metadata": {"current_scale": 1.0},
         },
         "release_certified": False,
@@ -1429,6 +1436,22 @@ def test_streamed_six_field_comparison_is_strict(
     second.unlink()
     _fields(second, perturbation=5.0e-7)
     assert not pilot.compare_fields(first, second)["passed"]
+
+
+def test_anchor_field_budget_is_explicit_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    first = tmp_path / "first.h5"
+    second = tmp_path / "second.h5"
+    _fields(first)
+    _fields(second, perturbation=2.0e-8)
+    assert not pilot.compare_fields(first, second)["passed"]
+    bounded = pilot.compare_fields(first, second, absolute_budget=1.0e-8)
+    assert bounded["passed"] is True
+    assert bounded["absolute_budget"] == 1.0e-8
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="finite and nonnegative"):
+        pilot.compare_fields(first, second, absolute_budget=-1.0)
 
 
 def test_complete_checkpoint_sources_reconstruct_material_derived_hashes() -> None:

@@ -82,6 +82,12 @@ FIELD_RTOL = 1.0e-8
 FIELD_ATOL = 1.0e-12
 CURRENT_RTOL = 1.0e-8
 CURRENT_ATOL = 1.0e-12
+# Two independently converged fixed-point solutions can differ by the sum of
+# their terminal SCBA residuals even when every scientific gate passes.  The
+# pilot anchor gate therefore admits an explicit, bounded numerical envelope
+# derived from the authenticated terminal residuals; this does not change any
+# solver or release-certification tolerance.
+ANCHOR_RESIDUAL_FACTOR = 2.0
 EXPECTED_FIELD_SHAPE = (151, 216, 216)
 EXPECTED_FIELD_DTYPE = "complex128"
 PILOT_WALL_LIMIT_SECONDS = 48 * 60 * 60
@@ -564,6 +570,7 @@ def build_pilot_manifest(
             **dict(MATERIAL_NQ1_ACCEPTANCE),
             "anchor_field_rtol": FIELD_RTOL,
             "anchor_field_atol": FIELD_ATOL,
+            "anchor_residual_factor": ANCHOR_RESIDUAL_FACTOR,
             "anchor_current_rtol": CURRENT_RTOL,
             "anchor_current_atol": CURRENT_ATOL,
         },
@@ -803,12 +810,20 @@ def compare_fields(
     *,
     rtol: float = FIELD_RTOL,
     atol: float = FIELD_ATOL,
+    absolute_budget: float = 0.0,
 ) -> dict[str, Any]:
     """Stream and compare the exact grid and all six Keldysh fields."""
 
     left_path = _regular_file(first, name="first field archive")
     right_path = _regular_file(second, name="second field archive")
-    if not math.isfinite(rtol) or not math.isfinite(atol) or rtol < 0 or atol < 0:
+    if (
+        not math.isfinite(rtol)
+        or not math.isfinite(atol)
+        or not math.isfinite(absolute_budget)
+        or rtol < 0
+        or atol < 0
+        or absolute_budget < 0
+    ):
         raise MaterialNQ1PilotError("field tolerances must be finite and nonnegative")
     datasets: dict[str, Any] = {}
     passed = True
@@ -858,7 +873,11 @@ def compare_fields(
                         np.all(np.isfinite(av)) and np.all(np.isfinite(bv))
                     )
                     difference = np.abs(av - bv)
-                    allowed = atol + rtol * np.maximum(np.abs(av), np.abs(bv))
+                    allowed = (
+                        atol
+                        + absolute_budget
+                        + rtol * np.maximum(np.abs(av), np.abs(bv))
+                    )
                     maximum_absolute = max(
                         maximum_absolute, float(np.max(difference))
                     )
@@ -883,9 +902,35 @@ def compare_fields(
         "grid_equal": grid_equal,
         "rtol": rtol,
         "atol": atol,
+        "absolute_budget": absolute_budget,
         "datasets": datasets,
         "passed": bool(passed),
     }
+
+
+def _anchor_residual_budget(*outcomes: Mapping[str, Any]) -> float:
+    """Return the authenticated numerical uncertainty envelope for anchors."""
+
+    residuals: list[float] = []
+    for outcome in outcomes:
+        try:
+            metrics = outcome["result"]["diagnostics"]["metrics"]
+            values = (
+                float(metrics["history_last_sigma_residual"]),
+                float(metrics["history_last_green_residual"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise MaterialNQ1PilotError(
+                "anchor outcome lacks terminal residual metrics"
+            ) from error
+        if not all(math.isfinite(value) and value >= 0.0 for value in values):
+            raise MaterialNQ1PilotError(
+                "anchor terminal residual metrics must be finite and nonnegative"
+            )
+        residuals.extend(values)
+    if not residuals:
+        raise MaterialNQ1PilotError("anchor residual budget is empty")
+    return ANCHOR_RESIDUAL_FACTOR * max(residuals)
 
 
 def compare_currents(
@@ -2336,7 +2381,11 @@ def build_comparison(
         raise MaterialNQ1PilotError("comparison outcome hash changed")
     first_outcome = load_canonical_json(first_outcome_path, name="first outcome")
     second_outcome = load_canonical_json(second_outcome_selected, name="second outcome")
-    fields = compare_fields(first_fields, second_fields)
+    fields = compare_fields(
+        first_fields,
+        second_fields,
+        absolute_budget=_anchor_residual_budget(first_outcome, second_outcome),
+    )
     currents = compare_currents(first_outcome, second_outcome)
     passed = bool(
         first_receipt["state"] == "passed"
@@ -3653,6 +3702,7 @@ def validate_audit(
 
 
 __all__ = [
+    "ANCHOR_RESIDUAL_FACTOR",
     "AUDIT_SCHEMA",
     "COMPARISON_SCHEMA",
     "FIELD_ATOL",
