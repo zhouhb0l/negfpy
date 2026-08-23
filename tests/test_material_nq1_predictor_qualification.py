@@ -5,11 +5,10 @@ import copy
 import hashlib
 import importlib
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "src"
@@ -178,19 +177,20 @@ def test_wrapper_authorizes_only_the_exact_three_task_pilot(
     assert report["candidate_qualification_passed"] is True
     assert report["pilot_submission_eligible"] is True
     assert report["release_submission_eligible"] is False
-    assert report["next_gate"] == "three-task-pilot"
+    assert report["next_gate"] == "staged-five-task-pilot"
     assert "release_preflight_passed" not in report
     assert report["scientific_controls"]["schema"].endswith("controls.v2")
     pilot_controls = report["predictor_pilot_controls"]
-    assert pilot_controls["task_count"] == 3
+    assert pilot_controls["task_count"] == 5
     assert tuple(task["task_id"] for task in pilot_controls["tasks"]) == (
-        "coupling-g0001", "coupling-g001", "coupling-g0025",
+        "coupling-g0001", "coupling-g001", "coupling-g0015",
+        "coupling-g002", "coupling-g0025",
     )
     assert report["evidence"]["predictor_counts"] == {
         "coupling-square": 8, "identity": 4, "none": 7,
     }
     assert pilot_controls["anchor_authentication_gate"] == (
-        "three-task-pilot-preflight"
+        "staged-five-task-pilot-preflight"
     )
     context = report["evidence"]["base_qualification_evidence"][
         "qualification_context"

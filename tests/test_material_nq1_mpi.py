@@ -40,7 +40,7 @@ def test_material_mpi_waves_preserve_dependencies_and_fanout() -> None:
     assert campaign.waves[:9] == tuple(
         (f"coupling-g{token}",)
         for token in (
-            "0001", "001", "0025", "005", "010", "025", "050", "075", "100"
+            "0001", "001", "0015", "002", "0025", "005", "010", "050", "100"
         )
     )
     assert set(campaign.waves[9]) == {
@@ -103,7 +103,7 @@ def test_scientific_failure_blocks_all_descendants_without_execution(
         executed.append(scientific.task_id)
         state = (
             "scientific_failure"
-            if scientific.task_id == "coupling-g025"
+            if scientific.task_id == "coupling-g0025"
             else "completed"
         )
         artifact = context.write_artifact_bytes(
@@ -121,7 +121,7 @@ def test_scientific_failure_blocks_all_descendants_without_execution(
         execution_id="failure-test",
     )
     assert report is not None and not report.complete
-    assert report.statuses["coupling-g025"] == "scientific_failure"
+    assert report.statuses["coupling-g0025"] == "scientific_failure"
     assert report.statuses["coupling-g050"] == "blocked"
     assert report.statuses["coupling-g100"] == "blocked"
     assert report.statuses["endpoint-zero-start"] == "blocked"

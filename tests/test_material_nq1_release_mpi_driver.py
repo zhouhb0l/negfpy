@@ -942,7 +942,7 @@ def _v3_qualification(repo: Path, source: dict[str, object]) -> dict[str, object
         "candidate_qualification_passed": True,
         "pilot_submission_eligible": True,
         "release_submission_eligible": False,
-        "next_gate": "three-task-pilot",
+        "next_gate": "staged-five-task-pilot",
         "predictor_pilot_controls": {},
     }
 

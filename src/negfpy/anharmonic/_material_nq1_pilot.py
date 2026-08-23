@@ -1,11 +1,12 @@
 """Immutable non-release pilot for the material ``N_q=1`` predictor.
 
-The pilot is the exact first three tasks of the full release graph:
-``g=.001`` from zero, followed by coupling-square continuations at ``g=.01``
-and ``g=.025``.  The first two results must reproduce their immutable
-release-018 field anchors.  The new ``g=.025`` result must converge under the
-unchanged 800-iteration contract.  Passing this pilot can qualify a predictor
-for a *new* candidate; it cannot certify or release a material result.
+The pilot is the exact first five tasks of the staged coupling release graph:
+``g=.001`` from zero, followed by coupling-square continuations at ``g=.01``,
+``g=.015``, ``g=.02``, and ``g=.025``.  The first two results must reproduce
+their immutable release-018 field anchors.  Every newly staged edge must pass
+its own authenticated scheduler, checkpoint, and scientific gates.  Passing
+this pilot can qualify a predictor for a *new* candidate; it cannot certify or
+release a material result.
 
 This module owns the byte-level manifest, receipt, comparison, report, and
 audit contracts.  Scheduler submission is deliberately outside its scope.
@@ -22,6 +23,7 @@ import shlex
 import stat
 import tempfile
 from collections.abc import Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -68,6 +70,8 @@ CONTINUATION_INITIALIZATION_SCHEMA = (
 PILOT_TASK_IDS = (
     "coupling-g0001",
     "coupling-g001",
+    "coupling-g0015",
+    "coupling-g002",
     "coupling-g0025",
 )
 FIELD_DATASETS = (
@@ -119,9 +123,11 @@ PILOT_THREAD_LIMITS = MappingProxyType({
     "VECLIB_MAXIMUM_THREADS": "1",
 })
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
-    "coupling-g0001": "nq1pa-g0001",
-    "coupling-g001": "nq1pa-g001",
-    "coupling-g0025": "nq1pa-g0025",
+    "coupling-g0001": "nq1ph-g0001",
+    "coupling-g001": "nq1ph-g001",
+    "coupling-g0015": "nq1ph-g0015",
+    "coupling-g002": "nq1ph-g002",
+    "coupling-g0025": "nq1ph-g0025",
 })
 
 RELEASE_018_ANCHOR_ROOT = Path(
@@ -263,7 +269,7 @@ _PREDICTOR_QUALIFICATION_CHECKS = frozenset({
     "full_scientific_controls_v2",
     "full_task_count_19",
     "predictor_mapping_8_square_4_identity_7_none",
-    "pilot_exact_first_three_tasks",
+    "pilot_exact_first_five_tasks",
     "pilot_anchor_contract_frozen",
     "pilot_anchor_files_deferred_to_preflight",
     "unchanged_core_solver",
@@ -449,26 +455,26 @@ def publish_json_once(path: str | Path, value: Mapping[str, Any]) -> Path:
 
 
 def predictor_pilot_tasks() -> tuple[MaterialSCBATask, ...]:
-    """Return the exact three-task predictor pilot in dependency order."""
+    """Return the exact five-task staged predictor pilot in dependency order."""
 
-    tasks = tuple(silicon_nq1_release_tasks()[:3])
+    tasks = tuple(silicon_nq1_release_tasks()[:5])
     if tuple(task.task_id for task in tasks) != PILOT_TASK_IDS:
-        raise RuntimeError("pilot is not the exact first three release tasks")
-    if (
-        tasks[0].initialization != "zero"
-        or tasks[1].continuation_parent != tasks[0].task_id
-        or tasks[2].continuation_parent != tasks[1].task_id
-        or tasks[1].continuation_predictor != "coupling-square"
-        or tasks[2].continuation_predictor != "coupling-square"
-    ):
+        raise RuntimeError("pilot is not the exact first five release tasks")
+    if tasks[0].initialization != "zero":
         raise RuntimeError("release prefix does not use the frozen predictor chain")
+    for parent, child in pairwise(tasks):
+        if (
+            child.continuation_parent != parent.task_id
+            or child.continuation_predictor != "coupling-square"
+        ):
+            raise RuntimeError("release prefix does not use the staged predictor chain")
     return tasks
 
 
 def anchor_task_id(task_id: str) -> str | None:
     if task_id in PILOT_TASK_IDS[:2]:
         return task_id
-    if task_id == PILOT_TASK_IDS[2]:
+    if task_id in PILOT_TASK_IDS[2:]:
         return None
     raise MaterialNQ1PilotError(f"unknown pilot task: {task_id!r}")
 
@@ -530,7 +536,7 @@ def build_pilot_manifest(
         "schema": PILOT_SCHEMA,
         "execution_id": execution_id,
         "scientific_scope": (
-            "silicon N_q=1 coupling-square continuation pilot, g=.001 to .025"
+            "silicon N_q=1 staged coupling-square continuation pilot, g=.001 to .025"
         ),
         "classification": "development-pilot-not-release",
         "source_revision": source_revision,
@@ -2702,13 +2708,13 @@ def qualification_authorizes_pilot(
     pilot_payload = {
         "schema": "negfpy.material-nq1-predictor-pilot-controls.v1",
         "classification": "development-pilot-not-release",
-        "task_count": 3,
+        "task_count": len(PILOT_TASK_IDS),
         "tasks": expected_pilot_tasks,
         "solver_contract": dict(validated["solver_contract"]),
         "acceptance": dict(validated["acceptance"]),
         "anchor_contract": anchor_contract,
         "anchor_contract_sha256": anchor_contract_sha,
-        "anchor_authentication_gate": "three-task-pilot-preflight",
+        "anchor_authentication_gate": "staged-five-task-pilot-preflight",
         "excluded_claims": list(validated["excluded_claims"]),
         "release_certified": False,
     }
@@ -2905,7 +2911,7 @@ def qualification_authorizes_pilot(
         and document.get("candidate_qualification_passed") is True
         and document.get("pilot_submission_eligible") is True
         and document.get("release_submission_eligible") is False
-        and document.get("next_gate") == "three-task-pilot"
+        and document.get("next_gate") == "staged-five-task-pilot"
     )
 
 
@@ -3396,7 +3402,7 @@ def build_final_report(
     )
     validate_preflight_record(validated, preflight_selected)
     if set(task_receipts) != set(PILOT_TASK_IDS):
-        raise MaterialNQ1PilotError("final report requires exactly three task receipts")
+        raise MaterialNQ1PilotError("final report requires exactly five task receipts")
     receipt_records: dict[str, Any] = {}
     all_tasks_passed = True
     for task_id in PILOT_TASK_IDS:
@@ -3497,7 +3503,7 @@ def build_final_report(
         "all_scheduler_jobs_terminal_success": True,
         "strict_anchor_reproduction": all_comparisons_passed,
         "coupling_g0025_completed": (
-            receipt_records["coupling-g0025"]["state"] == "passed"
+            receipt_records[PILOT_TASK_IDS[-1]]["state"] == "passed"
         ),
         "pilot_passed": passed,
         "authorizes": {

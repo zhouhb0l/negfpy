@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Qualify an exact coupling-square candidate for the three-task pilot only."""
+"""Qualify an exact staged coupling-square candidate for pilot use only."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import os
-from pathlib import Path
 import stat
 import sys
-from typing import Any, Mapping
+from collections import Counter
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import qualify_material_nq1_candidate as base
 import run_material_nq1_release_mpi as release
-from negfpy.anharmonic import _material_nq1_pilot as pilot
 
+from negfpy.anharmonic import _material_nq1_pilot as pilot
 
 QUALIFICATION_SCHEMA = "negfpy.material-nq1-candidate-qualification.v3"
 PILOT_CONTROLS_SCHEMA = "negfpy.material-nq1-predictor-pilot-controls.v1"
@@ -30,12 +31,16 @@ EXPECTED_PREDICTOR_COUNTS = {
 EXPECTED_PILOT_TASK_IDS = (
     "coupling-g0001",
     "coupling-g001",
+    "coupling-g0015",
+    "coupling-g002",
     "coupling-g0025",
 )
 EXPECTED_PILOT_TASK_SHA256 = (
     "3337ba11179aaa2a4ad2ab6962db7518282e98dfff9bdc1b80192f9d196225cf",
     "117f2e77e1627849f43c5d2109c3bf62051cdd51cfe680d5e1cfa593bcd84c22",
-    "43c8ce9ff2d7a4a67767611a50e881919e475cbcf9cb56f272d72d67c786f98e",
+    "f6415bf2b4c74b2bf6b725c834decc790cdbb6a652389747c7b5895cf08ef0e8",
+    "3029ac513a72a73468717316ff1951e7ff091385c1db5d27b0539b4f66b89293",
+    "c00d26e45452b852ffe8f493660213c73c68675d49fc6e86e9afa041e7398c81",
 )
 EXPECTED_ANCHOR_CONTRACT_SHA256 = (
     "93083a3a864e84fe3b9385ff7142166ad3a995faaf23e2ee51dd386627157b0f"
@@ -59,7 +64,7 @@ PREDICTOR_CHECK_NAMES = {
     "full_scientific_controls_v2",
     "full_task_count_19",
     "predictor_mapping_8_square_4_identity_7_none",
-    "pilot_exact_first_three_tasks",
+    "pilot_exact_first_five_tasks",
     "pilot_anchor_contract_frozen",
     "pilot_anchor_files_deferred_to_preflight",
     "unchanged_core_solver",
@@ -147,9 +152,9 @@ def _pilot_controls(full_controls: Mapping[str, Any]) -> dict[str, Any]:
     tasks = full_controls.get("tasks")
     if not isinstance(tasks, list) or len(tasks) != 19:
         raise PredictorQualificationError("full scientific task set is not 19 tasks")
-    selected = tasks[:3]
+    selected = tasks[:5]
     if tuple(task.get("task_id") for task in selected) != EXPECTED_PILOT_TASK_IDS:
-        raise PredictorQualificationError("pilot is not the exact first three tasks")
+        raise PredictorQualificationError("pilot is not the exact first five tasks")
     if tuple(task.get("task_sha256") for task in selected) != EXPECTED_PILOT_TASK_SHA256:
         raise PredictorQualificationError("exact pilot task controls changed")
     if tuple(task.as_dict() | {"task_sha256": task.task_sha256}
@@ -164,7 +169,7 @@ def _pilot_controls(full_controls: Mapping[str, Any]) -> dict[str, Any]:
     payload = {
         "schema": PILOT_CONTROLS_SCHEMA,
         "classification": "development-pilot-not-release",
-        "task_count": 3,
+        "task_count": len(EXPECTED_PILOT_TASK_IDS),
         "tasks": selected,
         "solver_contract": {
             "backend": "fft",
@@ -188,7 +193,7 @@ def _pilot_controls(full_controls: Mapping[str, Any]) -> dict[str, Any]:
         },
         "anchor_contract": anchors,
         "anchor_contract_sha256": anchor_sha256,
-        "anchor_authentication_gate": "three-task-pilot-preflight",
+        "anchor_authentication_gate": "staged-five-task-pilot-preflight",
         "excluded_claims": list(full_controls["excluded_claims"]),
         "release_certified": False,
     }
@@ -315,7 +320,7 @@ def validate_predictor_qualification_report(
         or document.get("candidate_qualification_passed") is not True
         or document.get("pilot_submission_eligible") is not True
         or document.get("release_submission_eligible") is not False
-        or document.get("next_gate") != "three-task-pilot"
+        or document.get("next_gate") != "staged-five-task-pilot"
     ):
         raise PredictorQualificationError(
             "predictor candidate qualification schema is invalid"
@@ -391,7 +396,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         "predictor_mapping_8_square_4_identity_7_none": (
             predictor_counts == EXPECTED_PREDICTOR_COUNTS
         ),
-        "pilot_exact_first_three_tasks": True,
+        "pilot_exact_first_five_tasks": True,
         "pilot_anchor_contract_frozen": True,
         "pilot_anchor_files_deferred_to_preflight": True,
         "unchanged_core_solver": core_files[
@@ -425,7 +430,7 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_qualification_passed": passed,
         "pilot_submission_eligible": passed,
         "release_submission_eligible": False,
-        "next_gate": "three-task-pilot",
+        "next_gate": "staged-five-task-pilot",
     }
     return validate_predictor_qualification_report(
         report, repo=repo, evidence_root=evidence_root

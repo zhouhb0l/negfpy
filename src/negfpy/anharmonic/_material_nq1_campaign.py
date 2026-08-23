@@ -8,14 +8,14 @@ validated, converged checkpoint.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal, Mapping
-
+from typing import Any, ClassVar, Literal
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -215,10 +215,13 @@ def silicon_nq1_release_tasks() -> tuple[MaterialSCBATask, ...]:
     }
     tasks: list[MaterialSCBATask] = []
     previous: str | None = None
+    # The .01 -> .025 edge was scientifically unstable in the prior pilot.
+    # Keep the release graph at 19 tasks while inserting explicit, smaller
+    # coupling steps before .025 and retaining a complete path to g=1.
     for token, coupling in (
-        ("0001", 0.001), ("001", 0.01), ("0025", 0.025),
-        ("005", 0.05), ("010", 0.1),
-        ("025", 0.25), ("050", 0.5), ("075", 0.75), ("100", 1.0),
+        ("0001", 0.001), ("001", 0.01), ("0015", 0.015),
+        ("002", 0.02), ("0025", 0.025), ("005", 0.05),
+        ("010", 0.1), ("050", 0.5), ("100", 1.0),
     ):
         task_id = f"coupling-g{token}"
         tasks.append(MaterialSCBATask(
@@ -354,13 +357,13 @@ def silicon_nq1_release_manifest(
 
 
 __all__ = [
-    "ContinuationPredictor",
     "HARMONIC_CONSERVATIVE_BOUND",
     "MATERIAL_NQ1_ACCEPTANCE",
     "MATERIAL_NQ1_EXCLUDED_CLAIMS",
     "MATERIAL_NQ1_MIXING_FLOOR",
-    "MaterialSCBATask",
     "OMEGA0_RAD_S",
+    "ContinuationPredictor",
+    "MaterialSCBATask",
     "kelvin_to_solver_temperature",
     "silicon_nq1_release_manifest",
     "silicon_nq1_release_tasks",

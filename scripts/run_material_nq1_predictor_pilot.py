@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operate the three-task material Nq=1 predictor pilot, never a scheduler.
+"""Operate the staged five-task material Nq=1 predictor pilot, never a scheduler.
 
 Actions are deliberately one-shot and filesystem-only:
 

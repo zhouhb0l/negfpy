@@ -69,7 +69,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
     pilot_payload = {
         "schema": "negfpy.material-nq1-predictor-pilot-controls.v1",
         "classification": "development-pilot-not-release",
-        "task_count": 3,
+        "task_count": len(pilot.PILOT_TASK_IDS),
         "tasks": [
             task.as_dict() | {"task_sha256": task.task_sha256}
             for task in pilot.predictor_pilot_tasks()
@@ -92,7 +92,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
         "anchor_contract_sha256": pilot.sha256_bytes(
             pilot.canonical_json(anchor_contract)
         ),
-        "anchor_authentication_gate": "three-task-pilot-preflight",
+        "anchor_authentication_gate": "staged-five-task-pilot-preflight",
         "excluded_claims": list(pilot.MATERIAL_NQ1_EXCLUDED_CLAIMS),
         "release_certified": False,
     }
@@ -287,7 +287,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
         "candidate_qualification_passed": True,
         "pilot_submission_eligible": True,
         "release_submission_eligible": False,
-        "next_gate": "three-task-pilot",
+        "next_gate": "staged-five-task-pilot",
     })
 
 
@@ -1168,17 +1168,21 @@ def _synthetic_anchor_contract(
     monkeypatch.setattr(pilot, "RELEASE_018_ANCHORS", records)
 
 
-def test_pilot_is_exact_first_three_release_tasks() -> None:
+def test_pilot_is_exact_first_five_release_tasks() -> None:
     pilot_tasks = pilot.predictor_pilot_tasks()
-    release_prefix = silicon_nq1_release_tasks()[:3]
+    release_prefix = silicon_nq1_release_tasks()[:5]
     assert pilot_tasks == release_prefix
     assert tuple(task.task_id for task in pilot_tasks) == (
         "coupling-g0001",
         "coupling-g001",
+        "coupling-g0015",
+        "coupling-g002",
         "coupling-g0025",
     )
     assert tuple(task.continuation_predictor for task in pilot_tasks) == (
         None,
+        "coupling-square",
+        "coupling-square",
         "coupling-square",
         "coupling-square",
     )
@@ -1204,9 +1208,11 @@ def test_pilot_is_exact_first_three_release_tasks() -> None:
     assert pilot.PILOT_PBS_QUEUE == "normal"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
     assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
-        "coupling-g0001": "nq1pa-g0001",
-        "coupling-g001": "nq1pa-g001",
-        "coupling-g0025": "nq1pa-g0025",
+        "coupling-g0001": "nq1ph-g0001",
+        "coupling-g001": "nq1ph-g001",
+        "coupling-g0015": "nq1ph-g0015",
+        "coupling-g002": "nq1ph-g002",
+        "coupling-g0025": "nq1ph-g0025",
     }
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
@@ -2131,6 +2137,10 @@ def test_cli_qualification_matcher_requires_recursive_shared_validation(
     os.chmod(qualification_path, 0o444)
 
 
+@pytest.mark.skipif(
+    sys.version_info[:2] != (3, 12),
+    reason="qualified pilot runtime replay is exercised by the Python 3.12 suite",
+)
 def test_current_runtime_replays_qualified_package_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

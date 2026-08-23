@@ -20,12 +20,12 @@ def test_release_task_graph_is_complete_topological_and_preregistered() -> None:
     tasks = silicon_nq1_release_tasks()
     assert len(tasks) == 19
     assert [task.task_id for task in tasks[:9]] == [
-        "coupling-g0001", "coupling-g001", "coupling-g0025",
-        "coupling-g005", "coupling-g010",
-        "coupling-g025", "coupling-g050", "coupling-g075", "coupling-g100",
+        "coupling-g0001", "coupling-g001", "coupling-g0015",
+        "coupling-g002", "coupling-g0025", "coupling-g005",
+        "coupling-g010", "coupling-g050", "coupling-g100",
     ]
     assert [task.coupling_scale for task in tasks[:9]] == [
-        0.001, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0,
+        0.001, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.5, 1.0,
     ]
     assert all(
         task.mixing_floor == MATERIAL_NQ1_MIXING_FLOOR for task in tasks
