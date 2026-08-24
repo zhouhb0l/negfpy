@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import fields
 import hashlib
 import json
-from importlib import metadata as importlib_metadata
-from pathlib import Path
 import re
 import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable
+from dataclasses import fields
+from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .types import CubicSCBAProblem, KeldyshSpectrum, SCBAConfig
-
 
 Array = np.ndarray
 
@@ -437,7 +436,7 @@ def _head_package_entries(
             capture_output=True,
             timeout=5.0,
         ).stdout
-        entries: list[tuple[str, bytes]] = []
+        records: list[tuple[str, str]] = []
         prefix = "src/negfpy/"
         for raw in listing.split(b"\0"):
             if not raw:
@@ -452,19 +451,53 @@ def _head_package_entries(
                 or not source_path.startswith(prefix)
             ):
                 return None
-            content = subprocess.run(
-                (
-                    git_executable,
-                    "cat-file",
-                    "blob",
-                    object_id.decode("ascii"),
-                ),
-                cwd=repository,
-                check=True,
-                capture_output=True,
-                timeout=5.0,
-            ).stdout
-            entries.append((source_path[len(prefix) :], content))
+            records.append((source_path[len(prefix) :], object_id.decode("ascii")))
+        if not records:
+            return None
+        # A compute-node Git/GPFS hiccup used to turn this into one timed
+        # subprocess per package file.  With roughly a hundred files that can
+        # consume the entire task preflight timeout while the login-node copy
+        # succeeds.  Batch all immutable object reads into one Git process;
+        # the framing parser below remains fail-closed for missing/non-blob
+        # objects and malformed output.
+        request = b"".join(object_id.encode("ascii") + b"\n" for _, object_id in records)
+        batch = subprocess.run(
+            (git_executable, "cat-file", "--batch"),
+            cwd=repository,
+            check=True,
+            input=request,
+            capture_output=True,
+            timeout=5.0,
+        ).stdout
+        contents: dict[str, bytes] = {}
+        offset = 0
+        for _, object_id in records:
+            header_end = batch.find(b"\n", offset)
+            if header_end < 0:
+                return None
+            header = batch[offset:header_end].split(b" ")
+            if len(header) != 3 or header[0].decode("ascii") != object_id:
+                return None
+            if header[1] != b"blob":
+                return None
+            try:
+                size = int(header[2])
+            except ValueError:
+                return None
+            content_start = header_end + 1
+            content_end = content_start + size
+            if content_end > len(batch):
+                return None
+            contents[object_id] = batch[content_start:content_end]
+            if content_end < len(batch):
+                if batch[content_end:content_end + 1] != b"\n":
+                    return None
+                offset = content_end + 1
+            else:
+                offset = content_end
+        if offset != len(batch):
+            return None
+        entries = [(relative, contents[object_id]) for relative, object_id in records]
     except (
         OSError,
         subprocess.SubprocessError,
