@@ -1208,11 +1208,11 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
     assert pilot.PILOT_PBS_QUEUE == "normal"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
     assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
-        "coupling-g0001": "nq1ph-g0001",
-        "coupling-g001": "nq1ph-g001",
-        "coupling-g0015": "nq1ph-g0015",
-        "coupling-g002": "nq1ph-g002",
-        "coupling-g0025": "nq1ph-g0025",
+        "coupling-g0001": "nq1pv753-g1",
+        "coupling-g001": "nq1pv753-g01",
+        "coupling-g0015": "nq1pv753-g15",
+        "coupling-g002": "nq1pv753-g2",
+        "coupling-g0025": "nq1pv753-g25",
     }
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
