@@ -366,6 +366,7 @@ def _supervise_scba(
     repo: Path,
     stdout_path: Path,
     stderr_path: Path,
+    launch_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     return common._supervised_subprocess(
         command,
@@ -374,6 +375,7 @@ def _supervise_scba(
         stderr_path=stderr_path,
         wall_limit_seconds=SCBA_WALL_LIMIT_SECONDS,
         rss_limit_bytes=SCBA_RSS_LIMIT_BYTES,
+        **({"launch_environment": launch_environment} if launch_environment is not None else {}),
     )
 
 
@@ -456,7 +458,7 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False, launch_environment: Mapping[str, str] | None = None) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
@@ -548,6 +550,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         repo=repo,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        **({"launch_environment": launch_environment} if launch_environment is not None else {}),
     )
     log = {
         "attempt": attempt,

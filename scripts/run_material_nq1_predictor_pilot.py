@@ -50,6 +50,7 @@ from negfpy.anharmonic._material_nq1_pilot import (
     build_pilot_manifest,
     build_preflight_record,
     build_task_receipt,
+    build_launch_environment_record,
     load_canonical_json,
     predictor_pilot_tasks,
     publish_json_once,
@@ -63,6 +64,7 @@ from negfpy.anharmonic._material_nq1_pilot import (
     validate_scheduler_receipt,
     validate_task_receipt,
 )
+from negfpy.anharmonic._launch_environment import qualification_environment
 from negfpy.anharmonic._provenance import code_provenance
 
 MANIFEST_NAME = "pilot-manifest.json"
@@ -201,9 +203,15 @@ def _current_runtime_matches(
             or platform.python_version() != runtime["version"]
         ):
             return False
+        environment = qualification_environment(
+            runtime, repo=Path(manifest["source_package_file"]).parents[2]
+        )
+        if dict(os.environ) != environment:
+            return False
         completed = subprocess.run(
             [str(current), "-m", "pip", "freeze", "--all"],
             cwd=Path(manifest["source_package_file"]).parents[2],
+            env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
@@ -427,13 +435,17 @@ def _anchor_paths(manifest: Mapping[str, Any], task_id: str) -> tuple[Path, Path
 def run_task(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args)
     manifest = _load_manifest(root)
-    _runtime, qualified_lock = _revalidate_bound_qualification(root, manifest)
+    runtime, qualified_lock = _revalidate_bound_qualification(root, manifest)
     _verify_live_candidate(args, manifest, qualified_lock=qualified_lock)
     task = _task(args.task_id)
     _verify_prior_gates(root, manifest, task.task_id)
+    launch_record = build_launch_environment_record(
+        manifest, task.task_id, runtime, dict(os.environ)
+    )
 
     task_root = root / "tasks" / task.task_id
     _require_virgin_task_root(task_root, task.task_id)
+    publish_json_once(task_root / "launch-environment.json", launch_record)
     scba_root = task_root / "scba"
     parent_receipt = None
     parent_scba = None
@@ -462,6 +474,7 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
         mixing_floor=task.mixing_floor,
         temperature_bias=task.temperature_bias_solver,
         resume=False,
+        launch_environment=launch_record["environment"],
     )
     if status.get("state") not in {"passed", "scientific-failure"}:
         raise MaterialNQ1PilotError("task ended in an infrastructure state")

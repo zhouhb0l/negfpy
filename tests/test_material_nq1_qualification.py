@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
-import os
 from pathlib import Path
 import sys
 
@@ -14,22 +14,18 @@ SCRIPTS = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 qualification = importlib.import_module("qualify_material_nq1_candidate")
+from negfpy.anharmonic._launch_environment import build_launch_environment
 
 
 def _environment(root: Path | None = None) -> dict[str, str]:
     root = Path(__file__).parents[1] if root is None else root
-    return {
-        "PYTHONHASHSEED": "0",
-        "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root / "scripts"))),
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1",
-        "NUMEXPR_NUM_THREADS": "1",
-        "BLIS_NUM_THREADS": "1",
-        "VECLIB_MAXIMUM_THREADS": "1",
-        "NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64,
-        "PATH": os.environ["PATH"],
-    }
+    return build_launch_environment(
+        repo=root,
+        executable=Path(sys.executable).resolve(),
+        home=root,
+        tmpdir=root,
+        git_bin=Path("/usr/bin"),
+    ) | {"NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64}
 
 
 def _context(root: Path) -> dict[str, object]:
@@ -179,6 +175,115 @@ def test_passed_receipt_reruns_for_tool_path_identity_drift(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
+    "name,value",
+    [
+        ("OPAL_PREFIX", "/different/mpi"),
+        ("OMPI_MCA_pml", "ucx"),
+        ("OMPI_MCA_btl", "self,tcp"),
+        ("OMPI_MCA_rmaps_base_oversubscribe", "0"),
+        ("HOME", "/different/home"),
+        ("TMPDIR", "/different/tmp"),
+        ("LD_LIBRARY_PATH", "/different/libraries"),
+        ("UNEXPECTED_LAUNCH_CONTROL", "changed"),
+    ],
+)
+def test_passed_receipt_cannot_reuse_any_changed_launch_environment(
+    tmp_path: Path, name: str, value: str,
+) -> None:
+    command = [sys.executable, "-c", "print('complete-environment-bound')"]
+    environment = _environment(tmp_path)
+    first = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "environment.log", label="environment check",
+        qualification_context=_context(tmp_path),
+    )
+    second = qualification._run(
+        command, cwd=tmp_path, environment=environment | {name: value},
+        log=tmp_path / "environment.log", label="environment check",
+        qualification_context=_context(tmp_path),
+    )
+    assert first["attempt"] == 1
+    assert second["attempt"] == 2
+    assert second["reused"] is False
+    assert second["identity_sha256"] != first["identity_sha256"]
+
+
+@pytest.mark.parametrize("name", ["OPAL_PREFIX", "OMPI_MCA_btl", "HOME", "TMPDIR"])
+def test_passed_receipt_cannot_reuse_dropped_launch_environment_key(
+    tmp_path: Path, name: str,
+) -> None:
+    command = [sys.executable, "-c", "print('no-projection')"]
+    environment = _environment(tmp_path)
+    qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "dropped.log", label="dropped check",
+        qualification_context=_context(tmp_path),
+    )
+    del environment[name]
+    result = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "dropped.log", label="dropped check",
+        qualification_context=_context(tmp_path),
+    )
+    assert result["attempt"] == 2
+    assert result["reused"] is False
+
+
+def test_executed_environment_exactly_matches_complete_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INHERITED_SECRET_FOR_TEST", "must-not-reach-child")
+    environment = _environment(tmp_path)
+    environment["ADDITIONAL_EXPLICIT_VALUE"] = "authenticated in full"
+    command = [
+        sys.executable, "-c",
+        "import json, os; print(json.dumps(dict(os.environ), sort_keys=True))",
+    ]
+    result = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "actual.log", label="actual environment",
+        qualification_context=_context(tmp_path),
+    )
+    receipt = json.loads((tmp_path / result["receipt_path"]).read_text())
+    executed = json.loads((tmp_path / result["path"]).read_text())
+    assert receipt["schema"] == "negfpy.material-nq1-qualification-check.v3"
+    assert receipt["identity"]["schema"] == (
+        "negfpy.material-nq1-qualification-check-identity.v3"
+    )
+    assert receipt["identity"]["environment"] == environment == executed
+    assert "INHERITED_SECRET_FOR_TEST" not in executed
+
+
+def test_legacy_projected_environment_receipt_is_not_reused(tmp_path: Path) -> None:
+    command = [sys.executable, "-c", "print('legacy receipt')"]
+    environment = _environment(tmp_path)
+    context = _context(tmp_path)
+    result = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "legacy.log", label="legacy check",
+        qualification_context=context,
+    )
+    receipt_path = tmp_path / result["receipt_path"]
+    receipt = json.loads(receipt_path.read_text())
+    receipt["schema"] = "negfpy.material-nq1-qualification-check.v2"
+    receipt["identity"]["schema"] = (
+        "negfpy.material-nq1-qualification-check-identity.v2"
+    )
+    receipt["identity"]["environment"].pop("OPAL_PREFIX")
+    receipt["identity_sha256"] = hashlib.sha256(
+        qualification.release._canonical(receipt["identity"])
+    ).hexdigest()
+    receipt_path.write_bytes(qualification.release._canonical(receipt))
+    second = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "legacy.log", label="legacy check",
+        qualification_context=context,
+    )
+    assert second["attempt"] == 2
+    assert second["reused"] is False
+
+
+@pytest.mark.parametrize(
     "mutate",
     [
         pytest.param(
@@ -292,8 +397,61 @@ def test_recursive_check_validation_rejects_tampered_evidence(
             context_sha256=context["qualification_context_sha256"],
             expected_label="recursive check",
             expected_runtime_sha256="a" * 64,
+            expected_environment=_environment(tmp_path),
             expected_command=command,
             expected_log_name="recursive.log",
+            expected_record_keys=qualification.CHECK_RECORD_KEYS,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda env: env.update(OPAL_PREFIX="/unqualified"), id="opal"),
+        pytest.param(lambda env: env.update(OMPI_MCA_pml="ucx"), id="mpi-pml"),
+        pytest.param(lambda env: env.update(OMPI_MCA_btl="self,tcp"), id="mpi-btl"),
+        pytest.param(lambda env: env.update(TMPDIR="/unqualified"), id="tmpdir"),
+        pytest.param(lambda env: env.update(HOME="/unqualified"), id="home"),
+        pytest.param(lambda env: env.update(EXTRA_CONTROL="injected"), id="extra-key"),
+        pytest.param(lambda env: env.pop("OPAL_PREFIX"), id="missing-key"),
+    ],
+)
+def test_recursive_validation_rejects_rehashed_environment_forgery(
+    tmp_path: Path, mutate: object,
+) -> None:
+    command = [sys.executable, "-c", "print('validator environment binding')"]
+    context = _context(tmp_path)
+    environment = _environment(tmp_path)
+    record = qualification._run(
+        command, cwd=tmp_path, environment=environment,
+        log=tmp_path / "forgery.log", label="forgery check",
+        qualification_context=context,
+    )
+    qualification._validate_check_record(
+        record, repo=tmp_path, evidence_root=tmp_path,
+        context_sha256=context["qualification_context_sha256"],
+        expected_label="forgery check", expected_runtime_sha256="a" * 64,
+        expected_environment=environment,
+        expected_command=command, expected_log_name="forgery.log",
+        expected_record_keys=qualification.CHECK_RECORD_KEYS,
+    )
+    receipt_path = tmp_path / record["receipt_path"]
+    receipt = json.loads(receipt_path.read_text())
+    mutate(receipt["identity"]["environment"])
+    receipt["identity_sha256"] = hashlib.sha256(
+        qualification.release._canonical(receipt["identity"])
+    ).hexdigest()
+    receipt_path.write_bytes(qualification.release._canonical(receipt))
+    record["receipt_sha256"] = qualification.release._sha256(receipt_path)
+    record["identity_sha256"] = receipt["identity_sha256"]
+    with pytest.raises(qualification.QualificationError, match="authenticate"):
+        qualification._validate_check_record(
+            record, repo=tmp_path, evidence_root=tmp_path,
+            context_sha256=context["qualification_context_sha256"],
+            expected_label="forgery check",
+            expected_runtime_sha256="a" * 64,
+            expected_environment=environment,
+            expected_command=command, expected_log_name="forgery.log",
             expected_record_keys=qualification.CHECK_RECORD_KEYS,
         )
 

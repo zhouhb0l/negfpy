@@ -24,6 +24,9 @@ from negfpy.anharmonic._material_nq1_validation import (
     check_harmonic_embedding_buffer,
 )
 from negfpy.anharmonic._provenance import code_provenance
+from negfpy.anharmonic._launch_environment import (
+    build_launch_environment, qualification_environment,
+)
 
 
 class QualificationError(RuntimeError):
@@ -34,20 +37,14 @@ QUALIFICATION_TEST_TARGETS = (
     "tests",
     "docs/validation/bulk-rta-report/tests",
 )
-QUALIFICATION_CONTEXT_SCHEMA = "negfpy.material-nq1-qualification-context.v1"
-CHECK_IDENTITY_SCHEMA = "negfpy.material-nq1-qualification-check-identity.v2"
-CHECK_RECEIPT_SCHEMA = "negfpy.material-nq1-qualification-check.v2"
+QUALIFICATION_CONTEXT_SCHEMA = "negfpy.material-nq1-qualification-context.v2"
+CHECK_IDENTITY_SCHEMA = "negfpy.material-nq1-qualification-check-identity.v3"
+CHECK_RECEIPT_SCHEMA = "negfpy.material-nq1-qualification-check.v3"
 QUALIFICATION_CONTEXT_KEYS = {
     "schema", "repo_root", "source", "source_tree_sha256",
     "environment_lock", "scientific_task_set_sha256",
     "material_input_hashes", "runtimes", "mpiexec",
     "tracked_test_files", "driver_files", "qualification_context_sha256",
-}
-CHECK_ENVIRONMENT_KEYS = {
-    "PYTHONHASHSEED", "PYTHONPATH", "OMP_NUM_THREADS",
-    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
-    "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-    "NEGFPY_QUALIFICATION_RUNTIME_SHA256", "PATH",
 }
 CHECK_RECORD_KEYS = {
     "command", "returncode", "path", "sha256", "size",
@@ -62,6 +59,10 @@ QUALIFICATION_DRIVER_PATHS = (
     "scripts/validate_material_nq1_release.py",
     "scripts/validate_sparse_nq1_phase_c_scba.py",
     "tests/mpi/run_material_nq1_mpi_smoke.py",
+    "src/negfpy/anharmonic/_launch_environment.py",
+    "scripts/run_material_nq1_predictor_pilot.py",
+    "scripts/run_sparse_nq1_phase_c_scba_campaign.py",
+    "scripts/run_sparse_nq1_phase_c_born_campaign.py",
 )
 
 
@@ -238,16 +239,7 @@ def _run(
 ) -> dict[str, Any]:
     context_sha256 = _validate_context_digest(qualification_context)
     recorded_command = list(command if identity_command is None else identity_command)
-    selected_environment = {
-        name: environment.get(name)
-        for name in (
-            "PYTHONHASHSEED", "PYTHONPATH", "OMP_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
-            "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-            "NEGFPY_QUALIFICATION_RUNTIME_SHA256",
-            "PATH",
-        )
-    }
+    selected_environment = dict(sorted(environment.items()))
     identity_payload = {
         "schema": CHECK_IDENTITY_SCHEMA,
         "label": label,
@@ -408,6 +400,7 @@ def _validate_check_record(
     context_sha256: str,
     expected_label: str,
     expected_runtime_sha256: str,
+    expected_environment: Mapping[str, str],
     expected_command: Sequence[str],
     expected_log_name: str,
     expected_record_keys: set[str],
@@ -479,7 +472,7 @@ def _validate_check_record(
         or receipt.get("log_size") != record.get("size")
         or receipt.get("returncode") != 0
         or not isinstance(environment, Mapping)
-        or set(environment) != CHECK_ENVIRONMENT_KEYS
+        or dict(environment) != dict(expected_environment)
         or environment.get("NEGFPY_QUALIFICATION_RUNTIME_SHA256")
         != expected_runtime_sha256
         or environment.get("PYTHONHASHSEED") != "0"
@@ -614,7 +607,7 @@ def validate_qualification_evidence(
         runtime = records.get(f"{label}_runtime")
         runtime_keys = {
             "schema", "label", "version", "executable", "executable_sha256",
-            "packages_sha256", "runtime_sha256", "package_manifest",
+            "packages_sha256", "runtime_sha256", "package_manifest", "launch_environment",
         }
         if (
             not isinstance(runtime, Mapping)
@@ -625,7 +618,7 @@ def validate_qualification_evidence(
         runtime_payload = {
             name: runtime[name] for name in (
                 "schema", "label", "version", "executable",
-                "executable_sha256", "packages_sha256",
+                "executable_sha256", "packages_sha256", "launch_environment",
             )
         }
         package = runtime.get("package_manifest")
@@ -635,7 +628,7 @@ def validate_qualification_evidence(
             f"{label} package manifest",
         )
         if (
-            runtime.get("schema") != "negfpy.material-nq1-python-runtime.v1"
+            runtime.get("schema") != "negfpy.material-nq1-python-runtime.v2"
             or runtime.get("label") != label
             or runtime.get("version") != versions[label]
             or hashlib.sha256(release._canonical(runtime_payload)).hexdigest()
@@ -653,6 +646,10 @@ def validate_qualification_evidence(
             or package.get("sha256") != runtime.get("packages_sha256")
         ):
             raise QualificationError(f"{label} runtime evidence did not authenticate")
+        try:
+            expected_environment = qualification_environment(runtime, repo=repo)
+        except ValueError as error:
+            raise QualificationError(f"{label} launch environment is invalid") from error
         expected_pytest_command = [
             str(runtime["executable"]), "-m", "pytest", "-q",
             *QUALIFICATION_TEST_TARGETS,
@@ -664,6 +661,7 @@ def validate_qualification_evidence(
             context_sha256=context_sha256,
             expected_label=f"full {label} test suite",
             expected_runtime_sha256=str(runtime.get("runtime_sha256")),
+            expected_environment=expected_environment,
             expected_command=expected_pytest_command,
             expected_log_name=f"{label}-pytest.log",
             expected_record_keys=CHECK_RECORD_KEYS | {"scope", "excluded_tests"},
@@ -690,6 +688,7 @@ def validate_qualification_evidence(
             context_sha256=context_sha256,
             expected_label=f"{ranks}-rank MPI smoke test",
             expected_runtime_sha256=str(runtimes["python312"].get("runtime_sha256")),
+            expected_environment=qualification_environment(runtimes["python312"], repo=repo),
             expected_command=expected_mpi_command,
             expected_log_name=f"mpi-ranks-{ranks}.log",
             expected_record_keys=CHECK_RECORD_KEYS | {"interpreter"},
@@ -770,26 +769,23 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         "python310": args.python310.expanduser().resolve(strict=True),
         "python312": args.python312.expanduser().resolve(strict=True),
     }
-    environment = dict(os.environ)
-    for name in (
-        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-    ):
-        environment[name] = "1"
-    environment["PYTHONHASHSEED"] = "0"
-    inherited_pythonpath = environment.get("PYTHONPATH")
-    source_paths = os.pathsep.join((str(repo / "src"), str(repo / "scripts")))
-    environment["PYTHONPATH"] = (
-        source_paths
-        if not inherited_pythonpath
-        else source_paths + os.pathsep + inherited_pythonpath
-    )
+    git_path = shutil.which("git")
+    if git_path is None:
+        raise QualificationError("Git is unavailable for the launch environment")
+    # Only these explicit operational paths are selected from the driver.
+    # All other ambient variables, including inherited Python/MPI controls,
+    # are discarded by build_launch_environment.
+    home = Path.home().resolve()
+    tmpdir = Path(tempfile.gettempdir()).resolve()
+    git_bin = Path(git_path).resolve().parent
 
     evidence: dict[str, Any] = {}
     versions: dict[str, str] = {}
     runtime_environments: dict[str, dict[str, str]] = {}
     for label, executable in interpreters.items():
+        environment = build_launch_environment(
+            repo=repo, executable=executable, home=home, tmpdir=tmpdir, git_bin=git_bin,
+        )
         version = subprocess.run(
             [str(executable), "-c", "import sys; print(sys.version.split()[0])"],
             cwd=repo, env=environment, stdout=subprocess.PIPE,
@@ -816,23 +812,20 @@ def qualify(args: argparse.Namespace) -> dict[str, Any]:
         package_record = _publish_log(package_path, packages.stdout)
         executable_sha = release._sha256(executable)
         runtime_payload = {
-            "schema": "negfpy.material-nq1-python-runtime.v1",
+            "schema": "negfpy.material-nq1-python-runtime.v2",
             "label": label,
             "version": versions[label],
             "executable": str(executable),
             "executable_sha256": executable_sha,
             "packages_sha256": packages_sha,
+            "launch_environment": environment,
         }
         runtime_sha = hashlib.sha256(
             release._canonical(runtime_payload)
         ).hexdigest()
-        runtime_environment = dict(environment)
-        # Each staged Python runtime carries its own Open MPI/PRRTE prefix.
-        # Keep the full-suite subprocesses isolated from whichever runtime
-        # happened to launch the qualifier (the 3.10 and 3.12 bundles have
-        # distinct MPI libraries and help-file trees).
-        runtime_environment["OPAL_PREFIX"] = str(executable.parent.parent)
-        runtime_environment["NEGFPY_QUALIFICATION_RUNTIME_SHA256"] = runtime_sha
+        runtime_environment = qualification_environment(
+            runtime_payload | {"runtime_sha256": runtime_sha}, repo=repo,
+        )
         runtime_environments[label] = runtime_environment
         evidence[f"{label}_runtime"] = runtime_payload | {
             "runtime_sha256": runtime_sha,

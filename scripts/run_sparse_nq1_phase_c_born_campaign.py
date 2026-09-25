@@ -343,6 +343,7 @@ def _supervised_subprocess(
     stderr_path: Path,
     wall_limit_seconds: int | None = None,
     rss_limit_bytes: int | None = None,
+    launch_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     selected_wall_limit = (
         WALL_LIMIT_SECONDS if wall_limit_seconds is None else wall_limit_seconds
@@ -356,10 +357,21 @@ def _supervised_subprocess(
     }.items():
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
-    environment = os.environ.copy()
-    environment.update(phase_c.THREAD_LIMIT_ENV)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["PYTHONPATH"] = str((repo / "src").resolve())
+    if launch_environment is None:
+        environment = os.environ.copy()
+        environment.update(phase_c.THREAD_LIMIT_ENV)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONPATH"] = str((repo / "src").resolve())
+    else:
+        from negfpy.anharmonic._launch_environment import qualification_environment
+        supplied = dict(launch_environment)
+        marker = supplied.pop("NEGFPY_QUALIFICATION_RUNTIME_SHA256", None)
+        environment = qualification_environment({
+            "executable": command[0], "launch_environment": supplied,
+            "runtime_sha256": marker,
+        }, repo=repo)
+        if environment != dict(launch_environment):
+            raise ValueError("SCBA launch environment differs from qualified map")
     start = time.monotonic()
     peak_rss = 0
     trigger: str | None = None

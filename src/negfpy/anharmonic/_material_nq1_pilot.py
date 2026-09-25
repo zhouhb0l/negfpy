@@ -41,6 +41,7 @@ from ._material_nq1_campaign import (
     MaterialSCBATask,
     silicon_nq1_release_tasks,
 )
+from ._launch_environment import qualification_environment, validate_launch_environment
 from .current import _evaluate_current_report
 from .diagnostics import check_solution
 from .types import (
@@ -53,7 +54,8 @@ from .types import (
 
 PILOT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot.v1"
 PREFLIGHT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-preflight.v1"
-TASK_RECEIPT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-task-receipt.v1"
+TASK_RECEIPT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-task-receipt.v2"
+LAUNCH_ENVIRONMENT_SCHEMA = "negfpy.material-nq1-pilot-launch-environment.v1"
 COMPARISON_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-comparison.v1"
 REPORT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-report.v1"
 AUDIT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-audit.v1"
@@ -123,11 +125,11 @@ PILOT_THREAD_LIMITS = MappingProxyType({
     "VECLIB_MAXIMUM_THREADS": "1",
 })
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
-    "coupling-g0001": "nq1pv753-g1",
-    "coupling-g001": "nq1pv753-g01",
-    "coupling-g0015": "nq1pv753-g15",
-    "coupling-g002": "nq1pv753-g2",
-    "coupling-g0025": "nq1pv753-g25",
+    "coupling-g0001": "nq1env925-g1",
+    "coupling-g001": "nq1env925-g01",
+    "coupling-g0015": "nq1env925-g15",
+    "coupling-g002": "nq1env925-g2",
+    "coupling-g0025": "nq1env925-g25",
 })
 
 RELEASE_018_ANCHOR_ROOT = Path(
@@ -247,6 +249,10 @@ _QUALIFICATION_DRIVER_PATHS = (
     "scripts/qualify_material_nq1_candidate.py",
     "scripts/qualify_material_nq1_predictor_candidate.py",
     "scripts/run_material_nq1_release_mpi.py",
+    "src/negfpy/anharmonic/_launch_environment.py",
+    "scripts/run_material_nq1_predictor_pilot.py",
+    "scripts/run_sparse_nq1_phase_c_scba_campaign.py",
+    "scripts/run_sparse_nq1_phase_c_born_campaign.py",
     "scripts/validate_material_nq1_release.py",
     "scripts/validate_sparse_nq1_phase_c_scba.py",
     "tests/mpi/run_material_nq1_mpi_smoke.py",
@@ -1085,19 +1091,19 @@ def qualified_python312_runtime(
         name: runtime[name]
         for name in (
             "schema", "label", "version", "executable",
-            "executable_sha256", "packages_sha256",
+            "executable_sha256", "packages_sha256", "launch_environment",
         )
     } if isinstance(runtime, Mapping) and all(
         name in runtime for name in (
             "schema", "label", "version", "executable",
-            "executable_sha256", "packages_sha256",
+            "executable_sha256", "packages_sha256", "launch_environment",
         )
     ) else None
     if (
         not isinstance(runtime, Mapping)
         or runtime != context_runtime
         or runtime_payload is None
-        or runtime.get("schema") != "negfpy.material-nq1-python-runtime.v1"
+        or runtime.get("schema") != "negfpy.material-nq1-python-runtime.v2"
         or runtime.get("label") != "python312"
         or runtime.get("version") != PILOT_PYTHON_VERSION
         or sha256_bytes(canonical_json(runtime_payload))
@@ -1124,7 +1130,39 @@ def qualified_python312_runtime(
         or sha256_file(lock_path) != environment_lock.get("sha256")
     ):
         raise MaterialNQ1PilotError("qualified environment lock changed")
+    try:
+        qualification_environment(
+            runtime, repo=Path(validated["source_package_file"]).parents[2]
+        )
+    except (ValueError, KeyError, TypeError) as error:
+        raise MaterialNQ1PilotError("qualified launch environment changed") from error
     return dict(runtime), dict(environment_lock)
+
+
+def build_launch_environment_record(
+    manifest: Mapping[str, Any], task_id: str, runtime: Mapping[str, Any],
+    environment: Mapping[str, str],
+) -> dict[str, Any]:
+    """Bind the entire actual pilot and SCBA process environment before a solve."""
+
+    validated = validate_pilot_manifest(manifest)
+    _task_from_manifest(validated, task_id)
+    try:
+        expected = qualification_environment(
+            runtime, repo=Path(validated["source_package_file"]).parents[2]
+        )
+    except (ValueError, KeyError, TypeError) as error:
+        raise MaterialNQ1PilotError("qualified launch environment is invalid") from error
+    if dict(environment) != expected:
+        raise MaterialNQ1PilotError("actual pilot launch environment differs from qualification")
+    return {
+        "schema": LAUNCH_ENVIRONMENT_SCHEMA,
+        "pilot_sha256": validated["pilot_sha256"],
+        "task_id": task_id,
+        "runtime_sha256": runtime["runtime_sha256"],
+        "environment": expected,
+        "environment_sha256": sha256_bytes(canonical_json(expected)),
+    }
 
 
 def _fixed_task_layout(scba_root: str | Path, task_id: str) -> tuple[Path, Path]:
@@ -1834,6 +1872,15 @@ def build_task_receipt(
     qualified_runtime, qualified_lock = _bound_qualification_contract(
         validated, pilot_root
     )
+    launch_path = _regular_file(root.parent / "launch-environment.json", name="task launch environment")
+    launch = load_canonical_json(launch_path, name="task launch environment")
+    if (
+        stat.S_IMODE(launch_path.stat().st_mode) != 0o444
+        or launch != build_launch_environment_record(
+            validated, task_id, qualified_runtime, launch.get("environment", {})
+        )
+    ):
+        raise MaterialNQ1PilotError("task launch environment does not authenticate")
     paths = {
         "manifest": root / "campaign-manifest.json",
         "status": root / "status.json",
@@ -2271,6 +2318,7 @@ def build_task_receipt(
         "scientific_task_sha256": task["task_sha256"],
         "state": state,
         "scba_root": os.fspath(root),
+        "launch_environment": {"path": os.fspath(launch_path), "sha256": sha256_file(launch_path)},
         "scba_tree_records": records,
         "scba_tree_sha256": _tree_sha256(records),
         "terminal_hashes": hashes,
@@ -2298,6 +2346,7 @@ def validate_task_receipt(
         "scientific_task_sha256",
         "state",
         "scba_root",
+        "launch_environment",
         "scba_tree_records",
         "scba_tree_sha256",
         "terminal_hashes",
@@ -2578,7 +2627,7 @@ def _qualification_context_valid(
         "tracked_test_files", "driver_files", "qualification_context_sha256",
     }
     if set(context) != expected_keys or context.get("schema") != (
-        "negfpy.material-nq1-qualification-context.v1"
+        "negfpy.material-nq1-qualification-context.v2"
     ):
         return False
     payload = {name: context[name] for name in expected_keys - {"qualification_context_sha256"}}
@@ -2631,10 +2680,22 @@ def _qualification_context_valid(
         if not isinstance(runtime, Mapping):
             return False
         try:
+            qualification_environment(runtime, repo=repo)
+            payload = {
+                name: runtime[name] for name in (
+                    "schema", "label", "version", "executable",
+                    "executable_sha256", "packages_sha256", "launch_environment",
+                )
+            }
+            if (
+                runtime.get("schema") != "negfpy.material-nq1-python-runtime.v2"
+                or sha256_bytes(canonical_json(payload)) != runtime.get("runtime_sha256")
+            ):
+                return False
             executable = _regular_file(
                 runtime.get("executable"), name="qualified Python runtime"
             )
-        except MaterialNQ1PilotError:
+        except (MaterialNQ1PilotError, ValueError, KeyError, TypeError):
             return False
         if sha256_file(executable) != runtime.get("executable_sha256"):
             return False
@@ -2773,10 +2834,10 @@ def qualification_authorizes_pilot(
                     and set(runtime) == {
                         "schema", "label", "version", "executable",
                         "executable_sha256", "packages_sha256",
-                        "runtime_sha256", "package_manifest",
+                        "runtime_sha256", "package_manifest", "launch_environment",
                     }
                     and runtime.get("schema")
-                    == "negfpy.material-nq1-python-runtime.v1"
+                    == "negfpy.material-nq1-python-runtime.v2"
                     and runtime.get("label") == label
                     and runtime.get("version")
                     == base_evidence["python_versions"][label]
@@ -3052,6 +3113,7 @@ def _scheduler_workload_contract(
         "driver_sha256": sha256_file(driver),
         "command": command,
         "command_sha256": sha256_bytes(canonical_json(command)),
+        "launch_environment": qualification_environment(runtime, repo=repo),
     }
 
 
@@ -3090,12 +3152,24 @@ def _canonical_pbs_script(
     ):
         raise MaterialNQ1PilotError("PBS workload command contains unsafe bytes")
     python = literal_path(command[0], name="qualified P312 executable")
-    staged_path = os.pathsep.join((
-        os.fspath(PILOT_GIT_BIN),
-        os.fspath(Path(python).parent),
-        "/usr/bin",
-        "/bin",
-    ))
+    environment = workload.get("launch_environment")
+    if not isinstance(environment, Mapping):
+        raise MaterialNQ1PilotError("PBS workload lacks its qualified launch environment")
+    marker = environment.get("NEGFPY_QUALIFICATION_RUNTIME_SHA256")
+    try:
+        base_environment = validate_launch_environment(
+            {name: value for name, value in environment.items()
+             if name != "NEGFPY_QUALIFICATION_RUNTIME_SHA256"},
+            repo=Path(repo), executable=Path(python),
+        )
+    except (ValueError, KeyError, TypeError) as error:
+        raise MaterialNQ1PilotError("PBS launch environment is invalid") from error
+    if not isinstance(marker, str) or _SHA256.fullmatch(marker) is None:
+        raise MaterialNQ1PilotError("PBS workload lacks its qualified runtime identity")
+    environment = base_environment | {"NEGFPY_QUALIFICATION_RUNTIME_SHA256": marker}
+    temporary = Path(environment["TMPDIR"])
+    if temporary.parent != Path("/tmp") or not temporary.name.startswith("negfpy-"):
+        raise MaterialNQ1PilotError("PBS temporary directory must be a dedicated /tmp/negfpy-* child")
     lines = [
         "#!/bin/bash",
         f"#PBS -N {task['scheduler_job_name']}",
@@ -3111,18 +3185,14 @@ def _canonical_pbs_script(
         f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
         "umask 077",
-        f"export PATH={shlex.quote(staged_path)}",
-        "export GIT_CONFIG_NOSYSTEM=1",
-        "export GIT_CONFIG_GLOBAL=/dev/null",
-        "export LC_ALL=C",
-        "export TZ=UTC",
-        "export PYTHONDONTWRITEBYTECODE=1",
-        "export PYTHONNOUSERSITE=1",
-        "export PYTHONHASHSEED=0",
-        *(f"export {name}=1" for name in PILOT_THREAD_LIMITS),
-        f"export PYTHONPATH={shlex.quote(repo + '/src:' + repo + '/scripts')}",
+        f"test -d {shlex.quote(environment['HOME'])} && test ! -L {shlex.quote(environment['HOME'])}",
+        f"test ! -e {shlex.quote(environment['TMPDIR'])} && test ! -L {shlex.quote(environment['TMPDIR'])}",
+        f"/bin/mkdir -m 700 -- {shlex.quote(environment['TMPDIR'])}",
+        "trap " + shlex.quote("/bin/rm -rf -- " + shlex.quote(environment["TMPDIR"])) + " EXIT",
         f"cd -- {shlex.quote(repo)}",
-        f"exec {shlex.join(command)}",
+        "/usr/bin/env -i " + shlex.join(
+            [f"{name}={value}" for name, value in sorted(environment.items())] + command
+        ),
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -3714,6 +3784,7 @@ __all__ = [
     "FIELD_ATOL",
     "FIELD_DATASETS",
     "FIELD_RTOL",
+    "LAUNCH_ENVIRONMENT_SCHEMA",
     "PILOT_PBS_MEMORY",
     "PILOT_PBS_NCPUS",
     "PILOT_PBS_WALLTIME",
@@ -3734,6 +3805,7 @@ __all__ = [
     "anchor_task_id",
     "authenticate_anchor_source",
     "build_audit",
+    "build_launch_environment_record",
     "build_comparison",
     "build_final_report",
     "build_pilot_manifest",

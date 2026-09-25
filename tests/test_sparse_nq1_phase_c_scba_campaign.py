@@ -301,3 +301,42 @@ def test_existing_nonterminal_manifest_requires_explicit_resume_even_without_fai
             run_id="abrupt-run",
             coupling_scale=0.02,
         )
+
+
+def test_qualified_scba_supervisor_preserves_complete_launch_environment(tmp_path, monkeypatch):
+    import json
+    from negfpy.anharmonic._launch_environment import build_launch_environment
+
+    executable = Path(sys.executable).resolve()
+    environment = build_launch_environment(
+        repo=tmp_path, executable=executable, home=tmp_path,
+        tmpdir=tmp_path, git_bin=Path('/usr/bin'),
+    ) | {'NEGFPY_QUALIFICATION_RUNTIME_SHA256': 'a' * 64}
+    monkeypatch.setenv('UNRELATED_SECRET', 'must-not-reach-child')
+    monkeypatch.setattr(campaign.common, 'RSS_POLL_SECONDS', 0.01)
+    stdout = tmp_path / 'stdout'
+    result = campaign._supervise_scba(
+        (str(executable), '-c', 'import json,os; print(json.dumps(dict(os.environ),sort_keys=True))'),
+        repo=tmp_path, stdout_path=stdout, stderr_path=tmp_path / 'stderr',
+        launch_environment=environment,
+    )
+    assert result['returncode'] == 0
+    assert json.loads(stdout.read_text()) == environment
+
+
+def test_qualified_scba_supervisor_rejects_environment_drift_before_launch(tmp_path):
+    from negfpy.anharmonic._launch_environment import build_launch_environment
+
+    executable = Path(sys.executable).resolve()
+    environment = build_launch_environment(
+        repo=tmp_path, executable=executable, home=tmp_path,
+        tmpdir=tmp_path, git_bin=Path('/usr/bin'),
+    ) | {'NEGFPY_QUALIFICATION_RUNTIME_SHA256': 'a' * 64, 'LD_PRELOAD': '/unexpected.so'}
+    stdout = tmp_path / 'stdout'
+    with pytest.raises(ValueError, match='sanitized policy'):
+        campaign._supervise_scba(
+            (str(executable), '-c', 'raise SystemExit(99)'),
+            repo=tmp_path, stdout_path=stdout, stderr_path=tmp_path / 'stderr',
+            launch_environment=environment,
+        )
+    assert not stdout.exists()

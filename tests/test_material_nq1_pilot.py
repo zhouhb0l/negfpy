@@ -18,6 +18,7 @@ from negfpy.anharmonic import (
     SignedFrequencyGrid,
 )
 from negfpy.anharmonic import _material_nq1_pilot as pilot
+from negfpy.anharmonic._launch_environment import build_launch_environment, qualification_environment
 from negfpy.anharmonic._material_nq1_campaign import silicon_nq1_release_tasks
 from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
 from negfpy.anharmonic.toy import pinned_scalar_chain
@@ -120,12 +121,16 @@ def _qualification(path: Path, anchor_root: Path) -> None:
         executable.parent.mkdir(parents=True, exist_ok=True)
         executable.write_bytes((label + "\n").encode("ascii"))
         runtime_payload = {
-            "schema": "negfpy.material-nq1-python-runtime.v1",
+            "schema": "negfpy.material-nq1-python-runtime.v2",
             "label": label,
             "version": version,
             "executable": str(executable),
             "executable_sha256": pilot.sha256_file(executable),
             "packages_sha256": "b" * 64,
+            "launch_environment": build_launch_environment(
+                repo=repo, executable=executable, home=repo / "launch-home",
+                tmpdir=Path("/tmp/negfpy-pilot-fixture"), git_bin=repo / "git-bin",
+            ),
         }
         records[f"{label}_runtime"] = runtime_payload | {
             "runtime_sha256": pilot.sha256_bytes(
@@ -190,8 +195,6 @@ def _qualification(path: Path, anchor_root: Path) -> None:
             "sha256": pilot.sha256_file(selected),
             "size": selected.stat().st_size,
         }
-    pilot_driver = repo / "scripts/run_material_nq1_predictor_pilot.py"
-    pilot_driver.write_bytes(b"synthetic pilot driver\n")
     tracked = repo / "tests/test_dummy.py"
     tracked.parent.mkdir(parents=True, exist_ok=True)
     tracked.write_bytes(b"def test_dummy(): pass\n")
@@ -205,7 +208,7 @@ def _qualification(path: Path, anchor_root: Path) -> None:
     mpiexec = repo / "tools/mpiexec"
     mpiexec.write_bytes(b"synthetic mpiexec\n")
     context_payload = {
-        "schema": "negfpy.material-nq1-qualification-context.v1",
+        "schema": "negfpy.material-nq1-qualification-context.v2",
         "repo_root": str(repo),
         "source": {
             "commit": "1" * 40,
@@ -463,6 +466,12 @@ def _scba_tree(
         for selected in (root, *root.parents)
         if (selected / "pilot-manifest.json").is_file()
     )
+    pilot_manifest = pilot.load_canonical_json(candidate_root / "pilot-manifest.json", name="test pilot")
+    qualification = pilot.load_canonical_json(candidate_root / "qualification.json", name="test qualification")
+    runtime = qualification["evidence"]["base_qualification_evidence"]["records"]["python312_runtime"]
+    pilot.publish_json_once(root.parent / "launch-environment.json", pilot.build_launch_environment_record(
+        pilot_manifest, task.task_id, runtime, qualification_environment(runtime, repo=candidate_root / "repo")
+    ))
     continuation_parent = None
     if task.continuation_parent is not None:
         assert parent_receipt is not None
@@ -1208,11 +1217,11 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
     assert pilot.PILOT_PBS_QUEUE == "normal"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
     assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
-        "coupling-g0001": "nq1pv753-g1",
-        "coupling-g001": "nq1pv753-g01",
-        "coupling-g0015": "nq1pv753-g15",
-        "coupling-g002": "nq1pv753-g2",
-        "coupling-g0025": "nq1pv753-g25",
+        "coupling-g0001": "nq1env925-g1",
+        "coupling-g001": "nq1env925-g01",
+        "coupling-g0015": "nq1env925-g15",
+        "coupling-g002": "nq1env925-g2",
+        "coupling-g0025": "nq1env925-g25",
     }
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
@@ -1220,12 +1229,17 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
 
 
 def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
+    environment = build_launch_environment(
+        repo=Path("/candidate"), executable=Path("/staged/python/bin/python3.12"),
+        home=Path("/launch/home"), tmpdir=Path("/tmp/negfpy-pilot-fixture"), git_bin=pilot.PILOT_GIT_BIN,
+    ) | {"NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64}
     payload = pilot._canonical_pbs_script(
         task={"scheduler_job_name": "nq1pa-g0001"},
         stdout_path=Path("/evidence/task.stdout"),
         stderr_path=Path("/evidence/task.stderr"),
         workload={
             "repo_root": "/candidate",
+            "launch_environment": environment,
             "command": [
                 "/staged/python/bin/python3.12",
                 "/candidate/pilot.py",
@@ -1245,32 +1259,13 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     assert payload.count("#PBS -r n\n") == 1
     assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
     assert "#PBS -l walltime=50:00:00\n" in payload
-    isolated_environment = (
-        "export PYTHONDONTWRITEBYTECODE=1\n"
-        "export PYTHONNOUSERSITE=1\n"
-        "export PYTHONHASHSEED=0\n"
-    )
-    assert isolated_environment in payload
-    assert payload.count("export PYTHONNOUSERSITE=1\n") == 1
-    for line in (
-        "umask 077",
-        (
-            "export PATH=/scratch/GPFS/app/apps/git/2.39.2/bin:/staged/python/bin:"
-            "/usr/bin:/bin"
-        ),
-        "export GIT_CONFIG_NOSYSTEM=1",
-        "export GIT_CONFIG_GLOBAL=/dev/null",
-        "export LC_ALL=C",
-        "export TZ=UTC",
-        "export PYTHONPATH=/candidate/src:/candidate/scripts",
-        "cd -- /candidate",
-        (
-            "exec /staged/python/bin/python3.12 /candidate/pilot.py run-task"
-        ),
-    ):
+    assert "\n/usr/bin/env -i " in payload
+    assert "export " not in payload
+    for name, value in environment.items():
+        assert f"{name}={value}" in payload
+    for line in ("umask 077", "cd -- /candidate"):
         assert payload.count(line + "\n") == 1
-    for name in pilot.PILOT_THREAD_LIMITS:
-        assert payload.count(f"export {name}=1\n") == 1
+    assert payload.endswith("/staged/python/bin/python3.12 /candidate/pilot.py run-task\n")
     assert pilot.PILOT_PBS_NCPUS == 2
     assert pilot.PILOT_PBS_MEMORY == "16gb"
     assert pilot.PILOT_PBS_WALLTIME == "50:00:00"
@@ -2154,7 +2149,18 @@ def test_current_runtime_replays_qualified_package_inventory(
         "executable_sha256": pilot.sha256_file(Path(sys.executable).resolve()),
         "version": pilot.PILOT_PYTHON_VERSION,
         "packages_sha256": pilot.sha256_bytes(package_bytes),
+        "runtime_sha256": "a" * 64,
+        "launch_environment": build_launch_environment(
+            repo=Path(manifest["source_package_file"]).parents[2],
+            executable=Path(sys.executable).resolve(), home=tmp_path / "home",
+            tmpdir=tmp_path / "tmp", git_bin=tmp_path / "git-bin",
+        ),
     }
+    expected_environment = qualification_environment(
+        runtime, repo=Path(manifest["source_package_file"]).parents[2]
+    )
+    monkeypatch.setattr(pilot_runner.os, "environ", expected_environment)
+    monkeypatch.setattr(pilot_runner.sys, "executable", runtime["executable"])
     monkeypatch.setattr(
         pilot_runner,
         "qualified_python312_runtime",
@@ -2181,3 +2187,75 @@ def test_current_runtime_replays_qualified_package_inventory(
         ),
     )
     assert pilot_runner._current_runtime_matches(manifest, qualification)
+    alias = tmp_path / "qualified-python-alias"
+    alias.symlink_to(runtime["executable"])
+    monkeypatch.setattr(pilot_runner.sys, "executable", str(alias))
+    assert not pilot_runner._current_runtime_matches(manifest, qualification)
+    monkeypatch.setattr(pilot_runner.sys, "executable", runtime["executable"])
+    monkeypatch.setattr(pilot_runner.os, "environ", expected_environment | {"LD_PRELOAD": "/unqualified.so"})
+    assert not pilot_runner._current_runtime_matches(manifest, qualification)
+
+
+@pytest.mark.parametrize("change", ["opal", "extra", "missing", "runtime-marker"])
+def test_pilot_launch_environment_drift_is_rejected_before_task_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    manifest, _manifest_path, qualification_path = _manifest(tmp_path)
+    qualification = pilot.load_canonical_json(qualification_path, name="qualification")
+    runtime = qualification["evidence"]["base_qualification_evidence"]["records"]["python312_runtime"]
+    environment = qualification_environment(runtime, repo=tmp_path / "repo")
+    if change == "opal":
+        environment["OPAL_PREFIX"] = "/other/runtime"
+    elif change == "extra":
+        environment["OMPI_MCA_other_control"] = "1"
+    elif change == "missing":
+        environment.pop("TMPDIR")
+    else:
+        environment["NEGFPY_QUALIFICATION_RUNTIME_SHA256"] = "f" * 64
+    monkeypatch.setattr(pilot_runner.os, "environ", environment)
+    monkeypatch.setattr(pilot_runner, "_revalidate_bound_qualification", lambda *_args: (runtime, {}))
+    monkeypatch.setattr(pilot_runner, "_verify_live_candidate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pilot_runner, "_verify_prior_gates", lambda *_args: None)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="launch environment differs"):
+        pilot_runner.run_task(SimpleNamespace(root=tmp_path, task_id="coupling-g0001"))
+    assert not (tmp_path / "tasks/coupling-g0001").exists()
+
+
+def test_task_receipt_requires_immutable_exact_launch_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    manifest, _manifest_path, _qualification = _manifest(tmp_path)
+    _mock_checkpoints(monkeypatch)
+    task = pilot.predictor_pilot_tasks()[0]
+    receipt_path = _receipt(tmp_path, manifest, task, None)
+    launch_path = receipt_path.parent / "launch-environment.json"
+    launch = pilot.load_canonical_json(launch_path, name="launch environment")
+    assert pilot.validate_task_receipt(manifest, receipt_path)["launch_environment"]["sha256"] == pilot.sha256_file(launch_path)
+    launch["environment"]["OPAL_PREFIX"] = "/changed/runtime"
+    os.chmod(launch_path, 0o644)
+    launch_path.write_bytes(pilot.canonical_json(launch))
+    os.chmod(launch_path, 0o444)
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="launch environment differs"):
+        pilot.validate_task_receipt(manifest, receipt_path)
+
+
+@pytest.mark.parametrize("target", ["runtime", "context"])
+def test_historical_environment_unbound_qualification_is_rejected(
+    tmp_path: Path, target: str,
+) -> None:
+    manifest, _manifest_path, qualification_path = _manifest(tmp_path)
+    qualification = pilot.load_canonical_json(qualification_path, name="qualification")
+    base = qualification["evidence"]["base_qualification_evidence"]
+    context = base["qualification_context"]
+    if target == "runtime":
+        runtime = base["records"]["python312_runtime"]
+        runtime["schema"] = "negfpy.material-nq1-python-runtime.v1"
+        runtime.pop("launch_environment")
+        context["runtimes"]["python312"] = runtime
+    else:
+        context["schema"] = "negfpy.material-nq1-qualification-context.v1"
+    context["qualification_context_sha256"] = pilot.sha256_bytes(pilot.canonical_json({
+        name: value for name, value in context.items() if name != "qualification_context_sha256"
+    }))
+    assert not pilot.qualification_authorizes_pilot(manifest, qualification)
