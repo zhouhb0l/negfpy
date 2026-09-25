@@ -41,7 +41,7 @@ def build_launch_environment(
         "PYTHONUTF8": "1",
         "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0",
-        "OPAL_PREFIX": str(prefix),
+        "OPAL_PREFIX": str(prefix), "PMIX_PREFIX": str(prefix),
         "OMPI_MCA_pml": "ob1", "OMPI_MCA_btl": "self,sm",
         "OMPI_MCA_rmaps_base_oversubscribe": "1",
         **{name: "1" for name in THREAD_KEYS},

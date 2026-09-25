@@ -45,3 +45,18 @@ the scientific subprocess environment.
 Tests cover actual child environment equality, environment insertion/removal
 preventing reuse, rehashed receipt forgery, legacy schema refusal, pilot rejection
 before task-root creation, and preservation through the SCBA supervisor.
+
+## PMIx relocation follow-up
+
+The first environment candidate (33e785d) passed all six MPI micro allgathers
+and both ten-test fault suites on Aspire2A, but its probe correctly failed on
+nonempty micro stderr. PMIx searched the old compiled installation prefix for
+its compression component/help data. That attempt remains immutable failure
+evidence and does not authorize qualification.
+
+This follow-up adds PMIX_PREFIX equal to each runtime prefix to the exact
+sanitized map and uses fresh pilot scheduler names. It does not silence PMIx
+warnings. The existing zlib component should be discovered at the relocated
+prefix; fresh bounded diagnostics must establish that before qualification.
+See the official PMIx [relocation documentation](https://docs.openpmix.org/en/latest/installing-pmix/installation-location.html)
+and [v5.0.8 installdirs environment implementation](https://github.com/openpmix/openpmix/blob/v5.0.8/src/mca/pinstalldirs/env/pmix_pinstalldirs_env.c).

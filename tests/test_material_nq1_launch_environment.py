@@ -183,3 +183,16 @@ def test_qualification_rejects_invalid_runtime_marker(
     }
     with pytest.raises(ValueError):
         qualification_environment(runtime, repo=launch_paths["repo"])
+
+
+def test_pmix_relocation_is_bound_and_cannot_drift(tmp_path):
+    environment = build_launch_environment(
+        repo=tmp_path, executable=tmp_path / "runtime/bin/python3.12",
+        home=tmp_path, tmpdir=tmp_path, git_bin=Path("/usr/bin"),
+    )
+    assert environment["PMIX_PREFIX"] == str(tmp_path / "runtime")
+    for changed in (dict(environment, PMIX_PREFIX="/old/build/prefix"),
+                    {k:v for k,v in environment.items() if k != "PMIX_PREFIX"}):
+        with pytest.raises(ValueError, match="sanitized policy"):
+            validate_launch_environment(changed, repo=tmp_path,
+                executable=tmp_path / "runtime/bin/python3.12")
