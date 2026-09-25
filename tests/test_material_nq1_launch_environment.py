@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -43,6 +46,7 @@ def test_sanitizer_ignores_ambient_injection_and_binds_explicit_paths(
         "OPAL_PREFIX": "/untrusted/openmpi",
         "OMPI_MCA_pml": "ucx",
         "OMPI_MCA_btl": "self,tcp",
+        "KMP_DUPLICATE_LIB_OK": "False",
         "HOME": "/untrusted/home",
         "TMPDIR": "/untrusted/tmp",
         "GIT_CONFIG_COUNT": "1",
@@ -66,6 +70,7 @@ def test_sanitizer_ignores_ambient_injection_and_binds_explicit_paths(
     assert environment["OMPI_MCA_pml"] == "ob1"
     assert environment["OMPI_MCA_btl"] == "self,sm"
     assert environment["OMPI_MCA_rmaps_base_oversubscribe"] == "1"
+    assert environment["KMP_DUPLICATE_LIB_OK"] == "True"
     for name in (
         "LD_PRELOAD", "LD_LIBRARY_PATH", "API_SECRET", "OPENAI_API_KEY",
         "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -101,6 +106,8 @@ def test_sanitized_environment_round_trips_and_qualification_adds_only_runtime_h
         ("OMPI_MCA_pml", "ucx"),
         ("OMPI_MCA_btl", "self,tcp"),
         ("OMPI_MCA_rmaps_base_oversubscribe", "0"),
+        ("KMP_DUPLICATE_LIB_OK", "False"),
+        ("KMP_DUPLICATE_LIB_OK", "true"),
         ("PYTHONPATH", "/untrusted/modules"),
         ("OMP_NUM_THREADS", "8"),
         ("PYTHONHASHSEED", "random"),
@@ -120,7 +127,7 @@ def test_validator_rejects_changed_controls_and_extra_variables(
         )
 
 
-@pytest.mark.parametrize("name", ["HOME", "TMPDIR", "PATH", "OPAL_PREFIX", "OMPI_MCA_btl"])
+@pytest.mark.parametrize("name", ["HOME", "TMPDIR", "PATH", "OPAL_PREFIX", "OMPI_MCA_btl", "KMP_DUPLICATE_LIB_OK"])
 def test_validator_rejects_missing_launch_variables(
     launch_paths: dict[str, Path], name: str,
 ) -> None:
@@ -196,3 +203,59 @@ def test_pmix_relocation_is_bound_and_cannot_drift(tmp_path):
         with pytest.raises(ValueError, match="sanitized policy"):
             validate_launch_environment(changed, repo=tmp_path,
                 executable=tmp_path / "runtime/bin/python3.12")
+
+
+@pytest.mark.parametrize("entry", ["import", "main-help"])
+def test_fresh_pilot_startup_preserves_the_entire_qualified_environment(
+    tmp_path: Path, entry: str,
+) -> None:
+    """Exercise real dependency imports outside pytest's populated modules."""
+    repo = Path(__file__).resolve().parents[1]
+    executable = Path(sys.executable).resolve()
+    runtime = {
+        "executable": str(executable),
+        "launch_environment": build_launch_environment(
+            repo=repo, executable=executable, home=tmp_path,
+            tmpdir=tmp_path, git_bin=Path("/usr/bin"),
+        ),
+        "runtime_sha256": "a" * 64,
+    }
+    environment = qualification_environment(runtime, repo=repo)
+    driver = repo / "scripts/run_material_nq1_predictor_pilot.py"
+    # Capture immediately on interpreter entry, before the real driver loads
+    # threadpoolctl. Do not replace os.environ or pre-import candidate modules.
+    code = """
+import importlib
+import json
+import os
+import runpy
+import sys
+before = dict(os.environ)
+driver, entry = sys.argv[1:]
+if entry == 'import':
+    module = importlib.import_module('run_material_nq1_predictor_pilot')
+    assert module.__file__ == driver
+else:
+    sys.argv = [driver, '--help']
+    try:
+        runpy.run_path(driver, run_name='__main__')
+    except SystemExit as error:
+        assert error.code == 0
+    else:
+        raise AssertionError('pilot CLI help did not terminate')
+print(json.dumps({'before': before, 'after': dict(os.environ),
+                  'threadpoolctl_loaded': 'threadpoolctl' in sys.modules},
+                 sort_keys=True))
+"""
+    completed = subprocess.run(
+        [str(executable), "-B", "-c", code, str(driver), entry],
+        cwd=repo, env=environment, capture_output=True, text=True,
+        check=False, timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    observed = json.loads(completed.stdout.splitlines()[-1])
+    assert observed["threadpoolctl_loaded"] is True
+    assert observed["before"] == environment
+    assert observed["after"] == environment
+    assert observed["after"]["KMP_DUPLICATE_LIB_OK"] == "True"

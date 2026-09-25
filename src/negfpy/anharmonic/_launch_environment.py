@@ -44,6 +44,9 @@ def build_launch_environment(
         "OPAL_PREFIX": str(prefix), "PMIX_PREFIX": str(prefix),
         "OMPI_MCA_pml": "ob1", "OMPI_MCA_btl": "self,sm",
         "OMPI_MCA_rmaps_base_oversubscribe": "1",
+        # threadpoolctl 3.6.0 sets this exact default during the pilot's imports.
+        # Bind it before startup so imports preserve the qualified environment.
+        "KMP_DUPLICATE_LIB_OK": "True",
         **{name: "1" for name in THREAD_KEYS},
     }
     return dict(sorted(values.items()))

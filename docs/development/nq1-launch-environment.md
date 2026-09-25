@@ -60,3 +60,45 @@ warnings. The existing zlib component should be discovered at the relocated
 prefix; fresh bounded diagnostics must establish that before qualification.
 See the official PMIx [relocation documentation](https://docs.openpmix.org/en/latest/installing-pmix/installation-location.html)
 and [v5.0.8 installdirs environment implementation](https://github.com/openpmix/openpmix/blob/v5.0.8/src/mca/pinstalldirs/env/pmix_pinstalldirs_env.c).
+
+## Dependency startup environment follow-up
+
+The PMIx candidate (81903bb) passed qualification, but its first pilot job
+25547851.pbs101 failed before creating a scientific task root. Its submitted
+environment exactly matched the qualified map. A local fresh-process
+reproduction found that importing the pilot adds `KMP_DUPLICATE_LIB_OK=True`:
+the pilot imports the qualification/release drivers, which import
+`_material_nq1_mpi`, `_mpi_tasks`, and then `threadpoolctl`.
+The pinned `threadpoolctl` 3.6.0 source calls
+`os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")` at import time.
+Preparation had imported those modules before restoring the qualified map,
+whereas a direct pilot launch performs those imports after receiving that map.
+
+Read-only compute diagnostic 25548204.pbs101 reached F/0 on
+`x1003c4s2b1n0` and confirmed the same single added environment entry. The
+recursive qualification validator returned the exact report, while the
+original runtime check returned false in 0.337 seconds before invoking pip.
+In the diagnostic's isolated reset case, that runtime check passed in
+10.96 seconds, with `pip freeze --all` reproducing package SHA-256
+`5bbc800922a2572e5ceff88e4f8407c2ccff417b6780c6f0d4e8b462468ac73b`.
+Preseeding the exact KMP value preserved the complete environment across fresh
+imports; the old candidate's gate still correctly rejected that unqualified
+extra key. Pinned inputs were unchanged. These observations establish the
+startup mismatch, not a passing scientific task or authority to retry the
+failed pilot.
+
+This new candidate binds the dependency's exact existing default before Python startup.
+The complete environment remains part of runtime, receipt, and pilot identity;
+imports do not receive a post-startup exemption. Fresh-process tests cover both
+normal import and the driver's `__main__` help path, checking every environment
+entry before and after the real dependency imports. Changed or absent KMP
+controls fail validation and cannot reuse a qualification check receipt.
+
+Fresh scheduler names are `nq1kmp925-g1`, `nq1kmp925-g01`, `nq1kmp925-g15`,
+`nq1kmp925-g2`, and `nq1kmp925-g25`. The failed PMIx pilot remains immutable.
+The source and operations changes passed independent review. The reviewed
+source is frozen as a new candidate for fresh qualification and a separately
+identified five-task pilot. The affected local suites passed 200 tests on
+Python 3.12 and 199 with one existing Python 3.12-only skip on Python 3.10.
+This candidate has not yet passed fresh qualification or science; no convergence
+or release claim follows from the startup fix.

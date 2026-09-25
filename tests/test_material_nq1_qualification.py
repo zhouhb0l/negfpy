@@ -181,6 +181,7 @@ def test_passed_receipt_reruns_for_tool_path_identity_drift(tmp_path: Path) -> N
         ("OMPI_MCA_pml", "ucx"),
         ("OMPI_MCA_btl", "self,tcp"),
         ("OMPI_MCA_rmaps_base_oversubscribe", "0"),
+        ("KMP_DUPLICATE_LIB_OK", "False"),
         ("HOME", "/different/home"),
         ("TMPDIR", "/different/tmp"),
         ("LD_LIBRARY_PATH", "/different/libraries"),
@@ -208,7 +209,7 @@ def test_passed_receipt_cannot_reuse_any_changed_launch_environment(
     assert second["identity_sha256"] != first["identity_sha256"]
 
 
-@pytest.mark.parametrize("name", ["OPAL_PREFIX", "OMPI_MCA_btl", "HOME", "TMPDIR"])
+@pytest.mark.parametrize("name", ["OPAL_PREFIX", "OMPI_MCA_btl", "HOME", "TMPDIR", "KMP_DUPLICATE_LIB_OK"])
 def test_passed_receipt_cannot_reuse_dropped_launch_environment_key(
     tmp_path: Path, name: str,
 ) -> None:
@@ -410,10 +411,12 @@ def test_recursive_check_validation_rejects_tampered_evidence(
         pytest.param(lambda env: env.update(OPAL_PREFIX="/unqualified"), id="opal"),
         pytest.param(lambda env: env.update(OMPI_MCA_pml="ucx"), id="mpi-pml"),
         pytest.param(lambda env: env.update(OMPI_MCA_btl="self,tcp"), id="mpi-btl"),
+        pytest.param(lambda env: env.update(KMP_DUPLICATE_LIB_OK="False"), id="kmp"),
         pytest.param(lambda env: env.update(TMPDIR="/unqualified"), id="tmpdir"),
         pytest.param(lambda env: env.update(HOME="/unqualified"), id="home"),
         pytest.param(lambda env: env.update(EXTRA_CONTROL="injected"), id="extra-key"),
         pytest.param(lambda env: env.pop("OPAL_PREFIX"), id="missing-key"),
+        pytest.param(lambda env: env.pop("KMP_DUPLICATE_LIB_OK"), id="missing-kmp"),
     ],
 )
 def test_recursive_validation_rejects_rehashed_environment_forgery(
