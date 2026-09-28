@@ -125,11 +125,11 @@ PILOT_THREAD_LIMITS = MappingProxyType({
     "VECLIB_MAXIMUM_THREADS": "1",
 })
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
-    "coupling-g0001": "nq1kmp925-g1",
-    "coupling-g001": "nq1kmp925-g01",
-    "coupling-g0015": "nq1kmp925-g15",
-    "coupling-g002": "nq1kmp925-g2",
-    "coupling-g0025": "nq1kmp925-g25",
+    "coupling-g0001": "nq1ds928-g1",
+    "coupling-g001": "nq1ds928-g01",
+    "coupling-g0015": "nq1ds928-g15",
+    "coupling-g002": "nq1ds928-g2",
+    "coupling-g0025": "nq1ds928-g25",
 })
 
 RELEASE_018_ANCHOR_ROOT = Path(

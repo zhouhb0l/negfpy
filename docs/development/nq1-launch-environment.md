@@ -102,3 +102,24 @@ identified five-task pilot. The affected local suites passed 200 tests on
 Python 3.12 and 199 with one existing Python 3.12-only skip on Python 3.10.
 This candidate has not yet passed fresh qualification or science; no convergence
 or release claim follows from the startup fix.
+
+
+## Durable scheduler evidence development — 2026-09-28
+
+This new candidate reserves the fresh pilot scheduler names `nq1ds928-g1`,
+`nq1ds928-g01`, `nq1ds928-g15`, `nq1ds928-g2`, and `nq1ds928-g25`.
+The source scientific algorithms, thresholds, task order, complete launch
+environment, and scheduler acceptance requirements are unchanged.
+
+The earlier `material-nq1-kmp-pilot-001` execution is preserved: its second
+scientific task has saved convergence, but its exact terminal PBS evidence was
+not captured before history became unavailable. That execution is not accepted
+as a complete pass, is not resumed, and supplies no authorization for this one.
+
+A separately reviewed operations profile must capture terminal scheduler
+evidence durably without depending on a conversational monitor being awake.
+It must retain exact scheduler F/0, science, and applicable anchor gates and
+allow no consumed-job retry. This candidate requires its own fresh probe,
+qualification, virgin execution identity, and five-task pilot before any pilot
+pass may be claimed. These source names alone do not implement a watcher or
+authorize a scheduler submission. Nq=1 remains unreleased.
