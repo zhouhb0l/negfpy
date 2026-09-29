@@ -156,3 +156,22 @@ reserving a full node does not itself parallelize the solver. The independent
 Born supervisor remains unchanged. A new frozen operations profile, fresh
 probe and qualification, and separately reviewed generated pilot profile are
 required before any new scientific submission. Nq=1 remains unreleased.
+
+
+## Portable q4 request — 2026-09-29
+
+The first q4 profile was rejected by `qsub` before a job was created:
+`node_pool` is not permitted in the submitted select specification. The
+rejected candidate and one-shot submission evidence remain unchanged.
+
+This fresh candidate submits only portable resource fields:
+`select=1:ncpus=128:mem=440gb` with `walltime=24:00:00`, through `normal`
+routing to q4. The scheduler assigns its internal node pool. No `node_pool`
+resource or physical host is requested. Fresh pilot names are `nq1q4p29-g1`,
+`nq1q4p29-g01`, `nq1q4p29-g15`, `nq1q4p29-g2` and `nq1q4p29-g25`.
+
+The 128-CPU/440-GiB allocation, 23-hour/430-GiB SCBA supervisor, scientific
+controls, single-threaded environment and acceptance gates are otherwise
+unchanged from the q4 resource candidate. This correction requires a fresh
+profile, probe and qualification; a rejected submission supplies no passing
+scheduler or computational evidence. Nq=1 remains unreleased.

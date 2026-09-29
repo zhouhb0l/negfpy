@@ -107,7 +107,6 @@ PILOT_PBS_WALLTIME = "24:00:00"
 PILOT_PBS_PROJECT = "13004417"
 # Aspire2A accepts submissions through normal and routes this contract to q4.
 PILOT_PBS_QUEUE = "normal"
-PILOT_PBS_NODE_POOL = "ex"
 # Aspire2A exposes /app as a symlink; use its canonical lexical path so the
 # fail-closed ancestry checks do not reject the approved scheduler runtime.
 PILOT_GIT_BIN = Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
@@ -130,11 +129,11 @@ PILOT_THREAD_LIMITS = MappingProxyType({
     "VECLIB_MAXIMUM_THREADS": "1",
 })
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
-    "coupling-g0001": "nq1q4929-g1",
-    "coupling-g001": "nq1q4929-g01",
-    "coupling-g0015": "nq1q4929-g15",
-    "coupling-g002": "nq1q4929-g2",
-    "coupling-g0025": "nq1q4929-g25",
+    "coupling-g0001": "nq1q4p29-g1",
+    "coupling-g001": "nq1q4p29-g01",
+    "coupling-g0015": "nq1q4p29-g15",
+    "coupling-g002": "nq1q4p29-g2",
+    "coupling-g0025": "nq1q4p29-g25",
 })
 
 RELEASE_018_ANCHOR_ROOT = Path(
@@ -3186,7 +3185,6 @@ def _canonical_pbs_script(
         (
             "#PBS -l select=1:"
             f"ncpus={PILOT_PBS_NCPUS}:mem={PILOT_PBS_MEMORY}"
-            f":node_pool={PILOT_PBS_NODE_POOL}"
         ),
         f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
@@ -3793,7 +3791,6 @@ __all__ = [
     "LAUNCH_ENVIRONMENT_SCHEMA",
     "PILOT_PBS_MEMORY",
     "PILOT_PBS_NCPUS",
-    "PILOT_PBS_NODE_POOL",
     "PILOT_PBS_WALLTIME",
     "PILOT_RSS_LIMIT_BYTES",
     "PILOT_SCHEMA",

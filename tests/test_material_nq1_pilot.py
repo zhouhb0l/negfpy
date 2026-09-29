@@ -1215,14 +1215,13 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
     }
     assert pilot.PILOT_PBS_PROJECT == "13004417"
     assert pilot.PILOT_PBS_QUEUE == "normal"
-    assert pilot.PILOT_PBS_NODE_POOL == "ex"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
     assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
-        "coupling-g0001": "nq1q4929-g1",
-        "coupling-g001": "nq1q4929-g01",
-        "coupling-g0015": "nq1q4929-g15",
-        "coupling-g002": "nq1q4929-g2",
-        "coupling-g0025": "nq1q4929-g25",
+        "coupling-g0001": "nq1q4p29-g1",
+        "coupling-g001": "nq1q4p29-g01",
+        "coupling-g0015": "nq1q4p29-g15",
+        "coupling-g002": "nq1q4p29-g2",
+        "coupling-g0025": "nq1q4p29-g25",
     }
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
@@ -1258,9 +1257,10 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     assert payload.count("#PBS -P 13004417\n") == 1
     assert payload.count("#PBS -q normal\n") == 1
     assert payload.count("#PBS -r n\n") == 1
-    assert "#PBS -l select=1:ncpus=128:mem=440gb:node_pool=ex\n" in payload
+    assert "#PBS -l select=1:ncpus=128:mem=440gb\n" in payload
     assert "#PBS -l walltime=24:00:00\n" in payload
     assert ":host=" not in payload
+    assert "node_pool" not in payload
     assert "\n/usr/bin/env -i " in payload
     assert "export " not in payload
     for name, value in environment.items():
