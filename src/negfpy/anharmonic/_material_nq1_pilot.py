@@ -96,13 +96,18 @@ CURRENT_ATOL = 1.0e-12
 ANCHOR_RESIDUAL_FACTOR = 2.0
 EXPECTED_FIELD_SHAPE = (151, 216, 216)
 EXPECTED_FIELD_DTYPE = "complex128"
-PILOT_WALL_LIMIT_SECONDS = 48 * 60 * 60
-PILOT_RSS_LIMIT_BYTES = 8 * 1024**3
-PILOT_PBS_NCPUS = 2
-PILOT_PBS_MEMORY = "16gb"
-PILOT_PBS_WALLTIME = "50:00:00"
+# The q4 allocation is a complete standard-memory node.  Preserve an hour for
+# bounded process cleanup and receipt publication before the PBS deadline, and
+# 10 GiB outside the supervised process group for runtime/OS overhead.
+PILOT_WALL_LIMIT_SECONDS = 23 * 60 * 60
+PILOT_RSS_LIMIT_BYTES = 430 * 1024**3
+PILOT_PBS_NCPUS = 128
+PILOT_PBS_MEMORY = "440gb"
+PILOT_PBS_WALLTIME = "24:00:00"
 PILOT_PBS_PROJECT = "13004417"
+# Aspire2A accepts submissions through normal and routes this contract to q4.
 PILOT_PBS_QUEUE = "normal"
+PILOT_PBS_NODE_POOL = "ex"
 # Aspire2A exposes /app as a symlink; use its canonical lexical path so the
 # fail-closed ancestry checks do not reject the approved scheduler runtime.
 PILOT_GIT_BIN = Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
@@ -125,11 +130,11 @@ PILOT_THREAD_LIMITS = MappingProxyType({
     "VECLIB_MAXIMUM_THREADS": "1",
 })
 PILOT_SCHEDULER_JOB_NAMES = MappingProxyType({
-    "coupling-g0001": "nq1ds928-g1",
-    "coupling-g001": "nq1ds928-g01",
-    "coupling-g0015": "nq1ds928-g15",
-    "coupling-g002": "nq1ds928-g2",
-    "coupling-g0025": "nq1ds928-g25",
+    "coupling-g0001": "nq1q4929-g1",
+    "coupling-g001": "nq1q4929-g01",
+    "coupling-g0015": "nq1q4929-g15",
+    "coupling-g002": "nq1q4929-g2",
+    "coupling-g0025": "nq1q4929-g25",
 })
 
 RELEASE_018_ANCHOR_ROOT = Path(
@@ -3181,6 +3186,7 @@ def _canonical_pbs_script(
         (
             "#PBS -l select=1:"
             f"ncpus={PILOT_PBS_NCPUS}:mem={PILOT_PBS_MEMORY}"
+            f":node_pool={PILOT_PBS_NODE_POOL}"
         ),
         f"#PBS -l walltime={PILOT_PBS_WALLTIME}",
         "set -euo pipefail",
@@ -3787,6 +3793,7 @@ __all__ = [
     "LAUNCH_ENVIRONMENT_SCHEMA",
     "PILOT_PBS_MEMORY",
     "PILOT_PBS_NCPUS",
+    "PILOT_PBS_NODE_POOL",
     "PILOT_PBS_WALLTIME",
     "PILOT_RSS_LIMIT_BYTES",
     "PILOT_SCHEMA",

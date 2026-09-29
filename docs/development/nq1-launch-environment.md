@@ -123,3 +123,36 @@ allow no consumed-job retry. This candidate requires its own fresh probe,
 qualification, virgin execution identity, and five-task pilot before any pilot
 pass may be claimed. These source names alone do not implement a watcher or
 authorize a scheduler submission. Nq=1 remains unreleased.
+
+
+## q4 resource contract — 2026-09-29
+
+The user requested q4, a 24-hour walltime and the maximum allowed resources
+for future computational tasks, and authorized cancellation and replacement
+of the pending qualification. This new candidate preserves the earlier
+source and evidence and reserves fresh pilot names `nq1q4929-g1`,
+`nq1q4929-g01`, `nq1q4929-g15`, `nq1q4929-g2` and `nq1q4929-g25`.
+
+The canonical pilot PBS request now uses `normal` routing with
+`select=1:ncpus=128:mem=440gb:node_pool=ex` and `walltime=24:00:00`.
+The live q4 queue permits 128 CPUs and 24 hours; 440 GiB fits the standard
+compute nodes, whose available memory is approximately 440.3 GiB. No physical
+host is pinned. The allocation remains on one node because the authenticated
+MPI transport uses local shared memory. Scheduler observations must confirm
+the effective q4 queue and exact allocation before acceptance.
+
+The actual SCBA supervisor and the pilot receipt validator now agree on a
+23-hour wall limit and a 430-GiB aggregate process RSS limit. These bounds
+leave one hour for termination and evidence publication, and 10 GiB of the
+requested memory for runtime and OS overhead outside the supervised process
+group. Reducing the former 48-hour watchdog can terminate a long solve
+earlier; such a termination is an infrastructure outcome and never a
+scientific pass. It cannot be retried under a consumed execution identity.
+
+SCBA equations, convergence thresholds, the 800-iteration budget, task order,
+anchor comparisons, and the complete launch environment remain unchanged.
+Thread limits remain one and qualification MPI smokes remain 2 and 4 ranks;
+reserving a full node does not itself parallelize the solver. The independent
+Born supervisor remains unchanged. A new frozen operations profile, fresh
+probe and qualification, and separately reviewed generated pilot profile are
+required before any new scientific submission. Nq=1 remains unreleased.

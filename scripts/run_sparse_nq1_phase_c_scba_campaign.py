@@ -19,14 +19,13 @@ from typing import Any
 import run_sparse_nq1_phase_c_born_campaign as common
 import validate_sparse_nq1_phase_c_scba as case
 
-# The material SCBA fixed point is substantially more expensive than the
-# lightweight Born gate.  Keep its infrastructure watchdog explicit and
-# independent while preserving the same RSS and termination safeguards.
-# The g=0.025 continuation reached iteration 317 before the prior 12-hour
-# infrastructure watchdog fired.  Keep the longer bound explicit in this
-# separately qualified candidate; Born retains its independent 2-hour gate.
-SCBA_WALL_LIMIT_SECONDS = 48 * 60 * 60
-SCBA_RSS_LIMIT_BYTES = 8 * 1024**3
+# The q4 candidate requests one 128-CPU, 440-GiB node for 24 hours.  Leave one
+# hour for termination and immutable outcome publication before PBS expiry,
+# and 10 GiB for runtime/OS overhead outside the supervised process group.
+# These infrastructure limits are separate from SCBA's scientific controls.
+# Born retains its independent two-hour gate.
+SCBA_WALL_LIMIT_SECONDS = 23 * 60 * 60
+SCBA_RSS_LIMIT_BYTES = 430 * 1024**3
 
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v2"

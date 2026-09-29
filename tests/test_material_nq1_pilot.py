@@ -1215,13 +1215,14 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
     }
     assert pilot.PILOT_PBS_PROJECT == "13004417"
     assert pilot.PILOT_PBS_QUEUE == "normal"
+    assert pilot.PILOT_PBS_NODE_POOL == "ex"
     assert pilot.PILOT_GIT_BIN == Path("/scratch/GPFS/app/apps/git/2.39.2/bin")
     assert dict(pilot.PILOT_SCHEDULER_JOB_NAMES) == {
-        "coupling-g0001": "nq1ds928-g1",
-        "coupling-g001": "nq1ds928-g01",
-        "coupling-g0015": "nq1ds928-g15",
-        "coupling-g002": "nq1ds928-g2",
-        "coupling-g0025": "nq1ds928-g25",
+        "coupling-g0001": "nq1q4929-g1",
+        "coupling-g001": "nq1q4929-g01",
+        "coupling-g0015": "nq1q4929-g15",
+        "coupling-g002": "nq1q4929-g2",
+        "coupling-g0025": "nq1q4929-g25",
     }
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
@@ -1257,8 +1258,9 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     assert payload.count("#PBS -P 13004417\n") == 1
     assert payload.count("#PBS -q normal\n") == 1
     assert payload.count("#PBS -r n\n") == 1
-    assert "#PBS -l select=1:ncpus=2:mem=16gb\n" in payload
-    assert "#PBS -l walltime=50:00:00\n" in payload
+    assert "#PBS -l select=1:ncpus=128:mem=440gb:node_pool=ex\n" in payload
+    assert "#PBS -l walltime=24:00:00\n" in payload
+    assert ":host=" not in payload
     assert "\n/usr/bin/env -i " in payload
     assert "export " not in payload
     for name, value in environment.items():
@@ -1266,11 +1268,13 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     for line in ("umask 077", "cd -- /candidate"):
         assert payload.count(line + "\n") == 1
     assert payload.endswith("/staged/python/bin/python3.12 /candidate/pilot.py run-task\n")
-    assert pilot.PILOT_PBS_NCPUS == 2
-    assert pilot.PILOT_PBS_MEMORY == "16gb"
-    assert pilot.PILOT_PBS_WALLTIME == "50:00:00"
-    assert pilot.PILOT_WALL_LIMIT_SECONDS < 50 * 60 * 60
-    assert pilot.PILOT_RSS_LIMIT_BYTES < 16 * 1000**3
+    assert pilot.PILOT_PBS_NCPUS == 128
+    assert pilot.PILOT_PBS_MEMORY == "440gb"
+    assert pilot.PILOT_PBS_WALLTIME == "24:00:00"
+    assert pilot.PILOT_WALL_LIMIT_SECONDS == 23 * 60 * 60
+    assert pilot.PILOT_RSS_LIMIT_BYTES == 430 * 1024**3
+    assert 24 * 60 * 60 - pilot.PILOT_WALL_LIMIT_SECONDS == 60 * 60
+    assert 440 * 1024**3 - pilot.PILOT_RSS_LIMIT_BYTES == 10 * 1024**3
 
 
 @pytest.mark.parametrize(

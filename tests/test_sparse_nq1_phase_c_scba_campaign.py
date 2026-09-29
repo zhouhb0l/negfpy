@@ -19,8 +19,13 @@ def _write(path: Path, value: dict[str, object]) -> None:
 
 
 def test_scba_watchdog_is_independent_of_born_gate() -> None:
-    assert campaign.SCBA_WALL_LIMIT_SECONDS == 48 * 60 * 60
-    assert campaign.SCBA_RSS_LIMIT_BYTES == 8 * 1024**3
+    from negfpy.anharmonic import _material_nq1_pilot as pilot
+
+    assert campaign.SCBA_WALL_LIMIT_SECONDS == 23 * 60 * 60
+    assert campaign.SCBA_RSS_LIMIT_BYTES == 430 * 1024**3
+    # The supervisor producer and pilot receipt consumer must agree exactly.
+    assert campaign.SCBA_WALL_LIMIT_SECONDS == pilot.PILOT_WALL_LIMIT_SECONDS
+    assert campaign.SCBA_RSS_LIMIT_BYTES == pilot.PILOT_RSS_LIMIT_BYTES
     assert campaign.common.WALL_LIMIT_SECONDS == 2 * 60 * 60
     assert campaign.common.RSS_LIMIT_BYTES == 4 * 1024**3
 
