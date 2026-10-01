@@ -491,9 +491,12 @@ def _continuation_initial_state(
     child_coupling_scale: float,
     continuation_axis: str | None,
     continuation_predictor: str | None,
+    allow_parent_source_tree_mismatch: bool = False,
 ) -> tuple[Any | None, dict[str, Any] | None]:
     """Authenticate a completed lower-coupling campaign and load its state."""
 
+    if not isinstance(allow_parent_source_tree_mismatch, bool):
+        raise SCBACaseError("allow_parent_source_tree_mismatch must be boolean")
     if parent_artifacts is None:
         if continuation_axis is not None or continuation_predictor is not None:
             raise SCBACaseError(
@@ -677,7 +680,16 @@ def _continuation_initial_state(
             raise SCBACaseError(
                 "temperature-bias parent must be closer to zero on the same branch"
             )
-    if manifest.get("source_tree_sha256") != source_tree_sha256:
+    parent_source_tree_sha256 = manifest.get("source_tree_sha256")
+    if (
+        not isinstance(parent_source_tree_sha256, str)
+        or len(parent_source_tree_sha256) != 64
+    ):
+        raise SCBACaseError("continuation parent source-tree hash is invalid")
+    if (
+        parent_source_tree_sha256 != source_tree_sha256
+        and not allow_parent_source_tree_mismatch
+    ):
         raise SCBACaseError("continuation parent source-tree hash differs")
     if manifest.get("environment_lock", {}).get("sha256") != environment_sha256:
         raise SCBACaseError("continuation parent environment hash differs")
@@ -767,7 +779,7 @@ def _continuation_initial_state(
         )
     current_hashes = problem_input_hashes(problem)
     current_sources = _source_hashes(identity)
-    if parent_identity.source_tree_sha256 != source_tree_sha256:
+    if parent_identity.source_tree_sha256 != parent_source_tree_sha256:
         raise SCBACaseError("continuation parent source-tree hash differs")
     if parent_identity.environment_sha256 != environment_sha256:
         raise SCBACaseError("continuation parent environment hash differs")
@@ -783,8 +795,8 @@ def _continuation_initial_state(
         parent_run_id,
         reconstructed_problem,
         reconstructed_config,
-        environment_sha256=environment_sha256,
-        source_tree_sha256=source_tree_sha256,
+        environment_sha256=manifest["environment_lock"]["sha256"],
+        source_tree_sha256=parent_source_tree_sha256,
         source_hashes=_source_hashes(
             reconstructed_identity,
             parent_preflight.get("continuation_parent"),
@@ -859,6 +871,9 @@ def _continuation_initial_state(
         "report_sha256": report_sha,
         "checkpoint_sha256": checkpoint_sha_after,
         "checkpoint_identity_sha256": parent_identity.identity_sha256,
+        "parent_source_tree_sha256": parent_source_tree_sha256,
+        "child_source_tree_sha256": source_tree_sha256,
+        "source_tree_mismatch_allowed": allow_parent_source_tree_mismatch,
         "initial_sigma_sha256": initial_self_energy_hash(problem, initial),
         "initialization": initialization,
     }
@@ -878,6 +893,7 @@ def _authenticated_initial_state(
     source_tree_sha256: str,
     environment_sha256: str,
     coupling_scale: float,
+    allow_parent_source_tree_mismatch: bool = False,
 ) -> tuple[Any | None, dict[str, Any] | None, dict[str, Any] | None]:
     if continuation_parent_artifacts is not None and born_initial_hdf5 is not None:
         raise SCBACaseError(
@@ -910,6 +926,7 @@ def _authenticated_initial_state(
         child_coupling_scale=coupling_scale,
         continuation_axis=continuation_axis,
         continuation_predictor=continuation_predictor,
+        allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
     )
     return initial, parent, None
 
@@ -973,6 +990,7 @@ def preflight_scba_inputs(
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
     allow_existing_outputs: bool = False,
+    allow_parent_source_tree_mismatch: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(allow_existing_outputs, bool):
         raise SCBACaseError("allow_existing_outputs must be boolean")
@@ -999,6 +1017,7 @@ def preflight_scba_inputs(
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
         coupling_scale=coupling_scale,
+        allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
     )
     output_parent = output_hdf5.resolve().parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -1018,6 +1037,7 @@ def preflight_scba_inputs(
         "run_id": run_id,
         "coupling_scale": coupling_scale,
         "continuation_parent": parent,
+        "allow_parent_source_tree_mismatch": allow_parent_source_tree_mismatch,
         "born_initial": born_initial,
         "source_tree_sha256": source_tree_sha256,
         "environment_sha256": environment_sha256,
@@ -1063,6 +1083,7 @@ def run_scba_case(
     mixing: float | None = None,
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
+    allow_parent_source_tree_mismatch: bool = False,
 ) -> dict[str, Any]:
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
@@ -1080,6 +1101,7 @@ def run_scba_case(
         config=config, source_tree_sha256=source_tree_sha256,
         environment_sha256=environment_sha256,
         coupling_scale=coupling_scale,
+        allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
@@ -1162,6 +1184,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mixing", type=float)
     parser.add_argument("--mixing-floor", type=float)
     parser.add_argument("--temperature-bias", type=float)
+    parser.add_argument("--allow-parent-source-tree-mismatch", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     return parser
@@ -1184,6 +1207,7 @@ def main() -> int:
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
+                allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -1202,6 +1226,7 @@ def main() -> int:
                 eta_lead=args.eta_lead, mixing=args.mixing,
                 mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
+                allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2

@@ -59,7 +59,10 @@ LAUNCH_ENVIRONMENT_SCHEMA = "negfpy.material-nq1-pilot-launch-environment.v1"
 COMPARISON_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-comparison.v1"
 REPORT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-report.v1"
 AUDIT_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-audit.v1"
-SCHEDULER_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-scheduler-terminal.v1"
+SCHEDULER_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-scheduler-terminal.v2"
+SEGMENT_SCHEDULER_SCHEMA = (
+    "negfpy.material-nq1-coupling-square-pilot-segment-scheduler-terminal.v1"
+)
 SUBMISSION_SCHEMA = "negfpy.material-nq1-coupling-square-pilot-submission.v1"
 PRE_SUBMISSION_SCHEMA = (
     "negfpy.material-nq1-coupling-square-pilot-pre-submission.v1"
@@ -101,6 +104,8 @@ EXPECTED_FIELD_DTYPE = "complex128"
 # 10 GiB outside the supervised process group for runtime/OS overhead.
 PILOT_WALL_LIMIT_SECONDS = 23 * 60 * 60
 PILOT_RSS_LIMIT_BYTES = 430 * 1024**3
+PILOT_SEGMENT_WALL_LIMIT_SECONDS = 20 * 60 * 60
+PILOT_MAX_SEGMENTS = 4
 PILOT_PBS_NCPUS = 128
 PILOT_PBS_MEMORY = "440gb"
 PILOT_PBS_WALLTIME = "24:00:00"
@@ -489,6 +494,14 @@ def anchor_task_id(task_id: str) -> str | None:
     raise MaterialNQ1PilotError(f"unknown pilot task: {task_id!r}")
 
 
+def _scheduler_segment_job_names(task_id: str) -> tuple[str, ...]:
+    base = PILOT_SCHEDULER_JOB_NAMES[task_id]
+    names = tuple(f"{base}-s{index}" for index in range(1, PILOT_MAX_SEGMENTS + 1))
+    if len(set(names)) != PILOT_MAX_SEGMENTS or any(len(name) > 15 for name in names):
+        raise MaterialNQ1PilotError("segmented scheduler job names are invalid")
+    return names
+
+
 def build_pilot_manifest(
     *,
     source_revision: str,
@@ -568,6 +581,15 @@ def build_pilot_manifest(
             "automatic_retry": False,
             "controls_changed_after_outcome": False,
         },
+        "segmentation": {
+            "enabled": True,
+            "max_segments": PILOT_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": PILOT_SEGMENT_WALL_LIMIT_SECONDS,
+            "pbs_wall_limit_seconds": 24 * 60 * 60,
+            "planned_stop_trigger": "wall-timeout",
+            "explicit_resume_required": True,
+            "automatic_advance": False,
+        },
         "tasks": [
             task.as_dict()
             | {
@@ -578,7 +600,10 @@ def build_pilot_manifest(
                     else [task.continuation_parent]
                 ),
                 "anchor_task_id": anchor_task_id(task.task_id),
-                "scheduler_job_name": PILOT_SCHEDULER_JOB_NAMES[task.task_id],
+                "scheduler_job_name": _scheduler_segment_job_names(task.task_id)[0],
+                "scheduler_segment_job_names": list(
+                    _scheduler_segment_job_names(task.task_id)
+                ),
             }
             for task in tasks
         ],
@@ -624,6 +649,7 @@ def validate_pilot_manifest(document: Mapping[str, Any]) -> dict[str, Any]:
         "qualification_sha256",
         "input_hashes",
         "solver_contract",
+        "segmentation",
         "tasks",
         "acceptance",
         "anchor_source",
@@ -1238,6 +1264,8 @@ def _expected_scba_attempt_command(
     scba_manifest: Mapping[str, Any],
     root: Path,
     runtime: Mapping[str, Any],
+    *,
+    resume: bool,
 ) -> list[str]:
     source = scba_manifest["preflight"]["source"]
     repo = Path(manifest["source_package_file"]).parents[2]
@@ -1271,19 +1299,27 @@ def _expected_scba_attempt_command(
             "--continuation-axis", str(task["continuation_axis"]),
             "--continuation-predictor", str(task["continuation_predictor"]),
         ])
-    command.append("--no-resume")
+    if not resume:
+        command.append("--no-resume")
     return command
 
 
 def _expected_scba_sums(root: Path) -> bytes:
-    names = (
+    names = [
         "campaign-manifest.json",
         "status-running.json",
         "outcomes/scba.json",
         "outcomes/scba-fields.h5",
         "checkpoint/sigma-pp.h5",
         "scba-report.json",
-        "logs/scba.json",
+    ]
+    names.extend(
+        path.relative_to(root).as_posix()
+        for path in sorted((root / "logs").glob("scba*.json"))
+    )
+    names.extend(
+        path.relative_to(root).as_posix()
+        for path in sorted(root.glob("infrastructure-failure*.json"))
     )
     return "".join(
         f"{sha256_file(root / name)}  {name}\n" for name in sorted(names)
@@ -1535,11 +1571,13 @@ def _validate_supervision(
             "watchdog_trigger", "killed_after_term_grace",
             "wall_limit_seconds", "rss_limit_bytes",
         }
-        or watchdog.get("wall_limit_seconds") != PILOT_WALL_LIMIT_SECONDS
+        or watchdog.get("wall_limit_seconds")
+        != PILOT_SEGMENT_WALL_LIMIT_SECONDS
         or watchdog.get("rss_limit_bytes") != PILOT_RSS_LIMIT_BYTES
         or watchdog.get("term_grace_seconds") != 60
         or watchdog.get("automatic_retry") is not False
-        or supervision.get("wall_limit_seconds") != PILOT_WALL_LIMIT_SECONDS
+        or supervision.get("wall_limit_seconds")
+        != PILOT_SEGMENT_WALL_LIMIT_SECONDS
         or supervision.get("rss_limit_bytes") != PILOT_RSS_LIMIT_BYTES
         or supervision.get("watchdog_trigger") is not None
         or supervision.get("returncode") != (0 if converged else 2)
@@ -1552,7 +1590,7 @@ def _validate_supervision(
         isinstance(elapsed, bool)
         or not isinstance(elapsed, (int, float))
         or not math.isfinite(float(elapsed))
-        or not 0.0 <= float(elapsed) <= PILOT_WALL_LIMIT_SECONDS
+        or not 0.0 <= float(elapsed) <= PILOT_SEGMENT_WALL_LIMIT_SECONDS
         or isinstance(peak, bool)
         or not isinstance(peak, int)
         or not 0 <= peak <= PILOT_RSS_LIMIT_BYTES
@@ -1906,7 +1944,7 @@ def build_task_receipt(
         "environment_lock", "driver", "preflight", "run_id", "coupling_scale",
         "continuation_parent", "continuation_axis", "continuation_predictor",
         "born_initial", "numerical_controls", "fixed_controls_no_retuning",
-        "restart", "watchdog", "outputs", "python", "distributions",
+        "restart", "watchdog", "segmentation", "outputs", "python", "distributions",
         "thread_limits",
     }
     status_keys = {
@@ -2013,6 +2051,13 @@ def build_task_receipt(
             "checkpoint_schema": "negfpy_sparse_material_scba_checkpoint",
             "resume_exact_identity": True,
             "automatic_retry": False,
+        }
+        or scba_manifest.get("segmentation") != {
+            "enabled": True,
+            "max_segments": PILOT_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": PILOT_SEGMENT_WALL_LIMIT_SECONDS,
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
         }
         or scba_manifest.get("born_initial") is not None
         or not isinstance(preflight, Mapping)
@@ -2241,13 +2286,101 @@ def build_task_receipt(
         name
         for name in records
         if "infrastructure-failure" in name
-        or re.search(r"(?:^|[-_/])resume(?:[-_.]|$)", name) is not None
     ]
     if forbidden_paths:
         raise MaterialNQ1PilotError(
-            "task evidence is not one immutable initial attempt without "
-            "infrastructure history"
+            "task evidence is not one immutable initial attempt or planned "
+            "segment chain without infrastructure history"
         )
+    initial_attempt = root / "logs" / "scba.json"
+    attempt_paths = (
+        ((initial_attempt,) if initial_attempt.is_file() else ())
+        + tuple(sorted((root / "logs").glob("scba-resume-*.json")))
+    )
+    segment_paths = tuple(sorted((root / "segments").glob("segment-*.json")))
+    if (
+        not 1 <= len(attempt_paths) <= PILOT_MAX_SEGMENTS
+        or len(segment_paths) != len(attempt_paths) - 1
+    ):
+        raise MaterialNQ1PilotError("SCBA segment/attempt counts are invalid")
+    previous_segment: dict[str, str] | None = None
+    previous_iterations = 0
+    segment_documents: list[dict[str, Any]] = []
+    for index, segment_path in enumerate(segment_paths, start=1):
+        expected_path = root / "segments" / f"segment-{index:03d}.json"
+        if segment_path != expected_path:
+            raise MaterialNQ1PilotError("SCBA segment receipt names are not contiguous")
+        segment = load_canonical_json(
+            segment_path, name=f"SCBA segment receipt {index}"
+        )
+        checkpoint_record = segment.get("checkpoint")
+        attempt_record = segment.get("attempt_log")
+        supervision = segment.get("supervision")
+        expected_attempt_name = (
+            "logs/scba.json"
+            if index == 1
+            else f"logs/scba-resume-{index - 1:03d}.json"
+        )
+        if (
+            set(segment)
+            != {
+                "schema", "campaign_manifest_sha256", "segment_index",
+                "resume", "state", "checkpoint", "attempt_log",
+                "previous_segment", "supervision", "resume_required",
+                "automatic_advance", "controls_changed", "release_certified",
+            }
+            or segment.get("schema")
+            != "negfpy.sparse-nq1-phase-c-scba-segment.v1"
+            or segment.get("campaign_manifest_sha256") != hashes["manifest"]
+            or segment.get("segment_index") != index
+            or segment.get("resume") is not (index > 1)
+            or segment.get("state") != "segment-exhausted"
+            or segment.get("previous_segment") != previous_segment
+            or segment.get("resume_required") is not True
+            or segment.get("automatic_advance") is not False
+            or segment.get("controls_changed") is not False
+            or segment.get("release_certified") is not False
+            or not isinstance(checkpoint_record, Mapping)
+            or set(checkpoint_record)
+            != {
+                "path", "sha256", "identity_sha256", "status",
+                "completed_iterations",
+            }
+            or checkpoint_record.get("path") != "checkpoint/sigma-pp.h5"
+            or checkpoint_record.get("identity_sha256")
+            != preflight.get("checkpoint_identity_sha256")
+            or checkpoint_record.get("status")
+            not in {"in_progress", "infrastructure_interrupted"}
+            or isinstance(checkpoint_record.get("completed_iterations"), bool)
+            or not isinstance(checkpoint_record.get("completed_iterations"), int)
+            or checkpoint_record.get("completed_iterations", 0)
+            <= previous_iterations
+            or not isinstance(attempt_record, Mapping)
+            or attempt_record
+            != {
+                "path": expected_attempt_name,
+                "sha256": records.get(expected_attempt_name),
+            }
+            or not isinstance(supervision, Mapping)
+            or supervision.get("watchdog_trigger") != "wall-timeout"
+            or supervision.get("wall_limit_seconds")
+            != PILOT_SEGMENT_WALL_LIMIT_SECONDS
+            or supervision.get("rss_limit_bytes") != PILOT_RSS_LIMIT_BYTES
+            or type(supervision.get("killed_after_term_grace")) is not bool
+            or supervision.get("returncode")
+            != (-9 if supervision.get("killed_after_term_grace") else -15)
+        ):
+            raise MaterialNQ1PilotError("SCBA segment receipt chain is invalid")
+        _validate_sha256(
+            checkpoint_record.get("sha256"),
+            name=f"segment {index} checkpoint SHA256",
+        )
+        previous_iterations = checkpoint_record["completed_iterations"]
+        previous_segment = {
+            "path": segment_path.relative_to(root).as_posix(),
+            "sha256": records[segment_path.relative_to(root).as_posix()],
+        }
+        segment_documents.append(segment)
     expected_tree_names = {
         "campaign-manifest.json",
         "status-running.json",
@@ -2255,9 +2388,10 @@ def build_task_receipt(
         "outcomes/scba-fields.h5",
         "checkpoint/sigma-pp.h5",
         "scba-report.json",
-        "logs/scba.json",
         "SHA256SUMS",
         "status.json",
+    } | {
+        path.relative_to(root).as_posix() for path in attempt_paths + segment_paths
     }
     observed_directories = {
         path.relative_to(root).as_posix()
@@ -2265,6 +2399,8 @@ def build_task_receipt(
         if path.is_dir()
     }
     expected_directories = {"checkpoint", "logs", "outcomes"}
+    if segment_paths:
+        expected_directories.add("segments")
     running = load_canonical_json(
         root / "status-running.json", name="SCBA running marker"
     )
@@ -2284,33 +2420,62 @@ def build_task_receipt(
         != records.get("SHA256SUMS")
     ):
         raise MaterialNQ1PilotError("SCBA initial/terminal checksum evidence changed")
-    expected_attempts = [{
-        "path": "logs/scba.json",
-        "sha256": records.get("logs/scba.json"),
-    }]
+    expected_attempts = [
+        {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": records.get(path.relative_to(root).as_posix()),
+        }
+        for path in attempt_paths
+    ]
     if (
         report_document.get("attempt_logs") != expected_attempts
         or report_document.get("infrastructure_failures") != []
-        or report_document.get("log_sha256") != records.get("logs/scba.json")
+        or report_document.get("log_sha256") != expected_attempts[-1]["sha256"]
     ):
         raise MaterialNQ1PilotError(
-            "task evidence is not one immutable initial attempt without infrastructure history"
+            "task attempt inventory is not an uninterrupted segment chain"
         )
-    attempt_log = load_canonical_json(root / "logs/scba.json", name="SCBA attempt log")
-    expected_attempt_command = _expected_scba_attempt_command(
-        validated, task, scba_manifest, root, qualified_runtime
-    )
-    if (
-        set(attempt_log)
-        != {"attempt", "resume", "command", "supervision", "stdout", "stderr"}
-        or attempt_log.get("attempt") != 1
-        or attempt_log.get("resume") is not False
-        or attempt_log.get("supervision") != report_document.get("supervision")
-        or attempt_log.get("command") != expected_attempt_command
-        or attempt_log.get("stdout") != canonical_json(outcome).decode("ascii")
-        or attempt_log.get("stderr") != ""
-    ):
-        raise MaterialNQ1PilotError("SCBA attempt log does not prove a fresh initial run")
+    for index, attempt_path in enumerate(attempt_paths, start=1):
+        attempt_log = load_canonical_json(
+            attempt_path, name=f"SCBA attempt log {index}"
+        )
+        resume = index > 1
+        expected_attempt_command = _expected_scba_attempt_command(
+            validated,
+            task,
+            scba_manifest,
+            root,
+            qualified_runtime,
+            resume=resume,
+        )
+        expected_supervision = (
+            segment_documents[index - 1]["supervision"]
+            if index <= len(segment_documents)
+            else report_document.get("supervision")
+        )
+        expected_stdout = (
+            ""
+            if index <= len(segment_documents)
+            else canonical_json(outcome).decode("ascii")
+        )
+        if (
+            set(attempt_log)
+            != {"attempt", "resume", "command", "supervision", "stdout", "stderr"}
+            or attempt_log.get("attempt") != index
+            or attempt_log.get("resume") is not resume
+            or attempt_log.get("supervision") != expected_supervision
+            or attempt_log.get("command") != expected_attempt_command
+            or attempt_log.get("stdout") != expected_stdout
+            or attempt_log.get("stderr") != ""
+        ):
+            raise MaterialNQ1PilotError(
+                "SCBA segment attempt log does not prove a fresh initial run "
+                "or exact planned resume"
+            )
+    if segment_documents and len(checkpoint.history) <= previous_iterations:
+        raise MaterialNQ1PilotError(
+            "terminal SCBA segment made no progress after its last checkpoint"
+        )
     conservation = conservation_record(outcome)
     if converged and conservation["passed"] is not True:
         raise MaterialNQ1PilotError("converged task failed conservation")
@@ -3059,17 +3224,20 @@ def validate_preflight_record(
     return record
 
 
-def _scheduler_workload_contract(
+def _scheduler_workload_contract_from_source(
     manifest: Mapping[str, Any],
     task: Mapping[str, Any],
-    task_receipt: Mapping[str, Any],
+    pilot_root: Path,
+    source: Mapping[str, Any],
+    *,
+    segment_index: int = 1,
 ) -> dict[str, Any]:
-    scba_root, pilot_root = _fixed_task_layout(
-        task_receipt["scba_root"], task["task_id"]
-    )
-    outcome = load_canonical_json(
-        scba_root / "outcomes/scba.json", name="scheduler-bound SCBA outcome"
-    )
+    if (
+        isinstance(segment_index, bool)
+        or not isinstance(segment_index, int)
+        or not 1 <= segment_index <= PILOT_MAX_SEGMENTS
+    ):
+        raise MaterialNQ1PilotError("scheduler segment index is outside the frozen bound")
     preflight = validate_preflight_record(
         manifest, pilot_root / "pilot-preflight.json"
     )
@@ -3079,9 +3247,6 @@ def _scheduler_workload_contract(
     runtime, environment_lock_record = qualified_python312_runtime(
         manifest, qualification
     )
-    source = outcome.get("preflight_source")
-    if not isinstance(source, Mapping):
-        raise MaterialNQ1PilotError("scheduler workload lacks authenticated input paths")
     try:
         repo = Path(manifest["source_package_file"]).parents[2]
         python = runtime["executable"]
@@ -3109,6 +3274,7 @@ def _scheduler_workload_contract(
         "--fc3-full", str(fc3_full),
         "--phase-b-artifacts", str(phase_b),
         "--task-id", task["task_id"],
+        "--segment-index", str(segment_index),
     ]
     return {
         "pilot_root": os.fspath(pilot_root),
@@ -3117,8 +3283,35 @@ def _scheduler_workload_contract(
         "driver_sha256": sha256_file(driver),
         "command": command,
         "command_sha256": sha256_bytes(canonical_json(command)),
+        "segment_index": segment_index,
+        "job_name": task["scheduler_segment_job_names"][segment_index - 1],
         "launch_environment": qualification_environment(runtime, repo=repo),
     }
+
+
+def _scheduler_workload_contract(
+    manifest: Mapping[str, Any],
+    task: Mapping[str, Any],
+    task_receipt: Mapping[str, Any],
+    *,
+    segment_index: int = 1,
+) -> dict[str, Any]:
+    scba_root, pilot_root = _fixed_task_layout(
+        task_receipt["scba_root"], task["task_id"]
+    )
+    outcome = load_canonical_json(
+        scba_root / "outcomes/scba.json", name="scheduler-bound SCBA outcome"
+    )
+    source = outcome.get("preflight_source")
+    if not isinstance(source, Mapping):
+        raise MaterialNQ1PilotError("scheduler workload lacks authenticated input paths")
+    return _scheduler_workload_contract_from_source(
+        manifest,
+        task,
+        pilot_root,
+        source,
+        segment_index=segment_index,
+    )
 
 
 def _canonical_pbs_script(
@@ -3127,6 +3320,7 @@ def _canonical_pbs_script(
     stdout_path: Path,
     stderr_path: Path,
     workload: Mapping[str, Any],
+    segment_index: int = 1,
 ) -> bytes:
     def literal_path(value: Any, *, name: str) -> str:
         text = str(value)
@@ -3174,9 +3368,25 @@ def _canonical_pbs_script(
     temporary = Path(environment["TMPDIR"])
     if temporary.parent != Path("/tmp") or not temporary.name.startswith("negfpy-"):
         raise MaterialNQ1PilotError("PBS temporary directory must be a dedicated /tmp/negfpy-* child")
+    if (
+        isinstance(segment_index, bool)
+        or not isinstance(segment_index, int)
+        or not 1 <= segment_index <= PILOT_MAX_SEGMENTS
+        or workload.get("segment_index", segment_index) != segment_index
+    ):
+        raise MaterialNQ1PilotError("PBS segment index is outside the frozen bound")
+    names = task.get("scheduler_segment_job_names")
+    if (
+        not isinstance(names, list)
+        or names != list(_scheduler_segment_job_names(task["task_id"]))
+    ):
+        raise MaterialNQ1PilotError("PBS segmented job names changed")
+    job_name = names[segment_index - 1]
+    if workload.get("job_name", job_name) != job_name:
+        raise MaterialNQ1PilotError("PBS workload names another segment")
     lines = [
         "#!/bin/bash",
-        f"#PBS -N {task['scheduler_job_name']}",
+        f"#PBS -N {job_name}",
         f"#PBS -P {PILOT_PBS_PROJECT}",
         f"#PBS -q {PILOT_PBS_QUEUE}",
         "#PBS -r n",
@@ -3199,6 +3409,414 @@ def _canonical_pbs_script(
         ),
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def validate_segment_scheduler_receipt(
+    manifest: Mapping[str, Any],
+    task_id: str,
+    path: str | Path,
+) -> dict[str, Any]:
+    """Authenticate the latest planned nonterminal segment and its PBS F/0."""
+
+    validated = validate_pilot_manifest(manifest)
+    task = _task_from_manifest(validated, task_id)
+    selected = _regular_file(path, name=f"{task_id} segment scheduler receipt")
+    lexical_selected = selected
+    selected = Path(os.path.abspath(selected))
+    segment_root = selected.parent
+    try:
+        segment_index = int(segment_root.name)
+    except ValueError as error:
+        raise MaterialNQ1PilotError("segment scheduler path lacks a numeric index") from error
+    if (
+        segment_root.name != f"{segment_index:03d}"
+        or not 1 <= segment_index < PILOT_MAX_SEGMENTS
+    ):
+        raise MaterialNQ1PilotError("segment scheduler index is outside the resumable bound")
+    task_scheduler_root = segment_root.parent.parent
+    pilot_root = task_scheduler_root.parent.parent
+    if (
+        task_scheduler_root != pilot_root / "scheduler" / task_id
+        or segment_root != task_scheduler_root / "segments" / f"{segment_index:03d}"
+        or selected != segment_root / "scheduler-terminal-receipt.json"
+        or os.fspath(lexical_selected) != os.fspath(selected)
+        or stat.S_IMODE(selected.stat().st_mode) != 0o444
+    ):
+        raise MaterialNQ1PilotError("segment scheduler receipt path is not fixed")
+    record = load_canonical_json(selected, name="segment scheduler receipt")
+    expected_keys = {
+        "schema", "pilot_sha256", "task_id", "segment_index",
+        "job_id", "job_name", "terminal_state", "exit_status",
+        "raw_qstat_path", "raw_qstat_sha256",
+        "campaign_manifest_path", "campaign_manifest_sha256",
+        "segment_receipt_path", "segment_receipt_sha256",
+        "pre_submission_path", "pre_submission_sha256",
+        "submission_path", "submission_sha256",
+        "pbs_script_path", "pbs_script_sha256",
+        "pbs_stdout_path", "pbs_stdout_sha256",
+        "pbs_stderr_path", "pbs_stderr_sha256",
+        "submission_command_sha256", "workload_command_sha256",
+        "resume_required", "automatic_advance", "release_certified",
+    }
+    if (
+        set(record) != expected_keys
+        or record.get("schema") != SEGMENT_SCHEDULER_SCHEMA
+        or record.get("pilot_sha256") != validated["pilot_sha256"]
+        or record.get("task_id") != task_id
+        or record.get("segment_index") != segment_index
+        or record.get("job_name")
+        != task["scheduler_segment_job_names"][segment_index - 1]
+        or record.get("terminal_state") != "F"
+        or record.get("exit_status") != 0
+        or record.get("resume_required") is not True
+        or record.get("automatic_advance") is not False
+        or record.get("release_certified") is not False
+        or not isinstance(record.get("job_id"), str)
+        or _PBS_JOB_ID.fullmatch(record["job_id"]) is None
+    ):
+        raise MaterialNQ1PilotError("segment scheduler receipt is not exact F/0 evidence")
+
+    task_root = pilot_root / "tasks" / task_id
+    scba_root = task_root / "scba"
+    campaign_path = _regular_file(
+        record.get("campaign_manifest_path"), name="segment campaign manifest"
+    )
+    segment_path = _regular_file(
+        record.get("segment_receipt_path"), name="planned segment receipt"
+    )
+    if (
+        Path(os.path.abspath(campaign_path)) != scba_root / "campaign-manifest.json"
+        or os.fspath(campaign_path) != os.fspath(scba_root / "campaign-manifest.json")
+        or Path(os.path.abspath(segment_path))
+        != scba_root / "segments" / f"segment-{segment_index:03d}.json"
+        or os.fspath(segment_path)
+        != os.fspath(scba_root / "segments" / f"segment-{segment_index:03d}.json")
+        or stat.S_IMODE(campaign_path.stat().st_mode) != 0o444
+        or stat.S_IMODE(segment_path.stat().st_mode) != 0o444
+        or sha256_file(campaign_path) != record.get("campaign_manifest_sha256")
+        or sha256_file(segment_path) != record.get("segment_receipt_sha256")
+    ):
+        raise MaterialNQ1PilotError("segment scheduler science binding changed")
+    observed_segments = tuple(sorted((scba_root / "segments").glob("segment-*.json")))
+    expected_segments = tuple(
+        scba_root / "segments" / f"segment-{index:03d}.json"
+        for index in range(1, segment_index + 1)
+    )
+    if observed_segments != expected_segments:
+        raise MaterialNQ1PilotError("planned segment chain is not exact and contiguous")
+
+    campaign = load_canonical_json(campaign_path, name="segment campaign manifest")
+    preflight = campaign.get("preflight")
+    source = preflight.get("source") if isinstance(preflight, Mapping) else None
+    expected_outputs = {
+        "checkpoint": os.fspath((scba_root / "checkpoint/sigma-pp.h5").resolve()),
+        "json": os.fspath((scba_root / "outcomes/scba.json").resolve()),
+        "hdf5": os.fspath((scba_root / "outcomes/scba-fields.h5").resolve()),
+    }
+    expected_controls = {
+        "grid_step": task["grid_step"],
+        "grid_n_positive": task["grid_n_positive"],
+        "grid_cutoff": task["grid_cutoff"],
+        "eta_lead": task["eta_lead"],
+        "mixing": task["mixing"],
+        "mixing_floor": task["mixing_floor"],
+        "temperature_bias": task["temperature_bias_solver"],
+    }
+    bound_preflight = validate_preflight_record(
+        validated, pilot_root / "pilot-preflight.json"
+    )
+    qualification = load_canonical_json(
+        bound_preflight["qualification"]["path"], name="segment-bound qualification"
+    )
+    runtime, environment_lock = qualified_python312_runtime(validated, qualification)
+    launch_path = _regular_file(
+        task_root / "launch-environment.json", name="segment launch environment"
+    )
+    launch = load_canonical_json(launch_path, name="segment launch environment")
+    if (
+        stat.S_IMODE(launch_path.stat().st_mode) != 0o444
+        or launch != build_launch_environment_record(
+            validated, task_id, runtime, launch.get("environment", {})
+        )
+        or not isinstance(source, Mapping)
+        or campaign.get("schema") != "negfpy.sparse-nq1-phase-c-scba-campaign.v2"
+        or campaign.get("run_id") != task_id
+        or campaign.get("coupling_scale") != task["coupling_scale"]
+        or campaign.get("source") != {
+            "commit": validated["source_revision"],
+            "tree": validated["source_git_tree"],
+            "dirty": False,
+            "package_file": validated["source_package_file"],
+        }
+        or campaign.get("source_tree_sha256") != validated["source_tree_sha256"]
+        or campaign.get("environment_lock") != environment_lock
+        or campaign.get("driver") != {
+            "relative_path": "scripts/validate_sparse_nq1_phase_c_scba.py",
+            "sha256": validated["input_hashes"]["scba_case_driver"],
+        }
+        or campaign.get("python") != {
+            "executable": runtime["executable"],
+            "version": PILOT_PYTHON_VERSION,
+        }
+        or campaign.get("distributions") != dict(PILOT_DISTRIBUTIONS)
+        or campaign.get("thread_limits") != dict(PILOT_THREAD_LIMITS)
+        or campaign.get("numerical_controls") != expected_controls
+        or campaign.get("outputs") != expected_outputs
+        or campaign.get("fixed_controls_no_retuning") is not True
+        or campaign.get("restart") != {
+            "checkpoint_schema": "negfpy_sparse_material_scba_checkpoint",
+            "resume_exact_identity": True,
+            "automatic_retry": False,
+        }
+        or campaign.get("segmentation") != {
+            "enabled": True,
+            "max_segments": PILOT_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": PILOT_SEGMENT_WALL_LIMIT_SECONDS,
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
+        }
+    ):
+        raise MaterialNQ1PilotError("planned segment campaign identity changed")
+
+    previous: dict[str, str] | None = None
+    latest: Mapping[str, Any] | None = None
+    for index, item_path in enumerate(expected_segments, start=1):
+        item = load_canonical_json(item_path, name=f"planned segment {index}")
+        item_keys = {
+            "schema", "campaign_manifest_sha256", "segment_index", "resume",
+            "state", "checkpoint", "attempt_log", "previous_segment",
+            "supervision", "resume_required", "automatic_advance",
+            "controls_changed", "release_certified",
+        }
+        checkpoint = item.get("checkpoint")
+        attempt_log = item.get("attempt_log")
+        supervision = item.get("supervision")
+        if (
+            set(item) != item_keys
+            or item.get("schema") != "negfpy.sparse-nq1-phase-c-scba-segment.v1"
+            or item.get("campaign_manifest_sha256") != sha256_file(campaign_path)
+            or item.get("segment_index") != index
+            or item.get("resume") is not (index > 1)
+            or item.get("state") != "segment-exhausted"
+            or item.get("previous_segment") != previous
+            or item.get("resume_required") is not True
+            or item.get("automatic_advance") is not False
+            or item.get("controls_changed") is not False
+            or item.get("release_certified") is not False
+            or not isinstance(checkpoint, Mapping)
+            or checkpoint.get("path") != "checkpoint/sigma-pp.h5"
+            or checkpoint.get("identity_sha256")
+            != preflight.get("checkpoint_identity_sha256")
+            or checkpoint.get("status")
+            not in {"in_progress", "infrastructure_interrupted"}
+            or isinstance(checkpoint.get("completed_iterations"), bool)
+            or not isinstance(checkpoint.get("completed_iterations"), int)
+            or checkpoint.get("completed_iterations", 0) <= 0
+            or not isinstance(attempt_log, Mapping)
+            or attempt_log.get("path") != (
+                "logs/scba.json" if index == 1 else f"logs/scba-resume-{index - 1:03d}.json"
+            )
+            or not isinstance(supervision, Mapping)
+            or supervision.get("watchdog_trigger") != "wall-timeout"
+            or supervision.get("wall_limit_seconds")
+            != PILOT_SEGMENT_WALL_LIMIT_SECONDS
+            or supervision.get("rss_limit_bytes") != PILOT_RSS_LIMIT_BYTES
+            or type(supervision.get("killed_after_term_grace")) is not bool
+            or supervision.get("returncode")
+            != (-9 if supervision["killed_after_term_grace"] else -15)
+        ):
+            raise MaterialNQ1PilotError("planned segment evidence is invalid")
+        log_path = _regular_file(
+            scba_root / str(attempt_log["path"]), name="planned segment attempt log"
+        )
+        if attempt_log.get("sha256") != sha256_file(log_path):
+            raise MaterialNQ1PilotError("planned segment attempt log changed")
+        if latest is not None and checkpoint["completed_iterations"] <= latest[
+            "completed_iterations"
+        ]:
+            raise MaterialNQ1PilotError("planned segment made no iteration progress")
+        latest = checkpoint
+        previous = {
+            "path": item_path.relative_to(scba_root).as_posix(),
+            "sha256": sha256_file(item_path),
+        }
+    checkpoint_path = _regular_file(
+        scba_root / "checkpoint/sigma-pp.h5", name="planned segment checkpoint"
+    )
+    try:
+        checkpoint_data = load_scba_checkpoint_v2_self_validating(checkpoint_path)
+    except Exception as error:
+        raise MaterialNQ1PilotError(
+            "planned segment checkpoint is not self-validating"
+        ) from error
+    if (
+        latest is None
+        or latest.get("sha256") != sha256_file(checkpoint_path)
+        or checkpoint_data.terminal
+        or checkpoint_data.identity.identity_sha256 != latest.get("identity_sha256")
+        or checkpoint_data.identity.run_id != task_id
+        or checkpoint_data.identity.source_tree_sha256 != validated["source_tree_sha256"]
+        or checkpoint_data.identity.environment_sha256 != validated["environment_sha256"]
+        or len(checkpoint_data.history) != latest.get("completed_iterations")
+    ):
+        raise MaterialNQ1PilotError("planned segment checkpoint differs")
+
+    workload = _scheduler_workload_contract_from_source(
+        validated, task, pilot_root, source, segment_index=segment_index
+    )
+    artifact_names = {
+        "raw_qstat_path": "qstat-terminal.txt",
+        "pre_submission_path": "pre-submission.json",
+        "submission_path": "submission.json",
+        "pbs_script_path": "task.pbs",
+        "pbs_stdout_path": "task.stdout",
+        "pbs_stderr_path": "task.stderr",
+    }
+    artifacts: dict[str, Path] = {}
+    for key, name in artifact_names.items():
+        artifact = _regular_file(record.get(key), name=f"segment {name}")
+        if (
+            Path(os.path.abspath(artifact)) != segment_root / name
+            or os.fspath(artifact) != os.fspath(segment_root / name)
+            or stat.S_IMODE(artifact.stat().st_mode) != 0o444
+            or sha256_file(artifact) != record.get(key.replace("_path", "_sha256"))
+        ):
+            raise MaterialNQ1PilotError("segment scheduler artifact binding changed")
+        artifacts[key] = artifact
+    try:
+        qstat_text = artifacts["raw_qstat_path"].read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise MaterialNQ1PilotError("segment raw qstat is unreadable") from error
+    observed_lines = {
+        "job_id": re.findall(r"^Job Id:\s*(\S+)\s*$", qstat_text, flags=re.MULTILINE),
+        "job_name": re.findall(r"^\s*Job_Name\s*=\s*(\S+)\s*$", qstat_text, flags=re.MULTILINE),
+        "state": re.findall(r"^\s*job_state\s*=\s*(\S+)\s*$", qstat_text, flags=re.MULTILINE),
+        "exit": re.findall(r"^\s*Exit_status\s*=\s*(-?\d+)\s*$", qstat_text, flags=re.MULTILINE),
+    }
+    if observed_lines != {
+        "job_id": [record["job_id"]], "job_name": [record["job_name"]],
+        "state": ["F"], "exit": ["0"],
+    }:
+        raise MaterialNQ1PilotError("segment raw qstat does not reproduce F/0")
+
+    pre_path = artifacts["pre_submission_path"]
+    submission_path = artifacts["submission_path"]
+    pbs_path = artifacts["pbs_script_path"]
+    pbs_stdout = artifacts["pbs_stdout_path"]
+    pbs_stderr = artifacts["pbs_stderr_path"]
+    pre = load_canonical_json(pre_path, name="segment pre-submission")
+    submission = load_canonical_json(submission_path, name="segment submission")
+    pre_keys = {
+        "schema", "pilot_sha256", "task_id", "segment_index",
+        "scientific_task_sha256", "job_name", "pbs_script_path",
+        "pbs_script_sha256", "pilot_driver_path", "pilot_driver_sha256",
+        "workload_command", "workload_command_sha256", "submission_command",
+        "submission_command_sha256", "release_certified",
+    }
+    submission_keys = pre_keys | {
+        "job_id", "pre_submission_path", "pre_submission_sha256",
+        "qsub_stdout_path", "qsub_stdout_sha256",
+        "qsub_stderr_path", "qsub_stderr_sha256",
+    }
+    command = ["qsub", os.fspath(pbs_path)]
+    command_sha = sha256_bytes(canonical_json(command))
+    common = {
+        "pilot_sha256": validated["pilot_sha256"],
+        "task_id": task_id,
+        "segment_index": segment_index,
+        "scientific_task_sha256": task["task_sha256"],
+        "job_name": task["scheduler_segment_job_names"][segment_index - 1],
+        "pbs_script_path": os.fspath(pbs_path),
+        "pbs_script_sha256": sha256_file(pbs_path),
+        "pilot_driver_path": workload["driver_path"],
+        "pilot_driver_sha256": workload["driver_sha256"],
+        "workload_command": workload["command"],
+        "workload_command_sha256": workload["command_sha256"],
+        "submission_command": command,
+        "submission_command_sha256": command_sha,
+        "release_certified": False,
+    }
+    qsub_stdout = _regular_file(submission.get("qsub_stdout_path"), name="segment qsub stdout")
+    qsub_stderr = _regular_file(submission.get("qsub_stderr_path"), name="segment qsub stderr")
+    expected_stdout = canonical_json({
+        "task_id": task_id,
+        "state": "segment-exhausted",
+        "segment_index": segment_index,
+        "resume_required": True,
+        "automatic_advance": False,
+        "release_certified": False,
+    })
+    if (
+        Path(os.path.abspath(qsub_stdout)) != segment_root / "qsub.stdout"
+        or Path(os.path.abspath(qsub_stderr)) != segment_root / "qsub.stderr"
+        or os.fspath(qsub_stdout) != os.fspath(segment_root / "qsub.stdout")
+        or os.fspath(qsub_stderr) != os.fspath(segment_root / "qsub.stderr")
+        or stat.S_IMODE(qsub_stdout.stat().st_mode) != 0o444
+        or stat.S_IMODE(qsub_stderr.stat().st_mode) != 0o444
+        or sha256_file(qsub_stdout) != submission.get("qsub_stdout_sha256")
+        or sha256_file(qsub_stderr) != submission.get("qsub_stderr_sha256")
+        or qsub_stdout.read_bytes() != (record["job_id"] + "\n").encode("ascii")
+        or qsub_stderr.read_bytes() != b""
+        or pbs_stdout.read_bytes() != expected_stdout
+        or pbs_stderr.read_bytes() != b""
+        or set(pre) != pre_keys
+        or pre != ({"schema": PRE_SUBMISSION_SCHEMA} | common)
+        or set(submission) != submission_keys
+        or submission != (
+            {"schema": SUBMISSION_SCHEMA} | common | {
+                "job_id": record["job_id"],
+                "pre_submission_path": os.fspath(pre_path),
+                "pre_submission_sha256": sha256_file(pre_path),
+                "qsub_stdout_path": os.fspath(qsub_stdout),
+                "qsub_stdout_sha256": sha256_file(qsub_stdout),
+                "qsub_stderr_path": os.fspath(qsub_stderr),
+                "qsub_stderr_sha256": sha256_file(qsub_stderr),
+            }
+        )
+        or record.get("submission_command_sha256") != command_sha
+        or record.get("workload_command_sha256") != workload["command_sha256"]
+    ):
+        raise MaterialNQ1PilotError("segment scheduler submission does not reproduce")
+    expected_pbs = _canonical_pbs_script(
+        task=task,
+        stdout_path=pbs_stdout,
+        stderr_path=pbs_stderr,
+        workload=workload,
+        segment_index=segment_index,
+    )
+    if pbs_path.read_bytes() != expected_pbs:
+        raise MaterialNQ1PilotError("segment PBS script is not canonical")
+    return record
+
+
+def validate_segment_scheduler_chain(
+    manifest: Mapping[str, Any],
+    task_id: str,
+    pilot_root: str | Path,
+    through_segment: int,
+) -> tuple[dict[str, Any], ...]:
+    """Require one authenticated scheduler receipt for every completed segment."""
+
+    if (
+        isinstance(through_segment, bool)
+        or not isinstance(through_segment, int)
+        or not 1 <= through_segment < PILOT_MAX_SEGMENTS
+    ):
+        raise MaterialNQ1PilotError("segment scheduler chain bound is invalid")
+    root = Path(os.path.abspath(pilot_root))
+    return tuple(
+        validate_segment_scheduler_receipt(
+            manifest,
+            task_id,
+            root
+            / "scheduler"
+            / task_id
+            / "segments"
+            / f"{index:03d}"
+            / "scheduler-terminal-receipt.json",
+        )
+        for index in range(1, through_segment + 1)
+    )
 
 
 def validate_scheduler_receipt(
@@ -3229,6 +3847,7 @@ def validate_scheduler_receipt(
         "schema",
         "pilot_sha256",
         "task_id",
+        "segment_index",
         "job_id",
         "job_name",
         "terminal_state",
@@ -3256,7 +3875,11 @@ def validate_scheduler_receipt(
         or record.get("schema") != SCHEDULER_SCHEMA
         or record.get("pilot_sha256") != validated["pilot_sha256"]
         or record.get("task_id") != task_id
-        or record.get("job_name") != task["scheduler_job_name"]
+        or isinstance(record.get("segment_index"), bool)
+        or not isinstance(record.get("segment_index"), int)
+        or not 1 <= record["segment_index"] <= PILOT_MAX_SEGMENTS
+        or record.get("job_name")
+        != task["scheduler_segment_job_names"][record["segment_index"] - 1]
         or record.get("terminal_state") != "F"
         or record.get("exit_status") != 0
         or record.get("release_certified") is not False
@@ -3264,8 +3887,9 @@ def validate_scheduler_receipt(
         or _PBS_JOB_ID.fullmatch(record["job_id"]) is None
     ):
         raise MaterialNQ1PilotError("scheduler receipt is not exact terminal F/0 evidence")
+    segment_root = scheduler_root / "segments" / f"{record['segment_index']:03d}"
     if record.get("raw_qstat_path") != os.fspath(
-        scheduler_root / "qstat-terminal.txt"
+        segment_root / "qstat-terminal.txt"
     ):
         raise MaterialNQ1PilotError("raw qstat evidence path is not fixed")
     raw_path = _regular_file(record["raw_qstat_path"], name="raw qstat evidence")
@@ -3315,7 +3939,19 @@ def validate_scheduler_receipt(
     task_receipt = validate_task_receipt(validated, task_receipt_path)
     if task_receipt.get("task_id") != task_id or task_receipt.get("state") != "passed":
         raise MaterialNQ1PilotError("scheduler receipt binds another workload")
-    workload = _scheduler_workload_contract(validated, task, task_receipt)
+    observed_segments = sum(
+        1
+        for name in task_receipt["scba_tree_records"]
+        if re.fullmatch(r"logs/scba(?:-resume-\d{3})?\.json", name)
+    )
+    if record["segment_index"] != observed_segments:
+        raise MaterialNQ1PilotError("scheduler receipt names another terminal segment")
+    workload = _scheduler_workload_contract(
+        validated,
+        task,
+        task_receipt,
+        segment_index=record["segment_index"],
+    )
 
     pre_path = _regular_file(
         record.get("pre_submission_path"), name="pilot pre-submission record"
@@ -3331,11 +3967,11 @@ def validate_scheduler_receipt(
         record.get("pbs_stderr_path"), name="pilot PBS stderr"
     )
     fixed_paths = {
-        pre_path: scheduler_root / "pre-submission.json",
-        submission_path: scheduler_root / "submission.json",
-        pbs_path: scheduler_root / "task.pbs",
-        pbs_stdout_path: scheduler_root / "task.stdout",
-        pbs_stderr_path: scheduler_root / "task.stderr",
+        pre_path: segment_root / "pre-submission.json",
+        submission_path: segment_root / "submission.json",
+        pbs_path: segment_root / "task.pbs",
+        pbs_stdout_path: segment_root / "task.stdout",
+        pbs_stderr_path: segment_root / "task.stderr",
     }
     if any(
         Path(os.path.abspath(observed)) != expected
@@ -3359,7 +3995,8 @@ def validate_scheduler_receipt(
     pre = load_canonical_json(pre_path, name="pilot pre-submission record")
     submission = load_canonical_json(submission_path, name="pilot submission record")
     pre_keys = {
-        "schema", "pilot_sha256", "task_id", "scientific_task_sha256",
+        "schema", "pilot_sha256", "task_id", "segment_index",
+        "scientific_task_sha256",
         "job_name", "pbs_script_path", "pbs_script_sha256",
         "pilot_driver_path", "pilot_driver_sha256",
         "workload_command", "workload_command_sha256",
@@ -3375,8 +4012,9 @@ def validate_scheduler_receipt(
     common = {
         "pilot_sha256": validated["pilot_sha256"],
         "task_id": task_id,
+        "segment_index": record["segment_index"],
         "scientific_task_sha256": task["task_sha256"],
-        "job_name": task["scheduler_job_name"],
+        "job_name": task["scheduler_segment_job_names"][record["segment_index"] - 1],
         "pbs_script_path": os.fspath(pbs_path),
         "pbs_script_sha256": sha256_file(pbs_path),
         "pilot_driver_path": workload["driver_path"],
@@ -3402,10 +4040,10 @@ def validate_scheduler_receipt(
         "release_certified": False,
     })
     if (
-        Path(os.path.abspath(qsub_stdout_path)) != scheduler_root / "qsub.stdout"
-        or Path(os.path.abspath(qsub_stderr_path)) != scheduler_root / "qsub.stderr"
-        or os.fspath(qsub_stdout_path) != os.fspath(scheduler_root / "qsub.stdout")
-        or os.fspath(qsub_stderr_path) != os.fspath(scheduler_root / "qsub.stderr")
+        Path(os.path.abspath(qsub_stdout_path)) != segment_root / "qsub.stdout"
+        or Path(os.path.abspath(qsub_stderr_path)) != segment_root / "qsub.stderr"
+        or os.fspath(qsub_stdout_path) != os.fspath(segment_root / "qsub.stdout")
+        or os.fspath(qsub_stderr_path) != os.fspath(segment_root / "qsub.stderr")
         or stat.S_IMODE(qsub_stdout_path.stat().st_mode) != 0o444
         or stat.S_IMODE(qsub_stderr_path.stat().st_mode) != 0o444
         or sha256_file(qsub_stdout_path) != submission.get("qsub_stdout_sha256")
@@ -3440,6 +4078,7 @@ def validate_scheduler_receipt(
         stdout_path=pbs_stdout_path,
         stderr_path=pbs_stderr_path,
         workload=workload,
+        segment_index=record["segment_index"],
     )
     if pbs_path.read_bytes() != expected_pbs:
         raise MaterialNQ1PilotError("pilot PBS script is not the canonical workload")
@@ -3792,8 +4431,10 @@ __all__ = [
     "PILOT_PBS_MEMORY",
     "PILOT_PBS_NCPUS",
     "PILOT_PBS_WALLTIME",
+    "PILOT_MAX_SEGMENTS",
     "PILOT_RSS_LIMIT_BYTES",
     "PILOT_SCHEMA",
+    "PILOT_SEGMENT_WALL_LIMIT_SECONDS",
     "PILOT_TASK_IDS",
     "PILOT_WALL_LIMIT_SECONDS",
     "PREFLIGHT_SCHEMA",
@@ -3803,6 +4444,7 @@ __all__ = [
     "RELEASE_018_ANCHOR_ROOT",
     "REPORT_SCHEMA",
     "SCHEDULER_SCHEMA",
+    "SEGMENT_SCHEDULER_SCHEMA",
     "SUBMISSION_SCHEMA",
     "TASK_RECEIPT_SCHEMA",
     "MaterialNQ1PilotError",
@@ -3830,5 +4472,7 @@ __all__ = [
     "validate_pilot_manifest",
     "validate_preflight_record",
     "validate_scheduler_receipt",
+    "validate_segment_scheduler_chain",
+    "validate_segment_scheduler_receipt",
     "validate_task_receipt",
 ]

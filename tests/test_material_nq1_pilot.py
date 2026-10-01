@@ -402,14 +402,17 @@ def _fixture_attempt_command(
 
 
 def _fixture_sha256sums(root: Path) -> bytes:
-    members = (
+    members = [
         "campaign-manifest.json",
         "status-running.json",
         "outcomes/scba.json",
         "outcomes/scba-fields.h5",
         "checkpoint/sigma-pp.h5",
         "scba-report.json",
-        "logs/scba.json",
+    ]
+    members.extend(
+        path.relative_to(root).as_posix()
+        for path in (root / "logs").glob("scba*.json")
     )
     return "".join(
         f"{pilot.sha256_file(root / name)}  {name}\n"
@@ -456,6 +459,7 @@ def _scba_tree(
     wrong_transformed_state: bool = False,
     tampered_diagnostics: bool = False,
     prior_infrastructure_history: bool = False,
+    planned_segment: bool = False,
 ) -> None:
     fields = root / "outcomes/scba-fields.h5"
     checkpoint = root / "checkpoint/sigma-pp.h5"
@@ -643,10 +647,19 @@ def _scba_tree(
             "automatic_retry": False,
         },
         "watchdog": {
-            "wall_limit_seconds": pilot.PILOT_WALL_LIMIT_SECONDS,
+            "wall_limit_seconds": pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS,
             "rss_limit_bytes": pilot.PILOT_RSS_LIMIT_BYTES,
             "term_grace_seconds": 60,
             "automatic_retry": False,
+        },
+        "segmentation": {
+            "enabled": True,
+            "max_segments": pilot.PILOT_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": (
+                pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS
+            ),
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
         },
         "outputs": output_paths,
         "python": {
@@ -780,7 +793,7 @@ def _scba_tree(
         "peak_observed_rss_bytes": 1024,
         "watchdog_trigger": None,
         "killed_after_term_grace": False,
-        "wall_limit_seconds": pilot.PILOT_WALL_LIMIT_SECONDS,
+        "wall_limit_seconds": pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS,
         "rss_limit_bytes": pilot.PILOT_RSS_LIMIT_BYTES,
     }
     attempt_log = {
@@ -807,7 +820,50 @@ def _scba_tree(
         ) + "\n",
         "stderr": "",
     }
-    pilot.publish_json_once(root / "logs/scba.json", attempt_log)
+    terminal_log_path = root / "logs/scba.json"
+    if planned_segment:
+        terminal_attempt = copy.deepcopy(attempt_log)
+        planned_supervision = {
+            **supervision,
+            "returncode": -15,
+            "elapsed_seconds": pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS + 0.1,
+            "watchdog_trigger": "wall-timeout",
+        }
+        attempt_log["supervision"] = planned_supervision
+        attempt_log["stdout"] = ""
+        pilot.publish_json_once(root / "logs/scba.json", attempt_log)
+        segment = {
+            "schema": "negfpy.sparse-nq1-phase-c-scba-segment.v1",
+            "campaign_manifest_sha256": manifest_sha,
+            "segment_index": 1,
+            "resume": False,
+            "state": "segment-exhausted",
+            "checkpoint": {
+                "path": "checkpoint/sigma-pp.h5",
+                "sha256": pilot.sha256_file(checkpoint),
+                "identity_sha256": preflight["checkpoint_identity_sha256"],
+                "status": "in_progress",
+                "completed_iterations": 1,
+            },
+            "attempt_log": {
+                "path": "logs/scba.json",
+                "sha256": pilot.sha256_file(root / "logs/scba.json"),
+            },
+            "previous_segment": None,
+            "supervision": planned_supervision,
+            "resume_required": True,
+            "automatic_advance": False,
+            "controls_changed": False,
+            "release_certified": False,
+        }
+        pilot.publish_json_once(root / "segments/segment-001.json", segment)
+        terminal_attempt["attempt"] = 2
+        terminal_attempt["resume"] = True
+        terminal_attempt["command"] = terminal_attempt["command"][:-1]
+        terminal_log_path = root / "logs/scba-resume-001.json"
+        pilot.publish_json_once(terminal_log_path, terminal_attempt)
+    else:
+        pilot.publish_json_once(root / "logs/scba.json", attempt_log)
     if prior_infrastructure_history:
         pilot.publish_json_once(root / "infrastructure-failure.json", {
             "schema": "synthetic-prior-watchdog",
@@ -821,13 +877,20 @@ def _scba_tree(
         "outcome_sha256": pilot.sha256_file(root / "outcomes/scba.json"),
         "fields_hdf5_sha256": pilot.sha256_file(fields),
         "checkpoint_sha256": pilot.sha256_file(checkpoint),
-        "log_sha256": pilot.sha256_file(root / "logs/scba.json"),
+        "log_sha256": pilot.sha256_file(terminal_log_path),
         "supervision": supervision,
         "automatic_retry": False,
-        "attempt_logs": [{
-            "path": "logs/scba.json",
-            "sha256": pilot.sha256_file(root / "logs/scba.json"),
-        }],
+        "attempt_logs": [
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": pilot.sha256_file(path),
+            }
+            for path in (
+                (root / "logs/scba.json", terminal_log_path)
+                if planned_segment
+                else (terminal_log_path,)
+            )
+        ],
         "infrastructure_failures": [],
         "controls_changed": False,
         "release_certified": False,
@@ -1006,7 +1069,8 @@ def _scheduler_receipts(
         task_id = task["task_id"]
         job_id = f"{ordinal}.pbs101"
         scheduler_root = tmp_path / "scheduler" / task_id
-        raw = scheduler_root / "qstat-terminal.txt"
+        segment_root = scheduler_root / "segments/001"
+        raw = segment_root / "qstat-terminal.txt"
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_text(
             f"Job Id: {job_id}\n"
@@ -1016,8 +1080,8 @@ def _scheduler_receipts(
             encoding="utf-8",
         )
         os.chmod(raw, 0o444)
-        pbs_stdout = scheduler_root / "task.stdout"
-        pbs_stderr = scheduler_root / "task.stderr"
+        pbs_stdout = segment_root / "task.stdout"
+        pbs_stderr = segment_root / "task.stderr"
         pbs_stdout.write_text(
             json.dumps(
                 {
@@ -1046,7 +1110,7 @@ def _scheduler_receipts(
         workload = pilot._scheduler_workload_contract(
             manifest, task, task_receipt_document
         )
-        pbs = scheduler_root / "task.pbs"
+        pbs = segment_root / "task.pbs"
         pbs.write_bytes(
             pilot._canonical_pbs_script(
                 task=task,
@@ -1062,6 +1126,7 @@ def _scheduler_receipts(
             "schema": pilot.PRE_SUBMISSION_SCHEMA,
             "pilot_sha256": manifest["pilot_sha256"],
             "task_id": task_id,
+            "segment_index": 1,
             "scientific_task_sha256": task["task_sha256"],
             "job_name": task["scheduler_job_name"],
             "pbs_script_path": str(pbs),
@@ -1074,10 +1139,10 @@ def _scheduler_receipts(
             "submission_command_sha256": command_sha,
             "release_certified": False,
         }
-        pre_path = scheduler_root / "pre-submission.json"
+        pre_path = segment_root / "pre-submission.json"
         pilot.publish_json_once(pre_path, pre)
-        qsub_stdout = scheduler_root / "qsub.stdout"
-        qsub_stderr = scheduler_root / "qsub.stderr"
+        qsub_stdout = segment_root / "qsub.stdout"
+        qsub_stderr = segment_root / "qsub.stderr"
         qsub_stdout.write_text(job_id + "\n", encoding="ascii")
         qsub_stderr.write_bytes(b"")
         os.chmod(qsub_stdout, 0o444)
@@ -1092,12 +1157,13 @@ def _scheduler_receipts(
             "qsub_stderr_path": str(qsub_stderr),
             "qsub_stderr_sha256": pilot.sha256_file(qsub_stderr),
         }
-        submission_path = scheduler_root / "submission.json"
+        submission_path = segment_root / "submission.json"
         pilot.publish_json_once(submission_path, submission)
         receipt = {
             "schema": pilot.SCHEDULER_SCHEMA,
             "pilot_sha256": manifest["pilot_sha256"],
             "task_id": task_id,
+            "segment_index": 1,
             "job_id": job_id,
             "job_name": task["scheduler_job_name"],
             "terminal_state": "F",
@@ -1124,6 +1190,131 @@ def _scheduler_receipts(
         pilot.publish_json_once(path, receipt)
         result[task_id] = path
     return result
+
+
+def _segment_scheduler_receipt(
+    tmp_path: Path,
+    manifest: dict[str, object],
+    task: dict[str, object],
+    *,
+    segment_index: int = 1,
+) -> Path:
+    task_id = str(task["task_id"])
+    job_id = "201.pbs101"
+    root = tmp_path / "scheduler" / task_id / "segments" / f"{segment_index:03d}"
+    root.mkdir(parents=True)
+    raw = root / "qstat-terminal.txt"
+    raw.write_text(
+        f"Job Id: {job_id}\n"
+        f"    Job_Name = {task['scheduler_segment_job_names'][segment_index - 1]}\n"
+        "    job_state = F\n"
+        "    Exit_status = 0\n",
+        encoding="utf-8",
+    )
+    campaign_path = tmp_path / "tasks" / task_id / "scba/campaign-manifest.json"
+    campaign = pilot.load_canonical_json(campaign_path, name="test segment campaign")
+    workload = pilot._scheduler_workload_contract_from_source(
+        manifest,
+        task,
+        tmp_path,
+        campaign["preflight"]["source"],
+        segment_index=segment_index,
+    )
+    pbs_stdout = root / "task.stdout"
+    pbs_stderr = root / "task.stderr"
+    pbs_stdout.write_bytes(pilot.canonical_json({
+        "task_id": task_id,
+        "state": "segment-exhausted",
+        "segment_index": segment_index,
+        "resume_required": True,
+        "automatic_advance": False,
+        "release_certified": False,
+    }))
+    pbs_stderr.write_bytes(b"")
+    pbs = root / "task.pbs"
+    pbs.write_bytes(pilot._canonical_pbs_script(
+        task=task,
+        stdout_path=pbs_stdout,
+        stderr_path=pbs_stderr,
+        workload=workload,
+        segment_index=segment_index,
+    ))
+    command = ["qsub", str(pbs)]
+    command_sha = pilot.sha256_bytes(pilot.canonical_json(command))
+    common = {
+        "pilot_sha256": manifest["pilot_sha256"],
+        "task_id": task_id,
+        "segment_index": segment_index,
+        "scientific_task_sha256": task["task_sha256"],
+        "job_name": task["scheduler_segment_job_names"][segment_index - 1],
+        "pbs_script_path": str(pbs),
+        "pbs_script_sha256": pilot.sha256_file(pbs),
+        "pilot_driver_path": workload["driver_path"],
+        "pilot_driver_sha256": workload["driver_sha256"],
+        "workload_command": workload["command"],
+        "workload_command_sha256": workload["command_sha256"],
+        "submission_command": command,
+        "submission_command_sha256": command_sha,
+        "release_certified": False,
+    }
+    pre_path = root / "pre-submission.json"
+    pilot.publish_json_once(pre_path, {"schema": pilot.PRE_SUBMISSION_SCHEMA} | common)
+    qsub_stdout = root / "qsub.stdout"
+    qsub_stderr = root / "qsub.stderr"
+    qsub_stdout.write_text(job_id + "\n", encoding="ascii")
+    qsub_stderr.write_bytes(b"")
+    for item in (raw, pbs_stdout, pbs_stderr, pbs, qsub_stdout, qsub_stderr):
+        os.chmod(item, 0o444)
+    submission_path = root / "submission.json"
+    pilot.publish_json_once(submission_path, {
+        "schema": pilot.SUBMISSION_SCHEMA,
+        **common,
+        "job_id": job_id,
+        "pre_submission_path": str(pre_path),
+        "pre_submission_sha256": pilot.sha256_file(pre_path),
+        "qsub_stdout_path": str(qsub_stdout),
+        "qsub_stdout_sha256": pilot.sha256_file(qsub_stdout),
+        "qsub_stderr_path": str(qsub_stderr),
+        "qsub_stderr_sha256": pilot.sha256_file(qsub_stderr),
+    })
+    segment_path = (
+        tmp_path / "tasks" / task_id / "scba/segments"
+        / f"segment-{segment_index:03d}.json"
+    )
+    receipt = {
+        "schema": pilot.SEGMENT_SCHEDULER_SCHEMA,
+        "pilot_sha256": manifest["pilot_sha256"],
+        "task_id": task_id,
+        "segment_index": segment_index,
+        "job_id": job_id,
+        "job_name": task["scheduler_segment_job_names"][segment_index - 1],
+        "terminal_state": "F",
+        "exit_status": 0,
+        "raw_qstat_path": str(raw),
+        "raw_qstat_sha256": pilot.sha256_file(raw),
+        "campaign_manifest_path": str(campaign_path),
+        "campaign_manifest_sha256": pilot.sha256_file(campaign_path),
+        "segment_receipt_path": str(segment_path),
+        "segment_receipt_sha256": pilot.sha256_file(segment_path),
+        "pre_submission_path": str(pre_path),
+        "pre_submission_sha256": pilot.sha256_file(pre_path),
+        "submission_path": str(submission_path),
+        "submission_sha256": pilot.sha256_file(submission_path),
+        "pbs_script_path": str(pbs),
+        "pbs_script_sha256": pilot.sha256_file(pbs),
+        "pbs_stdout_path": str(pbs_stdout),
+        "pbs_stdout_sha256": pilot.sha256_file(pbs_stdout),
+        "pbs_stderr_path": str(pbs_stderr),
+        "pbs_stderr_sha256": pilot.sha256_file(pbs_stderr),
+        "submission_command_sha256": command_sha,
+        "workload_command_sha256": workload["command_sha256"],
+        "resume_required": True,
+        "automatic_advance": False,
+        "release_certified": False,
+    }
+    receipt_path = root / "scheduler-terminal-receipt.json"
+    pilot.publish_json_once(receipt_path, receipt)
+    return receipt_path
 
 
 def _synthetic_anchor_contract(
@@ -1177,7 +1368,7 @@ def _synthetic_anchor_contract(
     monkeypatch.setattr(pilot, "RELEASE_018_ANCHORS", records)
 
 
-def test_pilot_is_exact_first_five_release_tasks() -> None:
+def test_pilot_is_exact_first_five_release_tasks(tmp_path: Path) -> None:
     pilot_tasks = pilot.predictor_pilot_tasks()
     release_prefix = silicon_nq1_release_tasks()[:5]
     assert pilot_tasks == release_prefix
@@ -1226,6 +1417,15 @@ def test_pilot_is_exact_first_five_release_tasks() -> None:
     assert all(
         len(name) <= 15 for name in pilot.PILOT_SCHEDULER_JOB_NAMES.values()
     )
+    manifest, _path, _qualification = _manifest(tmp_path)
+    assert all(
+        task["scheduler_job_name"] == task["scheduler_segment_job_names"][0]
+        and len(task["scheduler_segment_job_names"]) == pilot.PILOT_MAX_SEGMENTS
+        and len(set(task["scheduler_segment_job_names"]))
+        == pilot.PILOT_MAX_SEGMENTS
+        and all(len(name) <= 15 for name in task["scheduler_segment_job_names"])
+        for task in manifest["tasks"]
+    )
 
 
 def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> None:
@@ -1234,7 +1434,14 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
         home=Path("/launch/home"), tmpdir=Path("/tmp/negfpy-pilot-fixture"), git_bin=pilot.PILOT_GIT_BIN,
     ) | {"NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64}
     payload = pilot._canonical_pbs_script(
-        task={"scheduler_job_name": "nq1pa-g0001"},
+        task={
+            "task_id": "coupling-g0001",
+            "scheduler_job_name": "nq1q4p29-g1-s1",
+            "scheduler_segment_job_names": [
+                "nq1q4p29-g1-s1", "nq1q4p29-g1-s2",
+                "nq1q4p29-g1-s3", "nq1q4p29-g1-s4",
+            ],
+        },
         stdout_path=Path("/evidence/task.stdout"),
         stderr_path=Path("/evidence/task.stderr"),
         workload={
@@ -1249,7 +1456,7 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     ).decode("utf-8")
     scheduler_identity = (
         "#!/bin/bash\n"
-        "#PBS -N nq1pa-g0001\n"
+        "#PBS -N nq1q4p29-g1-s1\n"
         "#PBS -P 13004417\n"
         "#PBS -q normal\n"
     )
@@ -1272,9 +1479,68 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
     assert pilot.PILOT_PBS_MEMORY == "440gb"
     assert pilot.PILOT_PBS_WALLTIME == "24:00:00"
     assert pilot.PILOT_WALL_LIMIT_SECONDS == 23 * 60 * 60
+    assert pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS == 20 * 60 * 60
+    assert pilot.PILOT_MAX_SEGMENTS == 4
     assert pilot.PILOT_RSS_LIMIT_BYTES == 430 * 1024**3
     assert 24 * 60 * 60 - pilot.PILOT_WALL_LIMIT_SECONDS == 60 * 60
+    assert 24 * 60 * 60 - pilot.PILOT_SEGMENT_WALL_LIMIT_SECONDS == 4 * 60 * 60
     assert 440 * 1024**3 - pilot.PILOT_RSS_LIMIT_BYTES == 10 * 1024**3
+
+
+def test_canonical_pbs_selects_unique_later_segment_identity() -> None:
+    environment = build_launch_environment(
+        repo=Path("/candidate"),
+        executable=Path("/staged/python/bin/python3.12"),
+        home=Path("/launch/home"),
+        tmpdir=Path("/tmp/negfpy-pilot-segment2"),
+        git_bin=pilot.PILOT_GIT_BIN,
+    ) | {"NEGFPY_QUALIFICATION_RUNTIME_SHA256": "a" * 64}
+    task = {
+        "task_id": "coupling-g0001",
+        "scheduler_job_name": "nq1q4p29-g1-s1",
+        "scheduler_segment_job_names": [
+            "nq1q4p29-g1-s1", "nq1q4p29-g1-s2",
+            "nq1q4p29-g1-s3", "nq1q4p29-g1-s4",
+        ],
+    }
+    command = [
+        "/staged/python/bin/python3.12",
+        "/candidate/pilot.py",
+        "run-task",
+        "--segment-index",
+        "2",
+    ]
+    payload = pilot._canonical_pbs_script(
+        task=task,
+        stdout_path=Path("/evidence/segment-002.stdout"),
+        stderr_path=Path("/evidence/segment-002.stderr"),
+        workload={
+            "repo_root": "/candidate",
+            "launch_environment": environment,
+            "command": command,
+            "segment_index": 2,
+            "job_name": "nq1q4p29-g1-s2",
+        },
+        segment_index=2,
+    ).decode("utf-8")
+    assert "#PBS -N nq1q4p29-g1-s2\n" in payload
+    assert "#PBS -l select=1:ncpus=128:mem=440gb\n" in payload
+    assert "#PBS -l walltime=24:00:00\n" in payload
+    assert payload.endswith(" --segment-index 2\n")
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="names another segment"):
+        pilot._canonical_pbs_script(
+            task=task,
+            stdout_path=Path("/evidence/segment-002.stdout"),
+            stderr_path=Path("/evidence/segment-002.stderr"),
+            workload={
+                "repo_root": "/candidate",
+                "launch_environment": environment,
+                "command": command,
+                "segment_index": 2,
+                "job_name": "nq1q4p29-g1-s3",
+            },
+            segment_index=2,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1289,7 +1555,14 @@ def test_canonical_pbs_resources_have_headroom_above_internal_watchdogs() -> Non
 def test_canonical_pbs_rejects_unsafe_directive_paths(bad_path: Path) -> None:
     with pytest.raises(pilot.MaterialNQ1PilotError, match="safe absolute PBS path"):
         pilot._canonical_pbs_script(
-            task={"scheduler_job_name": "nq1pa-g0001"},
+            task={
+                "task_id": "coupling-g0001",
+                "scheduler_job_name": "nq1q4p29-g1-s1",
+                "scheduler_segment_job_names": [
+                    "nq1q4p29-g1-s1", "nq1q4p29-g1-s2",
+                    "nq1q4p29-g1-s3", "nq1q4p29-g1-s4",
+                ],
+            },
             stdout_path=bad_path,
             stderr_path=Path("/evidence/task.stderr"),
             workload={
@@ -1304,6 +1577,15 @@ def test_manifest_is_deterministic_and_explicitly_non_release(tmp_path: Path) ->
     assert pilot.validate_pilot_manifest(manifest) == manifest
     assert manifest["release_certified"] is False
     assert manifest["classification"] == "development-pilot-not-release"
+    assert manifest["segmentation"] == {
+        "enabled": True,
+        "max_segments": 4,
+        "segment_wall_limit_seconds": 20 * 60 * 60,
+        "pbs_wall_limit_seconds": 24 * 60 * 60,
+        "planned_stop_trigger": "wall-timeout",
+        "explicit_resume_required": True,
+        "automatic_advance": False,
+    }
     assert manifest["tasks"][2]["anchor_task_id"] is None
     assert manifest["anchor_source"]["use"] == (
         "comparison-only-never-continuation-parent"
@@ -1342,6 +1624,7 @@ def test_cli_has_no_resume_or_scheduler_path_override_and_rejects_symlink_roots(
     destinations = {action.dest for action in pilot_runner._parser()._actions}
     assert "resume_exact" not in destinations
     assert "scheduler_receipt" not in destinations
+    assert pilot_runner._parser().get_default("segment_index") == 1
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "link"
@@ -1400,6 +1683,16 @@ def test_prelaunch_requires_exact_live_inputs_and_a_virgin_task_root(
     pilot_runner._require_virgin_task_root(claimed, "coupling-g0001")
     assert claimed.is_dir()
     assert (claimed / "scba").is_dir()
+    launch = {"schema": "test-launch", "environment": {"A": "B"}}
+    pilot.publish_json_once(claimed / "launch-environment.json", launch)
+    assert pilot_runner._require_segment_resume_root(
+        claimed, "coupling-g0001", launch
+    ) == claimed / "scba"
+    pilot.publish_json_once(claimed / "task-receipt.json", {"state": "passed"})
+    with pytest.raises(pilot.MaterialNQ1PilotError, match="terminal task"):
+        pilot_runner._require_segment_resume_root(
+            claimed, "coupling-g0001", launch
+        )
 
     escaped_root = tmp_path / "escaped-pilot"
     outside = tmp_path / "outside"
@@ -1427,6 +1720,91 @@ def test_prelaunch_requires_exact_live_inputs_and_a_virgin_task_root(
             {"forged": True},
         )
     assert list(comparisons_outside.iterdir()) == []
+
+
+def test_run_task_publishes_only_nonterminal_segment_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = {"segmentation": {"max_segments": pilot.PILOT_MAX_SEGMENTS}}
+    runtime = {"runtime_sha256": "a" * 64}
+    launch = {
+        "schema": pilot.LAUNCH_ENVIRONMENT_SCHEMA,
+        "environment": {"QUALIFIED": "1"},
+    }
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(pilot_runner, "_load_manifest", lambda root: manifest)
+    monkeypatch.setattr(
+        pilot_runner,
+        "_revalidate_bound_qualification",
+        lambda root, selected: (runtime, {}),
+    )
+    monkeypatch.setattr(
+        pilot_runner, "_verify_live_candidate", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(pilot_runner, "_verify_prior_gates", lambda *args: None)
+    monkeypatch.setattr(
+        pilot_runner,
+        "build_launch_environment_record",
+        lambda *args: launch,
+    )
+
+    def run_campaign(**kwargs):
+        observed.update(kwargs)
+        return {
+            "state": "segment-exhausted",
+            "segment_index": 1,
+            "resume_required": True,
+            "automatic_retry": False,
+            "automatic_advance": False,
+            "release_certified": False,
+        }
+
+    monkeypatch.setattr(pilot_runner.single_campaign, "run_campaign", run_campaign)
+    args = SimpleNamespace(
+        root=tmp_path,
+        task_id="coupling-g0001",
+        segment_index=1,
+        repo_root=tmp_path,
+        fixture=tmp_path / "fixture",
+        fc3_full=tmp_path / "fc3",
+        phase_b_artifacts=tmp_path / "phase-b",
+        expected_commit="1" * 40,
+        environment_lock=tmp_path / "lock",
+    )
+    result = pilot_runner.run_task(args)
+    assert result == {
+        "task_id": "coupling-g0001",
+        "state": "segment-exhausted",
+        "segment_index": 1,
+        "resume_required": True,
+        "automatic_advance": False,
+        "release_certified": False,
+    }
+    assert observed["segmented"] is True
+    assert observed["resume"] is False
+    assert not (tmp_path / "tasks/coupling-g0001/task-receipt.json").exists()
+
+
+def test_terminal_task_receipt_authenticates_planned_segment_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    _mock_checkpoints(monkeypatch)
+    manifest, _manifest_path, _qualification = _manifest(tmp_path)
+    task = pilot.predictor_pilot_tasks()[0]
+    scba_root = tmp_path / "tasks" / task.task_id / "scba"
+    _scba_tree(scba_root, task, planned_segment=True)
+    receipt = pilot.build_task_receipt(
+        manifest=manifest,
+        task_id=task.task_id,
+        scba_root=scba_root,
+        parent_receipt=None,
+    )
+    assert receipt["state"] == "passed"
+    assert "segments/segment-001.json" in receipt["scba_tree_records"]
+    assert "logs/scba-resume-001.json" in receipt["scba_tree_records"]
 
 
 def test_streamed_six_field_comparison_is_strict(
@@ -1925,6 +2303,60 @@ def test_final_report_requires_two_anchors_and_g0025_completion(
     with pytest.raises(pilot.MaterialNQ1PilotError, match="mode 0444"):
         pilot.validate_audit(manifest, root=tmp_path, audit_path=audit_path)
     os.chmod(audit_path, 0o444)
+
+
+def test_segment_scheduler_receipt_authenticates_resume_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pilot, "EXPECTED_FIELD_SHAPE", (3, 2, 2))
+    _mock_checkpoints(monkeypatch)
+    manifest, _manifest_path, _qualification_path = _manifest(tmp_path)
+    task = manifest["tasks"][0]
+    task_spec = pilot.predictor_pilot_tasks()[0]
+    scba_root = tmp_path / "tasks" / task_spec.task_id / "scba"
+    _scba_tree(scba_root, task_spec, planned_segment=True)
+    campaign = pilot.load_canonical_json(
+        scba_root / "campaign-manifest.json", name="test segment campaign"
+    )
+    identity = SimpleNamespace(
+        identity_sha256=campaign["preflight"]["checkpoint_identity_sha256"],
+        run_id=task_spec.task_id,
+        source_tree_sha256=manifest["source_tree_sha256"],
+        environment_sha256=manifest["environment_sha256"],
+    )
+    monkeypatch.setattr(
+        pilot,
+        "load_scba_checkpoint_v2_self_validating",
+        lambda _path: SimpleNamespace(
+            terminal=False,
+            identity=identity,
+            history=[SimpleNamespace()],
+        ),
+    )
+    receipt_path = _segment_scheduler_receipt(tmp_path, manifest, task)
+    record = pilot.validate_segment_scheduler_receipt(
+        manifest, task_spec.task_id, receipt_path
+    )
+    assert record["segment_index"] == 1
+    assert pilot.validate_segment_scheduler_chain(
+        manifest, task_spec.task_id, tmp_path, 1
+    ) == (record,)
+
+    raw = receipt_path.parent / "qstat-terminal.txt"
+    os.chmod(raw, 0o644)
+    raw.write_text(
+        raw.read_text(encoding="utf-8").replace(record["job_name"], "wrong-name"),
+        encoding="utf-8",
+    )
+    os.chmod(raw, 0o444)
+    with pytest.raises(
+        pilot.MaterialNQ1PilotError,
+        match="artifact binding changed",
+    ):
+        pilot.validate_segment_scheduler_receipt(
+            manifest, task_spec.task_id, receipt_path
+        )
 
 
 def test_scheduler_receipt_requires_exact_unique_terminal_f0(

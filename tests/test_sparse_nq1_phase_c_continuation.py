@@ -593,6 +593,62 @@ def test_coupling_continuation_rejects_changed_mixing_floor(
         )
 
 
+def test_research_continuation_can_reuse_converged_parent_across_orchestration_tree(
+    tmp_path: Path,
+) -> None:
+    problem, config = _write_parent(tmp_path / "parent")
+    child_tree = "c" * 64
+    with pytest.raises(driver.SCBACaseError, match="source-tree hash differs"):
+        driver._continuation_initial_state(
+            parent_artifacts=tmp_path / "parent",
+            identity=_identity(),
+            problem=problem,
+            config=config,
+            source_tree_sha256=child_tree,
+            environment_sha256=ENVIRONMENT,
+            child_coupling_scale=0.02,
+            continuation_axis="coupling",
+            continuation_predictor="coupling-square",
+        )
+
+    initial, record = driver._continuation_initial_state(
+        parent_artifacts=tmp_path / "parent",
+        identity=_identity(),
+        problem=problem,
+        config=config,
+        source_tree_sha256=child_tree,
+        environment_sha256=ENVIRONMENT,
+        child_coupling_scale=0.02,
+        continuation_axis="coupling",
+        continuation_predictor="coupling-square",
+        allow_parent_source_tree_mismatch=True,
+    )
+    assert initial is not None and record is not None
+    assert record["parent_source_tree_sha256"] == SOURCE_TREE
+    assert record["child_source_tree_sha256"] == child_tree
+    assert record["source_tree_mismatch_allowed"] is True
+    assert record["initialization"]["factor"] == 4.0
+
+
+def test_research_continuation_still_rejects_environment_mismatch(
+    tmp_path: Path,
+) -> None:
+    problem, config = _write_parent(tmp_path / "parent")
+    with pytest.raises(driver.SCBACaseError, match="environment hash differs"):
+        driver._continuation_initial_state(
+            parent_artifacts=tmp_path / "parent",
+            identity=_identity(),
+            problem=problem,
+            config=config,
+            source_tree_sha256="c" * 64,
+            environment_sha256="d" * 64,
+            child_coupling_scale=0.02,
+            continuation_axis="coupling",
+            continuation_predictor="coupling-square",
+            allow_parent_source_tree_mismatch=True,
+        )
+
+
 @pytest.mark.parametrize("parent_scale", [0.02, 0.03])
 def test_parent_coupling_must_be_strictly_lower(
     tmp_path: Path,

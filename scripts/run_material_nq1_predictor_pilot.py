@@ -40,6 +40,7 @@ import run_sparse_nq1_phase_c_scba_campaign as single_campaign
 import validate_sparse_nq1_phase_c_scba as case
 
 from negfpy.anharmonic._material_nq1_pilot import (
+    PILOT_MAX_SEGMENTS,
     PILOT_TASK_IDS,
     RELEASE_018_ANCHOR_ROOT,
     MaterialNQ1PilotError,
@@ -62,6 +63,7 @@ from negfpy.anharmonic._material_nq1_pilot import (
     validate_pilot_manifest,
     validate_preflight_record,
     validate_scheduler_receipt,
+    validate_segment_scheduler_chain,
     validate_task_receipt,
 )
 from negfpy.anharmonic._launch_environment import qualification_environment
@@ -348,6 +350,34 @@ def _require_virgin_task_root(task_root: Path, task_id: str) -> None:
     )
 
 
+def _require_segment_resume_root(
+    task_root: Path,
+    task_id: str,
+    launch_record: Mapping[str, Any],
+) -> Path:
+    selected = _nonsymlink_directory(
+        task_root, name=f"{task_id} segmented task root", create=False
+    )
+    scba_root = _nonsymlink_directory(
+        selected / "scba", name=f"{task_id} segmented SCBA root", create=False
+    )
+    receipt = selected / "task-receipt.json"
+    if receipt.exists() or receipt.is_symlink():
+        raise MaterialNQ1PilotError("a terminal task cannot start another segment")
+    launch_path = selected / "launch-environment.json"
+    if (
+        launch_path.is_symlink()
+        or not launch_path.is_file()
+        or stat.S_IMODE(launch_path.stat().st_mode) != 0o444
+        or load_canonical_json(launch_path, name="segment launch environment")
+        != dict(launch_record)
+    ):
+        raise MaterialNQ1PilotError(
+            "segmented task launch environment no longer authenticates"
+        )
+    return scba_root
+
+
 def _verify_live_candidate(
     args: argparse.Namespace,
     manifest: Mapping[str, Any],
@@ -442,11 +472,29 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
     launch_record = build_launch_environment_record(
         manifest, task.task_id, runtime, dict(os.environ)
     )
+    segment_index = getattr(args, "segment_index", 1)
+    if (
+        isinstance(segment_index, bool)
+        or not isinstance(segment_index, int)
+        or not 1 <= segment_index <= PILOT_MAX_SEGMENTS
+    ):
+        raise MaterialNQ1PilotError("segment index is outside the frozen bound")
 
     task_root = root / "tasks" / task.task_id
-    _require_virgin_task_root(task_root, task.task_id)
-    publish_json_once(task_root / "launch-environment.json", launch_record)
-    scba_root = task_root / "scba"
+    if segment_index == 1:
+        _require_virgin_task_root(task_root, task.task_id)
+        publish_json_once(task_root / "launch-environment.json", launch_record)
+        scba_root = task_root / "scba"
+    else:
+        validate_segment_scheduler_chain(
+            manifest,
+            task.task_id,
+            root,
+            segment_index - 1,
+        )
+        scba_root = _require_segment_resume_root(
+            task_root, task.task_id, launch_record
+        )
     parent_receipt = None
     parent_scba = None
     if task.continuation_parent is not None:
@@ -473,9 +521,29 @@ def run_task(args: argparse.Namespace) -> dict[str, Any]:
         mixing=task.mixing,
         mixing_floor=task.mixing_floor,
         temperature_bias=task.temperature_bias_solver,
-        resume=False,
+        resume=segment_index > 1,
+        segmented=True,
         launch_environment=launch_record["environment"],
     )
+    if status.get("state") == "segment-exhausted":
+        if (
+            status.get("segment_index") != segment_index
+            or status.get("resume_required") is not True
+            or status.get("automatic_retry") is not False
+            or status.get("automatic_advance") is not False
+            or status.get("release_certified") is not False
+        ):
+            raise MaterialNQ1PilotError("planned segment evidence is invalid")
+        _post_runtime, post_lock = _revalidate_bound_qualification(root, manifest)
+        _verify_live_candidate(args, manifest, qualified_lock=post_lock)
+        return {
+            "task_id": task.task_id,
+            "state": "segment-exhausted",
+            "segment_index": segment_index,
+            "resume_required": True,
+            "automatic_advance": False,
+            "release_certified": False,
+        }
     if status.get("state") not in {"passed", "scientific-failure"}:
         raise MaterialNQ1PilotError("task ended in an infrastructure state")
 
@@ -591,6 +659,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--execution-id")
     parser.add_argument("--anchor-root", type=Path, default=RELEASE_018_ANCHOR_ROOT)
     parser.add_argument("--task-id", choices=PILOT_TASK_IDS)
+    parser.add_argument("--segment-index", type=int, default=1)
     return parser
 
 

@@ -27,6 +27,14 @@ import validate_sparse_nq1_phase_c_scba as case
 SCBA_WALL_LIMIT_SECONDS = 23 * 60 * 60
 SCBA_RSS_LIMIT_BYTES = 430 * 1024**3
 
+# A segmented pilot stops the scientific child early enough to authenticate
+# and publish its checkpoint before the fixed q4 24-hour scheduler limit.  A
+# later segment is a separately submitted, explicitly authorized job; it is
+# never launched automatically by this wrapper.
+SCBA_SEGMENT_WALL_LIMIT_SECONDS = 20 * 60 * 60
+SCBA_MAX_SEGMENTS = 4
+SEGMENT_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-segment.v1"
+
 
 SCHEMA = "negfpy.sparse-nq1-phase-c-scba-campaign.v2"
 STATUS_SCHEMA = "negfpy.sparse-nq1-phase-c-scba-status.v1"
@@ -62,7 +70,9 @@ def _manifest(
     mixing: float | None = None,
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
+    segmented: bool = False,
     allow_existing_outputs: bool = False,
+    allow_parent_source_tree_mismatch: bool = False,
 ) -> dict[str, Any]:
     repo = repo.resolve()
     artifacts = artifacts.resolve()
@@ -84,11 +94,12 @@ def _manifest(
         eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
         temperature_bias=temperature_bias,
         allow_existing_outputs=allow_existing_outputs,
+        allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
     )
     driver = repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"
     if not driver.is_file() or driver.is_symlink():
         raise common.CampaignError(f"missing SCBA case driver: {driver}")
-    return {
+    document = {
         "schema": SCHEMA,
         "scientific_scope": "authenticated silicon Nq=1 sparse material SCBA, fixed Nw=17 development gate",
         "source": source,
@@ -101,6 +112,7 @@ def _manifest(
         "continuation_parent": preflight["continuation_parent"],
         "continuation_axis": continuation_axis,
         "continuation_predictor": continuation_predictor,
+        "allow_parent_source_tree_mismatch": allow_parent_source_tree_mismatch,
         "born_initial": preflight["born_initial"],
         "numerical_controls": preflight["numerical_controls"],
         "fixed_controls_no_retuning": True,
@@ -111,6 +123,15 @@ def _manifest(
         "distributions": common._versions(),
         "thread_limits": dict(sorted(case.phase_c.THREAD_LIMIT_ENV.items())),
     }
+    if segmented:
+        document["segmentation"] = {
+            "enabled": True,
+            "max_segments": SCBA_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": SCBA_SEGMENT_WALL_LIMIT_SECONDS,
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
+        }
+    return document
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -118,11 +139,234 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
 
 
 def _attempt_logs(artifacts: Path) -> tuple[Path, ...]:
-    return tuple(sorted((artifacts / "logs").glob("scba*.json")))
+    initial = artifacts / "logs" / "scba.json"
+    resumes = tuple(sorted((artifacts / "logs").glob("scba-resume-*.json")))
+    return ((initial,) if initial.is_file() else ()) + resumes
 
 
 def _failure_records(artifacts: Path) -> tuple[Path, ...]:
     return tuple(sorted(artifacts.glob("infrastructure-failure*.json")))
+
+
+def _segment_records(artifacts: Path) -> tuple[Path, ...]:
+    return tuple(sorted((artifacts / "segments").glob("segment-*.json")))
+
+
+def _load_segment_checkpoint(path: Path) -> Any:
+    from negfpy.anharmonic._checkpoint_v2 import (
+        load_scba_checkpoint_v2_self_validating,
+    )
+
+    return load_scba_checkpoint_v2_self_validating(path)
+
+
+def _validate_segment_chain(
+    artifacts: Path,
+    manifest: Mapping[str, Any],
+    manifest_path: Path,
+    *,
+    require_current_checkpoint: bool = True,
+) -> tuple[Path, ...]:
+    records = _segment_records(artifacts)
+    manifest_sha = _sha256(manifest_path)
+    previous: dict[str, str] | None = None
+    latest: Mapping[str, Any] | None = None
+    for index, path in enumerate(records, start=1):
+        if path.name != f"segment-{index:03d}.json":
+            raise common.CampaignError("planned segment receipt names are not contiguous")
+        record = _load_json(path, f"planned segment receipt {index}")
+        if (
+            record.get("schema") != SEGMENT_SCHEMA
+            or record.get("campaign_manifest_sha256") != manifest_sha
+            or record.get("segment_index") != index
+            or record.get("resume") is not (index > 1)
+            or record.get("state") != "segment-exhausted"
+            or record.get("previous_segment") != previous
+            or record.get("resume_required") is not True
+            or record.get("automatic_advance") is not False
+            or record.get("controls_changed") is not False
+            or record.get("release_certified") is not False
+        ):
+            raise common.CampaignError("planned segment receipt chain is invalid")
+        checkpoint = record.get("checkpoint")
+        attempt_log = record.get("attempt_log")
+        if not isinstance(checkpoint, Mapping) or not isinstance(
+            attempt_log, Mapping
+        ):
+            raise common.CampaignError("planned segment receipt evidence is incomplete")
+        log_path = artifacts / str(attempt_log.get("path"))
+        _regular_file(log_path, "planned segment attempt log")
+        if attempt_log.get("sha256") != _sha256(log_path):
+            raise common.CampaignError("planned segment attempt log changed")
+        expected_log = (
+            "logs/scba.json"
+            if index == 1
+            else f"logs/scba-resume-{index - 1:03d}.json"
+        )
+        if attempt_log.get("path") != expected_log:
+            raise common.CampaignError("planned segment attempt log path changed")
+        if (
+            checkpoint.get("path") != "checkpoint/sigma-pp.h5"
+            or checkpoint.get("identity_sha256")
+            != manifest.get("preflight", {}).get("checkpoint_identity_sha256")
+            or checkpoint.get("status")
+            not in {"in_progress", "infrastructure_interrupted"}
+            or isinstance(checkpoint.get("completed_iterations"), bool)
+            or not isinstance(checkpoint.get("completed_iterations"), int)
+            or checkpoint.get("completed_iterations", 0) <= 0
+        ):
+            raise common.CampaignError("planned segment checkpoint evidence is invalid")
+        if latest is not None and checkpoint["completed_iterations"] <= latest[
+            "completed_iterations"
+        ]:
+            raise common.CampaignError("planned segment made no iteration progress")
+        latest = checkpoint
+        previous = {
+            "path": path.relative_to(artifacts).as_posix(),
+            "sha256": _sha256(path),
+        }
+
+    if latest is not None and require_current_checkpoint:
+        checkpoint_path = artifacts / "checkpoint" / "sigma-pp.h5"
+        _regular_file(checkpoint_path, "planned segment resume checkpoint")
+        if latest.get("sha256") != _sha256(checkpoint_path):
+            raise common.CampaignError("planned segment resume checkpoint changed")
+        try:
+            loaded = _load_segment_checkpoint(checkpoint_path)
+        except Exception as error:
+            raise common.CampaignError(
+                "planned segment resume checkpoint is not self-validating"
+            ) from error
+        if (
+            loaded.terminal
+            or loaded.identity.identity_sha256 != latest.get("identity_sha256")
+            or len(loaded.history) != latest.get("completed_iterations")
+        ):
+            raise common.CampaignError("planned segment resume checkpoint differs")
+    return records
+
+
+def _publish_segment_stop(
+    artifacts: Path,
+    manifest: Mapping[str, Any],
+    manifest_path: Path,
+    log_path: Path,
+    *,
+    attempt: int,
+    resume: bool,
+    supervision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate and record one planned, nonterminal scheduler segment."""
+
+    segmentation = manifest.get("segmentation")
+    if (
+        not isinstance(segmentation, Mapping)
+        or segmentation != {
+            "enabled": True,
+            "max_segments": SCBA_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": SCBA_SEGMENT_WALL_LIMIT_SECONDS,
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
+        }
+    ):
+        raise common.CampaignError("planned segment lacks its immutable contract")
+    if (
+        supervision.get("watchdog_trigger") != "wall-timeout"
+        or supervision.get("wall_limit_seconds")
+        != SCBA_SEGMENT_WALL_LIMIT_SECONDS
+        or supervision.get("rss_limit_bytes") != SCBA_RSS_LIMIT_BYTES
+    ):
+        raise common.CampaignError("planned segment stopped for an unexpected reason")
+    killed_after_grace = supervision.get("killed_after_term_grace")
+    expected_returncode = -9 if killed_after_grace is True else -15
+    if (
+        type(killed_after_grace) is not bool
+        or supervision.get("returncode") != expected_returncode
+    ):
+        raise common.CampaignError("planned segment termination is ambiguous")
+    if attempt >= SCBA_MAX_SEGMENTS:
+        raise common.CampaignError(
+            "planned SCBA segment budget exhausted without a scientific outcome"
+        )
+
+    checkpoint_path = Path(manifest["outputs"]["checkpoint"])
+    _regular_file(checkpoint_path, "planned segment checkpoint")
+    try:
+        checkpoint = _load_segment_checkpoint(checkpoint_path)
+    except Exception as error:
+        raise common.CampaignError(
+            "planned segment checkpoint is not self-validating"
+        ) from error
+    if checkpoint.terminal or checkpoint.status not in {
+        "in_progress",
+        "infrastructure_interrupted",
+    }:
+        raise common.CampaignError("planned segment checkpoint is not resumable")
+    identity = checkpoint.identity
+    preflight = manifest.get("preflight")
+    if (
+        not isinstance(preflight, Mapping)
+        or identity.run_id != manifest.get("run_id")
+        or identity.source_tree_sha256 != manifest.get("source_tree_sha256")
+        or identity.environment_sha256
+        != manifest.get("environment_lock", {}).get("sha256")
+        or identity.identity_sha256
+        != preflight.get("checkpoint_identity_sha256")
+    ):
+        raise common.CampaignError("planned segment checkpoint identity changed")
+
+    records = _validate_segment_chain(
+        artifacts,
+        manifest,
+        manifest_path,
+        require_current_checkpoint=False,
+    )
+    if len(records) != attempt - 1:
+        raise common.CampaignError("planned segment receipt chain is incomplete")
+    previous = None
+    if records:
+        previous = {
+            "path": records[-1].relative_to(artifacts).as_posix(),
+            "sha256": _sha256(records[-1]),
+        }
+    record = {
+        "schema": SEGMENT_SCHEMA,
+        "campaign_manifest_sha256": _sha256(manifest_path),
+        "segment_index": attempt,
+        "resume": resume,
+        "state": "segment-exhausted",
+        "checkpoint": {
+            "path": checkpoint_path.relative_to(artifacts).as_posix(),
+            "sha256": _sha256(checkpoint_path),
+            "identity_sha256": identity.identity_sha256,
+            "status": checkpoint.status,
+            "completed_iterations": len(checkpoint.history),
+        },
+        "attempt_log": {
+            "path": log_path.relative_to(artifacts).as_posix(),
+            "sha256": _sha256(log_path),
+        },
+        "previous_segment": previous,
+        "supervision": dict(supervision),
+        "resume_required": True,
+        "automatic_advance": False,
+        "controls_changed": False,
+        "release_certified": False,
+    }
+    segment_path = artifacts / "segments" / f"segment-{attempt:03d}.json"
+    common._publish_once(segment_path, _canonical(record))
+    return {
+        "schema": STATUS_SCHEMA,
+        "campaign_manifest_sha256": _sha256(manifest_path),
+        "state": "segment-exhausted",
+        "segment_index": attempt,
+        "segment_receipt_sha256": _sha256(segment_path),
+        "checkpoint_sha256": record["checkpoint"]["sha256"],
+        "resume_required": True,
+        "automatic_retry": False,
+        "automatic_advance": False,
+        "release_certified": False,
+    }
 
 
 def _manifest_authentication_view(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -366,13 +610,14 @@ def _supervise_scba(
     stdout_path: Path,
     stderr_path: Path,
     launch_environment: Mapping[str, str] | None = None,
+    wall_limit_seconds: int = SCBA_WALL_LIMIT_SECONDS,
 ) -> dict[str, Any]:
     return common._supervised_subprocess(
         command,
         repo=repo,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
-        wall_limit_seconds=SCBA_WALL_LIMIT_SECONDS,
+        wall_limit_seconds=wall_limit_seconds,
         rss_limit_bytes=SCBA_RSS_LIMIT_BYTES,
         **({"launch_environment": launch_environment} if launch_environment is not None else {}),
     )
@@ -457,7 +702,7 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False, launch_environment: Mapping[str, str] | None = None) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False, segmented: bool = False, launch_environment: Mapping[str, str] | None = None, allow_parent_source_tree_mismatch: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
@@ -483,6 +728,8 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         "mixing": mixing,
         "mixing_floor": mixing_floor,
         "temperature_bias": temperature_bias,
+        "segmented": segmented,
+        "allow_parent_source_tree_mismatch": allow_parent_source_tree_mismatch,
     }
     existing_manifest = manifest_path.exists() or manifest_path.is_symlink()
     if existing_manifest:
@@ -514,6 +761,16 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         common._publish_once(running_path, _canonical({"schema": STATUS_SCHEMA, "campaign_manifest_sha256": manifest_sha, "state": "running", "automatic_retry": False, "release_certified": False}))
     output = manifest["outputs"]
     attempt, log_path, failure_path, interrupted_sums_path = _attempt_paths(artifacts)
+    if segmented:
+        records = _validate_segment_chain(artifacts, manifest, manifest_path)
+        if len(records) != attempt - 1:
+            raise common.CampaignError("planned segment receipt chain is incomplete")
+        if attempt > SCBA_MAX_SEGMENTS:
+            raise common.CampaignError("planned SCBA segment budget is exhausted")
+        if resume is not (attempt > 1):
+            raise common.CampaignError(
+                "planned segment requires fresh segment 1 and explicit resume thereafter"
+            )
     command_parts = [sys.executable, str(repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"), "--fixture", str(fixture.resolve()), "--fc3-full", str(fc3_full.resolve()), "--phase-b-artifacts", str(phase_b.resolve()), "--checkpoint", str(Path(output["checkpoint"]).resolve()), "--output-json", str(Path(output["json"]).resolve()), "--output-hdf5", str(Path(output["hdf5"]).resolve()), "--campaign-manifest-sha256", manifest_sha, "--source-tree-sha256", manifest["source_tree_sha256"], "--environment-sha256", manifest["environment_lock"]["sha256"], "--run-id", manifest["run_id"], "--coupling-scale", str(manifest["coupling_scale"])]
     numerical = manifest["numerical_controls"]
     command_parts.extend([
@@ -533,6 +790,8 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
                 manifest["continuation_predictor"]
             ),
         ])
+        if manifest.get("allow_parent_source_tree_mismatch") is True:
+            command_parts.append("--allow-parent-source-tree-mismatch")
     born_initial = manifest.get("born_initial")
     if born_initial is not None:
         command_parts.extend([
@@ -549,6 +808,11 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         repo=repo,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        wall_limit_seconds=(
+            SCBA_SEGMENT_WALL_LIMIT_SECONDS
+            if segmented
+            else SCBA_WALL_LIMIT_SECONDS
+        ),
         **({"launch_environment": launch_environment} if launch_environment is not None else {}),
     )
     log = {
@@ -561,6 +825,27 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
     }
     common._publish_once(log_path, _canonical(log))
     stdout_path.unlink(missing_ok=True); stderr_path.unlink(missing_ok=True)
+    if segmented and supervision["watchdog_trigger"] == "wall-timeout":
+        try:
+            return _publish_segment_stop(
+                artifacts,
+                manifest,
+                manifest_path,
+                log_path,
+                attempt=attempt,
+                resume=bool(resume),
+                supervision=supervision,
+            )
+        except common.CampaignError as error:
+            return _infrastructure_failure(
+                artifacts,
+                manifest_path,
+                log_path,
+                failure_path,
+                interrupted_sums_path,
+                f"planned segment authentication failed: {error}",
+                supervision,
+            )
     if supervision["watchdog_trigger"] is not None or supervision["returncode"] not in {0, 2}:
         return _infrastructure_failure(
             artifacts, manifest_path, log_path, failure_path,
@@ -599,15 +884,21 @@ def main() -> int:
     parser.add_argument("--temperature-bias", type=float)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
+    parser.add_argument(
+        "--segmented",
+        action="store_true",
+        help="use the bounded explicit q4 scheduler-segmentation contract",
+    )
+    parser.add_argument("--allow-parent-source-tree-mismatch", action="store_true")
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
-        return 0 if status.get("state") == "passed" else 2
+        return 0 if status.get("state") in {"passed", "segment-exhausted"} else 2
     except Exception as error:
         print(f"SCBA campaign infrastructure error: {type(error).__name__}: {error}", file=sys.stderr)
         return 3

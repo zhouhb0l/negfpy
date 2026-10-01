@@ -4,6 +4,7 @@ import importlib
 import sys
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,175 @@ def test_scba_watchdog_is_independent_of_born_gate() -> None:
     assert campaign.SCBA_RSS_LIMIT_BYTES == pilot.PILOT_RSS_LIMIT_BYTES
     assert campaign.common.WALL_LIMIT_SECONDS == 2 * 60 * 60
     assert campaign.common.RSS_LIMIT_BYTES == 4 * 1024**3
+
+
+def _segmented_manifest(artifacts: Path) -> dict[str, object]:
+    checkpoint = artifacts / "checkpoint" / "sigma-pp.h5"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"checkpoint-1")
+    return {
+        "schema": campaign.SCHEMA,
+        "run_id": "segmented-run",
+        "source_tree_sha256": "a" * 64,
+        "environment_lock": {"sha256": "b" * 64},
+        "preflight": {"checkpoint_identity_sha256": "c" * 64},
+        "outputs": {"checkpoint": str(checkpoint)},
+        "segmentation": {
+            "enabled": True,
+            "max_segments": campaign.SCBA_MAX_SEGMENTS,
+            "segment_wall_limit_seconds": (
+                campaign.SCBA_SEGMENT_WALL_LIMIT_SECONDS
+            ),
+            "planned_stop_trigger": "wall-timeout",
+            "automatic_advance": False,
+        },
+    }
+
+
+def _segment_checkpoint(iterations: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        terminal=False,
+        status="in_progress",
+        history=tuple(range(iterations)),
+        identity=SimpleNamespace(
+            run_id="segmented-run",
+            source_tree_sha256="a" * 64,
+            environment_sha256="b" * 64,
+            identity_sha256="c" * 64,
+        ),
+    )
+
+
+def _segment_supervision() -> dict[str, object]:
+    return {
+        "returncode": -15,
+        "elapsed_seconds": campaign.SCBA_SEGMENT_WALL_LIMIT_SECONDS + 0.1,
+        "peak_observed_rss_bytes": 1024,
+        "watchdog_trigger": "wall-timeout",
+        "killed_after_term_grace": False,
+        "wall_limit_seconds": campaign.SCBA_SEGMENT_WALL_LIMIT_SECONDS,
+        "rss_limit_bytes": campaign.SCBA_RSS_LIMIT_BYTES,
+    }
+
+
+def test_planned_segment_stop_publishes_chained_resumable_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    manifest = _segmented_manifest(artifacts)
+    manifest_path = artifacts / "campaign-manifest.json"
+    _write(manifest_path, manifest)
+    log1 = artifacts / "logs" / "scba.json"
+    _write(log1, {"attempt": 1})
+    monkeypatch.setattr(
+        campaign, "_load_segment_checkpoint", lambda path: _segment_checkpoint(17)
+    )
+
+    status1 = campaign._publish_segment_stop(
+        artifacts,
+        manifest,
+        manifest_path,
+        log1,
+        attempt=1,
+        resume=False,
+        supervision=_segment_supervision(),
+    )
+    assert status1["state"] == "segment-exhausted"
+    assert status1["segment_index"] == 1
+    record1_path = artifacts / "segments" / "segment-001.json"
+    record1 = campaign._load_json(record1_path, "test segment 1")
+    assert record1["previous_segment"] is None
+    assert record1["checkpoint"]["completed_iterations"] == 17
+    assert record1["automatic_advance"] is False
+
+    # A later scheduler job must start from the exact checkpoint captured by
+    # the immediately preceding receipt.
+    assert campaign._validate_segment_chain(
+        artifacts, manifest, manifest_path
+    ) == (record1_path,)
+
+    log2 = artifacts / "logs" / "scba-resume-001.json"
+    _write(log2, {"attempt": 2})
+    (artifacts / "checkpoint" / "sigma-pp.h5").write_bytes(b"checkpoint-2")
+    monkeypatch.setattr(
+        campaign, "_load_segment_checkpoint", lambda path: _segment_checkpoint(31)
+    )
+    status2 = campaign._publish_segment_stop(
+        artifacts,
+        manifest,
+        manifest_path,
+        log2,
+        attempt=2,
+        resume=True,
+        supervision=_segment_supervision(),
+    )
+    record2_path = artifacts / "segments" / "segment-002.json"
+    record2 = campaign._load_json(record2_path, "test segment 2")
+    assert status2["segment_index"] == 2
+    assert record2["previous_segment"] == {
+        "path": "segments/segment-001.json",
+        "sha256": campaign._sha256(record1_path),
+    }
+    assert campaign._validate_segment_chain(
+        artifacts, manifest, manifest_path
+    ) == (record1_path, record2_path)
+
+
+def test_planned_segment_chain_rejects_checkpoint_or_receipt_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    manifest = _segmented_manifest(artifacts)
+    manifest_path = artifacts / "campaign-manifest.json"
+    _write(manifest_path, manifest)
+    log = artifacts / "logs" / "scba.json"
+    _write(log, {"attempt": 1})
+    monkeypatch.setattr(
+        campaign, "_load_segment_checkpoint", lambda path: _segment_checkpoint(8)
+    )
+    campaign._publish_segment_stop(
+        artifacts,
+        manifest,
+        manifest_path,
+        log,
+        attempt=1,
+        resume=False,
+        supervision=_segment_supervision(),
+    )
+
+    (artifacts / "checkpoint" / "sigma-pp.h5").write_bytes(b"changed")
+    with pytest.raises(campaign.common.CampaignError, match="checkpoint changed"):
+        campaign._validate_segment_chain(artifacts, manifest, manifest_path)
+
+
+def test_last_planned_segment_cannot_authorize_another_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = tmp_path / "campaign"
+    artifacts.mkdir()
+    manifest = _segmented_manifest(artifacts)
+    manifest_path = artifacts / "campaign-manifest.json"
+    _write(manifest_path, manifest)
+    log = artifacts / "logs" / "scba-resume-003.json"
+    _write(log, {"attempt": campaign.SCBA_MAX_SEGMENTS})
+    monkeypatch.setattr(
+        campaign, "_load_segment_checkpoint", lambda path: _segment_checkpoint(99)
+    )
+    with pytest.raises(campaign.common.CampaignError, match="budget exhausted"):
+        campaign._publish_segment_stop(
+            artifacts,
+            manifest,
+            manifest_path,
+            log,
+            attempt=campaign.SCBA_MAX_SEGMENTS,
+            resume=True,
+            supervision=_segment_supervision(),
+        )
 
 
 def test_scba_supervisor_receives_manifest_watchdog_limits(
