@@ -238,8 +238,7 @@ def problem_input_hashes(problem: CubicSCBAProblem) -> dict[str, str]:
     device_hash = _array_digest(
         (*problem.device.onsite_blocks, *problem.device.coupling_blocks),
         extra=(
-            f"layers={problem.device.n_layers};"
-            f"dof={problem.device.dof_per_layer};"
+            f"layers={problem.device.n_layers};" f"dof={problem.device.dof_per_layer};"
         ),
     )
     left_hash = _array_digest(
@@ -315,8 +314,21 @@ def configuration_hash(config: SCBAConfig) -> str:
 
     if not isinstance(config, SCBAConfig):
         raise TypeError("config must be an SCBAConfig.")
+    # Keep historical linear checkpoints readable. The new method's defaults
+    # add no behavior to that algorithm; every nondefault control is hashed.
+    anderson_defaults = {
+        "mixing_method": "linear",
+        "anderson_depth": 4,
+        "anderson_regularization": 1e-10,
+        "anderson_max_step_ratio": 5.0,
+    }
+    legacy_linear = all(
+        getattr(config, name) == value for name, value in anderson_defaults.items()
+    )
     digest = hashlib.sha256()
     for description in fields(config):
+        if legacy_linear and description.name in anderson_defaults:
+            continue
         _update_value(digest, description.name)
         _update_value(digest, getattr(config, description.name))
     return digest.hexdigest()
@@ -460,7 +472,9 @@ def _head_package_entries(
         # succeeds.  Batch all immutable object reads into one Git process;
         # the framing parser below remains fail-closed for missing/non-blob
         # objects and malformed output.
-        request = b"".join(object_id.encode("ascii") + b"\n" for _, object_id in records)
+        request = b"".join(
+            object_id.encode("ascii") + b"\n" for _, object_id in records
+        )
         batch = subprocess.run(
             (git_executable, "cat-file", "--batch"),
             cwd=repository,
@@ -490,7 +504,7 @@ def _head_package_entries(
                 return None
             contents[object_id] = batch[content_start:content_end]
             if content_end < len(batch):
-                if batch[content_end:content_end + 1] != b"\n":
+                if batch[content_end : content_end + 1] != b"\n":
                     return None
                 offset = content_end + 1
             else:
@@ -547,8 +561,7 @@ def _declared_package_version_from_bytes(document: bytes | None) -> str:
     if project_section is None:
         return "unknown"
     version_match = re.search(
-        r'(?m)^\s*version\s*=\s*["\x27]([^"\x27]+)'
-        r'["\x27]\s*(?:\n|\Z)',
+        r'(?m)^\s*version\s*=\s*["\x27]([^"\x27]+)' r'["\x27]\s*(?:\n|\Z)',
         project_section.group("body"),
     )
     return "unknown" if version_match is None else version_match.group(1)
@@ -582,18 +595,14 @@ def code_provenance() -> dict[str, str | bool]:
     else:
         embedded_present, embedded = False, None
     declared_version = (
-        "unknown"
-        if repository is None
-        else _declared_package_version(repository)
+        "unknown" if repository is None else _declared_package_version(repository)
     )
     # Installed wheel metadata is generated from the project declaration.
     # Non-source installs use embedded metadata or remain unknown.
     if declared_version == "unknown" and installed_version != "unknown":
         declared_version = installed_version
     package_version = (
-        declared_version
-        if declared_version != "unknown"
-        else installed_version
+        declared_version if declared_version != "unknown" else installed_version
     )
     version_consistent = bool(
         installed_version != "unknown"
@@ -655,22 +664,16 @@ def code_provenance() -> dict[str, str | bool]:
                     git_directory = (
                         repository / pointer.split(":", 1)[1].strip()
                     ).resolve()
-            head = (git_directory / "HEAD").read_text(
-                encoding="utf-8"
-            ).strip()
+            head = (git_directory / "HEAD").read_text(encoding="utf-8").strip()
             if head.startswith("ref:"):
                 reference = head.split(":", 1)[1].strip()
                 reference_file = git_directory / reference
                 if reference_file.is_file():
-                    revision = reference_file.read_text(
-                        encoding="utf-8"
-                    ).strip()
+                    revision = reference_file.read_text(encoding="utf-8").strip()
                 else:
                     packed = git_directory / "packed-refs"
                     if packed.is_file():
-                        for line in packed.read_text(
-                            encoding="utf-8"
-                        ).splitlines():
+                        for line in packed.read_text(encoding="utf-8").splitlines():
                             if line.startswith(("#", "^")):
                                 continue
                             value, _, name = line.partition(" ")

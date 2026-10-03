@@ -267,8 +267,9 @@ def test_infrastructure_resume_uses_append_only_attempt_artifacts(
     assert campaign._attempt_paths(artifacts)[0] == 3
 
 
+@pytest.mark.parametrize("research_scout", [False, True])
 def test_manifest_and_execution_command_preserve_predictor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, research_scout: bool,
 ) -> None:
     artifacts = tmp_path / "campaign"
     output = {
@@ -309,6 +310,7 @@ def test_manifest_and_execution_command_preserve_predictor(
 
     def supervise(command, **kwargs):
         observed["command"] = command
+        observed["wall_limit_seconds"] = kwargs["wall_limit_seconds"]
         kwargs["stdout_path"].write_text("")
         kwargs["stderr_path"].write_text("")
         return {"returncode": 2, "watchdog_trigger": None}
@@ -330,12 +332,16 @@ def test_manifest_and_execution_command_preserve_predictor(
         continuation_parent_artifacts=tmp_path / "parent",
         continuation_axis="coupling",
         continuation_predictor="coupling-square",
+        research_scout=research_scout,
     )
     assert status == {"state": "passed"}
     command = list(observed["command"])
     index = command.index("--continuation-predictor")
     assert command[index + 1] == "coupling-square"
     assert "--no-resume" in command
+
+    assert ("--research-scout" in command) is research_scout
+    assert observed["wall_limit_seconds"] == (10800 if research_scout else 82800)
 
 
 def test_resume_rejects_changed_predictor_before_checkpoint_use(
@@ -515,3 +521,102 @@ def test_qualified_scba_supervisor_rejects_environment_drift_before_launch(tmp_p
             launch_environment=environment,
         )
     assert not stdout.exists()
+
+
+def _scout_manifest(artifacts):
+    manifest = _segmented_manifest(artifacts)
+    manifest.pop("segmentation")
+    manifest["research_scout"] = {
+        "enabled": True, "max_iterations": 100, "max_wall_seconds": 10800,
+        "resume_allowed": False, "automatic_advance": False,
+    }
+    manifest["preflight"].update({
+        "configuration_sha256": "d" * 64,
+        "controls": {"mixing_method": "anderson", "max_iterations": 100},
+    })
+    manifest["outputs"].update({"json": str(artifacts / "outcomes/scba.json"),
+                                 "hdf5": str(artifacts / "outcomes/scba-fields.h5")})
+    return manifest
+
+
+def _scout_checkpoint(count=17):
+    checkpoint = _segment_checkpoint(count)
+    checkpoint.identity.configuration_sha256 = "d" * 64
+    checkpoint.history = tuple({"iteration": i + 1, "sigma_residual": 0.1}
+                               for i in range(count))
+    return checkpoint
+
+
+def test_scout_timeout_is_closed_nonresumable_diagnostic_not_success(tmp_path, monkeypatch):
+    manifest = _scout_manifest(tmp_path)
+    manifest_path = tmp_path / "campaign-manifest.json"
+    _write(manifest_path, manifest)
+    _write(tmp_path / "status-running.json", {"state": "running"})
+    log = tmp_path / "logs/scba.json"
+    supervision = _segment_supervision() | {"wall_limit_seconds": 10800, "elapsed_seconds": 10800.1}
+    _write(log, {"supervision": supervision})
+    monkeypatch.setattr(campaign, "_load_segment_checkpoint", lambda _: _scout_checkpoint())
+    status = campaign._publish_scout_timeout(tmp_path, manifest, manifest_path, log, supervision)
+    assert status["state"] == "scout-exhausted"
+    assert status["stop_reason"] == "wall-timeout"
+    assert status["scba_converged"] is False
+    assert status["resume_allowed"] is False
+    assert status["release_certified"] is False
+    assert (tmp_path / "status.json").is_file()
+    report = campaign._load_json(tmp_path / "scba-report.json", "report")
+    assert report["iteration_summary"]["completed_iterations"] == 17
+    assert report["checkpoint_sha256"] == campaign._sha256(tmp_path / "checkpoint/sigma-pp.h5")
+
+
+@pytest.mark.parametrize("fault", ["config", "identity", "budget", "wall", "reason"])
+def test_scout_stop_rejects_wrong_identity_budget_or_reason(tmp_path, monkeypatch, fault):
+    manifest = _scout_manifest(tmp_path)
+    checkpoint = _scout_checkpoint()
+    supervision = _segment_supervision() | {"wall_limit_seconds": 10800}
+    if fault == "config": checkpoint.identity.configuration_sha256 = "e" * 64
+    if fault == "identity": checkpoint.identity.run_id = "other"
+    if fault == "budget": checkpoint = _scout_checkpoint(101)
+    if fault == "wall": supervision["wall_limit_seconds"] = 72000
+    if fault == "reason": supervision["watchdog_trigger"] = "rss-limit"
+    monkeypatch.setattr(campaign, "_load_segment_checkpoint", lambda _: checkpoint)
+    with pytest.raises(campaign.common.CampaignError, match="research scout"):
+        campaign._publish_scout_timeout(tmp_path, manifest, tmp_path / "manifest", tmp_path / "log", supervision)
+    assert not (tmp_path / "status.json").exists()
+
+
+@pytest.mark.parametrize("resume,segmented,existing", [(True, False, False), (False, True, False), (False, False, True)])
+def test_scout_rejects_resume_segmentation_or_consumed_output_before_io(tmp_path, resume, segmented, existing):
+    artifacts = tmp_path / "scout"
+    if existing:
+        artifacts.mkdir()
+        (artifacts / "status.json").write_text("{}")
+    with pytest.raises(campaign.common.CampaignError, match="research scout"):
+        campaign.run_campaign(repo=tmp_path, fixture=tmp_path / "f", fc3_full=tmp_path / "fc3",
+                              phase_b=tmp_path / "phase-b", artifacts=artifacts,
+                              expected_commit="candidate", environment_lock=tmp_path / "lock",
+                              run_id="scout", coupling_scale=0.0175,
+                              research_scout=True, resume=resume, segmented=segmented)
+
+
+def test_scout_iteration_cap_reports_exhausted_not_scientific_pass(tmp_path, monkeypatch):
+    manifest = _scout_manifest(tmp_path)
+    manifest_path = tmp_path / "campaign-manifest.json"
+    running = tmp_path / "status-running.json"
+    log = tmp_path / "logs/scba.json"
+    _write(manifest_path, manifest)
+    _write(running, {"state": "running"})
+    _write(log, {"supervision": {"returncode": 2, "watchdog_trigger": None}})
+    _write(Path(manifest["outputs"]["json"]), {
+        "campaign_manifest_sha256": campaign._sha256(manifest_path), "scba_executed": True,
+        "result": {"converged": False, "scientific_error": {"type": "SCBAConvergenceError"}},
+    })
+    Path(manifest["outputs"]["hdf5"]).write_bytes(b"fields")
+    checkpoint = _scout_checkpoint(100)
+    checkpoint.status = "scientific_failure"
+    checkpoint.terminal = True
+    monkeypatch.setattr(campaign, "_load_segment_checkpoint", lambda _: checkpoint)
+    result = campaign._publish_report(tmp_path, manifest_path, running, log)
+    assert result["state"] == "scout-exhausted"
+    assert result["stop_reason"] == "iteration-limit"
+    assert result["scba_converged"] is False
+    assert result["resume_allowed"] is False

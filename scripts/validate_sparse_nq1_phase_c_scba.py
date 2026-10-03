@@ -56,6 +56,8 @@ MIN_OUTPUT_FREE_BYTES = 2 * 1024**3
 CONTINUATION_INITIALIZATION_SCHEMA = (
     "negfpy.material-nq1-continuation-initialization.v1"
 )
+RESEARCH_SCOUT_MAX_ITERATIONS = 100
+RESEARCH_SCOUT_WALL_SECONDS = 3 * 60 * 60
 CONTINUATION_PREDICTORS = frozenset({"identity", "coupling-square"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -136,7 +138,7 @@ def _publish_once(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None) -> SCBAConfig:
+def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, research_scout: bool = False) -> SCBAConfig:
     # These controls are intentionally explicit and immutable for this case.
     return SCBAConfig(
         eta_lead=phase_c.ETA_LEAD if eta_lead is None else float(eta_lead),
@@ -149,7 +151,7 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixin
         # previous candidate's watchdog expired. Keep this explicit in the
         # candidate source so qualification and receipts bind the larger
         # numerical budget rather than silently resuming with new controls.
-        max_iterations=800,
+        max_iterations=RESEARCH_SCOUT_MAX_ITERATIONS if research_scout else 800,
         min_iterations=3,
         consecutive_passes=3,
         mixing=0.2 if mixing is None else float(mixing),
@@ -157,6 +159,9 @@ def _config(*, eta_lead: float | None = None, mixing: float | None = None, mixin
         on_nonconvergence="raise",
         max_memory_fraction=phase_c.MEMORY_FRACTION,
         allow_memory_overcommit=False,
+        **({"mixing_method": "anderson", "anderson_depth": 4,
+            "anderson_regularization": 1e-10, "anderson_max_step_ratio": 5.0}
+           if research_scout else {}),
     )
 
 
@@ -332,6 +337,7 @@ def authenticate_scba_inputs(
     mixing: float | None = None,
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
+    research_scout: bool = False,
 ) -> tuple[dict[str, Any], Any, SCBAConfig]:
     if not np.isfinite(coupling_scale) or coupling_scale <= 0.0 or coupling_scale > 1.0:
         raise SCBACaseError("coupling_scale must be finite and in (0, 1]")
@@ -390,7 +396,7 @@ def authenticate_scba_inputs(
         identity["problem_input_hashes"] = problem_input_hashes(problem)
     config = _config(
         eta_lead=resolved_eta, mixing=resolved_mixing,
-        mixing_floor=resolved_mixing_floor,
+        mixing_floor=resolved_mixing_floor, research_scout=research_scout,
     )
     # The Phase-C assembly is the authenticated source of the material
     # problem.  Only the SCBA iteration controls differ from the Born gate.
@@ -492,6 +498,7 @@ def _continuation_initial_state(
     continuation_axis: str | None,
     continuation_predictor: str | None,
     allow_parent_source_tree_mismatch: bool = False,
+    research_scout: bool = False,
 ) -> tuple[Any | None, dict[str, Any] | None]:
     """Authenticate a completed lower-coupling campaign and load its state."""
 
@@ -584,6 +591,8 @@ def _continuation_initial_state(
         or not 0.0 < float(parent_scale) <= 1.0
     ):
         raise SCBACaseError("continuation parent coupling is invalid")
+    if research_scout and float(parent_scale) != 0.015:
+        raise SCBACaseError("research scout requires the converged g=.015 parent")
     parent_controls = manifest.get("numerical_controls")
     if not isinstance(parent_controls, dict):
         raise SCBACaseError("continuation parent numerical controls are missing")
@@ -729,11 +738,20 @@ def _continuation_initial_state(
         raise SCBACaseError(
             "continuation parent declared controls do not reconstruct"
         )
+    reconstructed_config_record = _plain(reconstructed_config)
+    recorded_config = parent_preflight.get("controls")
+    if isinstance(recorded_config, Mapping) and "mixing_method" not in recorded_config:
+        # Old completed parents predate these inactive linear-default fields.
+        # Their original config hash is still checked below and in checkpoint IO.
+        if getattr(reconstructed_config, "mixing_method", "linear") != "linear":
+            raise SCBACaseError("legacy parent configuration is not linear")
+        for name in ("mixing_method", "anderson_depth", "anderson_regularization", "anderson_max_step_ratio"):
+            reconstructed_config_record.pop(name, None)
     if (
         recorded_source.get("problem_input_hashes") != reconstructed_hashes
         or parent_preflight.get("configuration_sha256")
         != reconstructed_configuration
-        or parent_preflight.get("controls") != _plain(reconstructed_config)
+        or recorded_config != reconstructed_config_record
     ):
         raise SCBACaseError(
             "continuation parent problem/configuration preflight does not reproduce"
@@ -894,7 +912,23 @@ def _authenticated_initial_state(
     environment_sha256: str,
     coupling_scale: float,
     allow_parent_source_tree_mismatch: bool = False,
+    research_scout: bool = False,
 ) -> tuple[Any | None, dict[str, Any] | None, dict[str, Any] | None]:
+    if research_scout and (
+        continuation_parent_artifacts is None
+        or continuation_axis != "coupling"
+        or continuation_predictor != "coupling-square"
+        or born_initial_hdf5 is not None
+        or coupling_scale != 0.0175
+        or config.max_iterations != RESEARCH_SCOUT_MAX_ITERATIONS
+        or config.mixing_method != "anderson"
+        or config.mixing != 0.2
+        or config.mixing_floor != 0.001
+    ):
+        raise SCBACaseError(
+            "research scout requires fresh g=.0175 from a coupling-square parent, "
+            "Anderson mixing .2/.001 and a 100-iteration budget"
+        )
     if continuation_parent_artifacts is not None and born_initial_hdf5 is not None:
         raise SCBACaseError(
             "continuation and Born initial states are mutually exclusive"
@@ -927,6 +961,7 @@ def _authenticated_initial_state(
         continuation_axis=continuation_axis,
         continuation_predictor=continuation_predictor,
         allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
+        research_scout=research_scout,
     )
     return initial, parent, None
 
@@ -991,7 +1026,10 @@ def preflight_scba_inputs(
     temperature_bias: float | None = None,
     allow_existing_outputs: bool = False,
     allow_parent_source_tree_mismatch: bool = False,
+    research_scout: bool = False,
 ) -> dict[str, Any]:
+    if research_scout and allow_existing_outputs:
+        raise SCBACaseError("research scouts cannot reuse existing outputs")
     if not isinstance(allow_existing_outputs, bool):
         raise SCBACaseError("allow_existing_outputs must be boolean")
     for path, label in ((checkpoint, "checkpoint"), (output_json, "output JSON"), (output_hdf5, "output HDF5")):
@@ -1006,7 +1044,7 @@ def preflight_scba_inputs(
         coupling_scale=coupling_scale,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
-        temperature_bias=temperature_bias,
+        temperature_bias=temperature_bias, research_scout=research_scout,
     )
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
@@ -1018,9 +1056,17 @@ def preflight_scba_inputs(
         environment_sha256=environment_sha256,
         coupling_scale=coupling_scale,
         allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
+        research_scout=research_scout,
     )
     output_parent = output_hdf5.resolve().parent
-    output_parent.mkdir(parents=True, exist_ok=True)
+    if research_scout:
+        # Read-only preflight must not consume this create-only research run.
+        while not output_parent.exists():
+            output_parent = output_parent.parent
+    else:
+        output_parent.mkdir(parents=True, exist_ok=True)
+    if not output_parent.is_dir():
+        raise SCBACaseError("output filesystem ancestor is not a directory")
     if os.statvfs(output_parent).f_bavail * os.statvfs(output_parent).f_frsize < MIN_OUTPUT_FREE_BYTES:
         raise SCBACaseError("insufficient output filesystem space")
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
@@ -1061,10 +1107,11 @@ def preflight_scba_inputs(
         },
         "controls": _plain(config),
         "fixed_controls_no_retuning": True,
-        "resume_exact_identity": True,
+        "resume_exact_identity": not research_scout,
         "passed": True,
         "scba_executed": False,
         "release_certified": False,
+        **({"research_scout": {"enabled": True, "max_iterations": RESEARCH_SCOUT_MAX_ITERATIONS, "max_wall_seconds": RESEARCH_SCOUT_WALL_SECONDS, "resume_allowed": False, "automatic_advance": False}} if research_scout else {}),
     }
 
 
@@ -1084,13 +1131,18 @@ def run_scba_case(
     mixing_floor: float | None = None,
     temperature_bias: float | None = None,
     allow_parent_source_tree_mismatch: bool = False,
+    research_scout: bool = False,
 ) -> dict[str, Any]:
+    if research_scout and resume:
+        raise SCBACaseError("research scouts cannot resume; pass --no-resume")
+    if research_scout and any(path.exists() or path.is_symlink() for path in (checkpoint, output_json, output_hdf5)):
+        raise SCBACaseError("research scout outputs already exist; refusing reuse")
     identity, problem, config = authenticate_scba_inputs(
         fixture=fixture, fc3_full=fc3_full, phase_b_artifacts=phase_b_artifacts,
         coupling_scale=coupling_scale,
         grid_step=grid_step, grid_n_positive=grid_n_positive,
         eta_lead=eta_lead, mixing=mixing, mixing_floor=mixing_floor,
-        temperature_bias=temperature_bias,
+        temperature_bias=temperature_bias, research_scout=research_scout,
     )
     initial_sigma_pp, parent, born_initial = _authenticated_initial_state(
         continuation_parent_artifacts=continuation_parent_artifacts,
@@ -1102,6 +1154,7 @@ def run_scba_case(
         environment_sha256=environment_sha256,
         coupling_scale=coupling_scale,
         allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
+        research_scout=research_scout,
     )
     from negfpy.anharmonic._checkpoint_v2 import make_scba_checkpoint_identity_v2
     expected = make_scba_checkpoint_identity_v2(
@@ -1187,6 +1240,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-parent-source-tree-mismatch", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--research-scout", action="store_true")
     return parser
 
 
@@ -1208,6 +1262,7 @@ def main() -> int:
                 mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
                 allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch,
+                research_scout=args.research_scout,
             )
         else:
             if args.campaign_manifest_sha256 is None:
@@ -1227,6 +1282,7 @@ def main() -> int:
                 mixing_floor=args.mixing_floor,
                 temperature_bias=args.temperature_bias,
                 allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch,
+                research_scout=args.research_scout,
             )
         print(json.dumps(_plain(result), sort_keys=True, ensure_ascii=True, separators=(",", ":")))
         return 0 if result.get("result", {}).get("converged", result.get("passed", False)) else 2

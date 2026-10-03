@@ -159,9 +159,7 @@ def _canonical(value: Any) -> str:
 
 
 def _hash_mapping(values: Mapping[str, str], *, domain: str) -> str:
-    return _sha256_bytes(
-        (domain + "\0" + _canonical(dict(values))).encode("ascii")
-    )
+    return _sha256_bytes((domain + "\0" + _canonical(dict(values))).encode("ascii"))
 
 
 def _validated_hash_mapping(
@@ -243,9 +241,7 @@ def _material_source_hashes(
     for key, value in explicit.items():
         digest = _validate_sha256(value, name=f"source_hashes[{key!r}]")
         if key in automatic and automatic[key] != digest:
-            raise ValueError(
-                f"source_hashes[{key!r}] conflicts with problem metadata."
-            )
+            raise ValueError(f"source_hashes[{key!r}] conflicts with problem metadata.")
         automatic[str(key)] = digest
     return _validated_hash_mapping(automatic, name="source_hashes")
 
@@ -529,7 +525,9 @@ class SCBACheckpointV2:
         if history:
             last = history[-1]
             if self.solver_state.mixing != last.mixing:
-                raise ValueError("solver_state mixing must equal the last history value.")
+                raise ValueError(
+                    "solver_state mixing must equal the last history value."
+                )
             if self.solver_state.consecutive_passes != last.consecutive_passes:
                 raise ValueError(
                     "solver_state consecutive_passes must equal the last history value."
@@ -562,7 +560,10 @@ class SCBACheckpointV2:
 
     @property
     def resumable(self) -> bool:
-        return self.status in _RESUMABLE_STATUSES
+        return (
+            self.status in _RESUMABLE_STATUSES
+            and self.metadata.get("anderson_resume_supported") is not False
+        )
 
 
 # More descriptive aliases for callers that prefer the sparse-specific names.
@@ -709,9 +710,7 @@ def _load_json_object(handle: Any, name: str) -> tuple[dict[str, Any], str]:
             f"checkpoint {name} contains invalid JSON."
         ) from exc
     if canonical != text:
-        raise CheckpointCorruptionError(
-            f"checkpoint {name} is not canonical JSON."
-        )
+        raise CheckpointCorruptionError(f"checkpoint {name} is not canonical JSON.")
     return value, digest
 
 
@@ -764,9 +763,9 @@ def _validate_transition(
                 "a checkpoint update without a new iteration must mark an "
                 "infrastructure interruption."
             )
-        if not np.array_equal(previous.sigma_lesser, current.sigma_lesser) or not np.array_equal(
-            previous.sigma_greater, current.sigma_greater
-        ):
+        if not np.array_equal(
+            previous.sigma_lesser, current.sigma_lesser
+        ) or not np.array_equal(previous.sigma_greater, current.sigma_greater):
             raise CheckpointMismatchError(
                 "an interruption marker cannot alter the numerical state."
             )
@@ -813,9 +812,7 @@ def write_scba_checkpoint_v2(
         "status": checkpoint.status,
         **integrity,
     }
-    manifest_sha256 = _sha256_bytes(
-        _canonical(manifest_payload).encode("ascii")
-    )
+    manifest_sha256 = _sha256_bytes(_canonical(manifest_payload).encode("ascii"))
 
     try:
         with h5py.File(temporary, "x") as handle:
@@ -930,10 +927,9 @@ def load_scba_checkpoint_v2(
                 raise CheckpointCorruptionError(
                     "checkpoint sigma datasets have invalid attributes."
                 )
-            if (
-                lesser_dataset.dtype != np.dtype("<c16")
-                or greater_dataset.dtype != np.dtype("<c16")
-            ):
+            if lesser_dataset.dtype != np.dtype(
+                "<c16"
+            ) or greater_dataset.dtype != np.dtype("<c16"):
                 raise CheckpointCorruptionError(
                     "checkpoint sigma datasets do not use canonical complex128."
                 )
@@ -1011,7 +1007,10 @@ def load_scba_checkpoint_v2(
                 "solver_state_json_sha256": state_hash,
                 "metadata_json_sha256": metadata_hash,
             }
-            if _sha256_bytes(_canonical(manifest_payload).encode("ascii")) != stored_manifest_hash:
+            if (
+                _sha256_bytes(_canonical(manifest_payload).encode("ascii"))
+                != stored_manifest_hash
+            ):
                 raise CheckpointCorruptionError(
                     "checkpoint manifest failed its SHA256 integrity check."
                 )
@@ -1106,8 +1105,7 @@ def _validate_checkpoint_for_solver(
         if consecutive < config.consecutive_passes:
             if (
                 previous_residual is not None
-                and item.sigma_residual
-                > previous_residual * (1.0 + 1.0e-12)
+                and item.sigma_residual > previous_residual * (1.0 + 1.0e-12)
             ):
                 increase_streak += 1
             else:
@@ -1130,7 +1128,7 @@ def _validate_checkpoint_for_solver(
         raise CheckpointCorruptionError(
             "checkpoint adaptive continuation state is inconsistent."
         )
-    if checkpoint.resumable:
+    if checkpoint.status in _RESUMABLE_STATUSES:
         if count >= config.max_iterations:
             raise CheckpointCorruptionError(
                 "resumable checkpoint has no remaining configured iteration."
@@ -1195,7 +1193,7 @@ def restore_scba_checkpoint_result_v2(
         config,
     )
     currents = _current_report(problem, left, right, sigma_pp, green)
-    return _finalize_result(
+    result = _finalize_result(
         problem,
         config,
         method="scba",
@@ -1210,6 +1208,16 @@ def restore_scba_checkpoint_result_v2(
         initialization_hash=checkpoint.identity.initial_state_sha256,
         predicted_memory_bytes=predicted,
     )
+    if config.mixing_method == "anderson":
+        result = replace(
+            result,
+            metadata={
+                **result.metadata,
+                "anderson": checkpoint.metadata.get("anderson", {}),
+                "anderson_resume_supported": False,
+            },
+        )
+    return result
 
 
 def checkpoint_initial_sigma_v2(checkpoint: SCBACheckpointV2) -> KeldyshSpectrum:
@@ -1252,13 +1260,12 @@ class _SolverCheckpointSession:
         self.identity = identity
         self.checkpoint = checkpoint
         self.initialization = initialization
+        self._algorithm_metadata: dict[str, Any] = {}
         self._attempt_started = time.perf_counter()
         self._boundary_started = self._attempt_started
         self._begun = False
         self._prior_elapsed = (
-            0.0
-            if checkpoint is None
-            else float(checkpoint.timings["elapsed_seconds"])
+            0.0 if checkpoint is None else float(checkpoint.timings["elapsed_seconds"])
         )
         self._reconstruction = (
             0.0
@@ -1266,9 +1273,7 @@ class _SolverCheckpointSession:
             else float(checkpoint.timings["reconstruction_seconds"])
         )
         self._iteration_seconds = (
-            []
-            if checkpoint is None
-            else list(_timing_iterations(checkpoint))
+            [] if checkpoint is None else list(_timing_iterations(checkpoint))
         )
         self._attempts = (
             1 if checkpoint is None else int(checkpoint.timings["attempts"]) + 1
@@ -1283,6 +1288,9 @@ class _SolverCheckpointSession:
             "attempts": self._attempts,
         }
 
+    def set_algorithm_metadata(self, metadata: dict[str, Any]) -> None:
+        self._algorithm_metadata = metadata
+
     def _metadata(self, **updates: Any) -> dict[str, Any]:
         base = {} if self.checkpoint is None else dict(self.checkpoint.metadata)
         base.update(
@@ -1290,6 +1298,7 @@ class _SolverCheckpointSession:
                 "initialization": self.initialization,
                 "storage_contract": "mixed_sigma_pp_lesser_greater_only",
                 "derived_fields_persisted": False,
+                **self._algorithm_metadata,
                 **updates,
             }
         )
@@ -1306,6 +1315,10 @@ class _SolverCheckpointSession:
             raise RuntimeError("checkpoint solver session was begun more than once.")
         self._begun = True
         if self.checkpoint is not None:
+            if config.mixing_method == "anderson":
+                raise ValueError(
+                    "Anderson scout checkpoints cannot resume: history is not persisted."
+                )
             _validate_checkpoint_for_solver(self.checkpoint, problem, config)
             self._boundary_started = time.perf_counter()
             return _SolverResumeState(
@@ -1315,6 +1328,10 @@ class _SolverCheckpointSession:
                 continuation=self.checkpoint.solver_state,
             )
 
+        if config.mixing_method == "anderson":
+            self._algorithm_metadata.update(
+                mixing_method="anderson", anderson_resume_supported=False
+            )
         state = SCBAContinuationState(config.mixing, None, 0, 0)
         record = SCBACheckpointV2(
             identity=self.identity,
@@ -1490,9 +1507,7 @@ def solve_sparse_scba_checkpointed(
     checkpoint: SCBACheckpointV2 | None = None
     if path.exists():
         if not resume:
-            raise FileExistsError(
-                f"checkpoint already exists and resume=False: {path}"
-            )
+            raise FileExistsError(f"checkpoint already exists and resume=False: {path}")
         checkpoint = load_scba_checkpoint_v2(
             path,
             expected_identity=identity,
@@ -1504,9 +1519,17 @@ def solve_sparse_scba_checkpointed(
                 problem,
                 config,
             )
-            if checkpoint.status == "scientific_failure" and config.on_nonconvergence == "raise":
+            if (
+                checkpoint.status == "scientific_failure"
+                and config.on_nonconvergence == "raise"
+            ):
                 raise _nonconvergence_error(checkpoint, result)
             return result
+
+        if config.mixing_method == "anderson":
+            raise ValueError(
+                "Anderson scout checkpoints cannot resume: history is not persisted."
+            )
 
     initialization = "zero" if initial_sigma_pp is None else "supplied_keldysh_pair"
     session = _SolverCheckpointSession(

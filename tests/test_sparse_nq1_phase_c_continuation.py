@@ -87,10 +87,11 @@ def _write_parent(
     *,
     parent_scale: float = 0.01,
     converged: bool = True,
+    mixing_floor: float = 0.01,
 ) -> tuple[CubicSCBAProblem, object]:
     root.mkdir()
     checkpoint = root / "checkpoint" / "sigma-pp.h5"
-    config = driver._config()
+    config = driver._config(mixing_floor=mixing_floor)
     if not converged:
         config = replace(
             config,
@@ -873,3 +874,77 @@ def test_case_driver_authenticates_born_initialization_and_excludes_parent(
             source_tree_sha256=SOURCE_TREE,
             environment_sha256=ENVIRONMENT, coupling_scale=1.0,
         )
+
+
+def test_research_scout_uses_authenticated_legacy_parent_with_new_algorithm(tmp_path):
+    root = tmp_path / "parent"
+    _write_parent(root, parent_scale=0.015, mixing_floor=0.001)
+    before = driver._sha256_file(root / "checkpoint/sigma-pp.h5")
+    manifest = driver._load_canonical_json(root / "campaign-manifest.json", "test manifest")
+    # Simulate the exact pre-Anderson parent's recorded SCBA controls.
+    for name in ("mixing_method", "anderson_depth", "anderson_regularization", "anderson_max_step_ratio"):
+        manifest["preflight"]["controls"].pop(name, None)
+    _rebind_parent_manifest(root, manifest)
+    config = driver._config(mixing_floor=0.001, research_scout=True)
+    assert config.max_iterations == 100
+    assert config.mixing_method == "anderson"
+    assert driver._config().max_iterations == 800
+    initial, parent, born = driver._authenticated_initial_state(
+        continuation_parent_artifacts=root, continuation_axis="coupling",
+        continuation_predictor="coupling-square", born_initial_hdf5=None,
+        identity=_identity(), problem=_problem(0.0175 * 0.1), config=config,
+        source_tree_sha256="c" * 64, environment_sha256=ENVIRONMENT,
+        coupling_scale=0.0175, allow_parent_source_tree_mismatch=True,
+        research_scout=True,
+    )
+    assert initial is not None and parent is not None and born is None
+    assert parent["initialization"]["factor"] == pytest.approx((0.0175 / 0.015) ** 2)
+    assert driver._sha256_file(root / "checkpoint/sigma-pp.h5") == before
+    # Opt-in permits the fixed algorithm/budget change, never physical controls.
+    with pytest.raises(driver.SCBACaseError, match="cannot change numerical"):
+        driver._authenticated_initial_state(
+            continuation_parent_artifacts=root, continuation_axis="coupling",
+            continuation_predictor="coupling-square", born_initial_hdf5=None,
+            identity=_identity(), problem=_problem(0.0175 * 0.1),
+            config=replace(config, eta_lead=config.eta_lead * 2),
+            source_tree_sha256="c" * 64, environment_sha256=ENVIRONMENT,
+            coupling_scale=0.0175, allow_parent_source_tree_mismatch=True,
+            research_scout=True,
+        )
+
+
+@pytest.mark.parametrize("changes", [
+    {"coupling_scale": 0.02}, {"continuation_predictor": "identity"},
+    {"continuation_parent_artifacts": None},
+])
+def test_research_scout_rejects_changed_scope_before_parent_read(tmp_path, changes):
+    arguments = dict(
+        continuation_parent_artifacts=tmp_path / "absent", continuation_axis="coupling",
+        continuation_predictor="coupling-square", born_initial_hdf5=None,
+        identity=_identity(), problem=_problem(0.0175 * 0.1),
+        config=driver._config(mixing_floor=0.001, research_scout=True),
+        source_tree_sha256=SOURCE_TREE, environment_sha256=ENVIRONMENT,
+        coupling_scale=0.0175, research_scout=True,
+    )
+    arguments.update(changes)
+    with pytest.raises(driver.SCBACaseError, match="research scout requires"):
+        driver._authenticated_initial_state(**arguments)
+
+
+def test_research_scout_preflight_does_not_consume_fresh_output_root(tmp_path, monkeypatch):
+    problem = _problem(0.0175 * 0.1)
+    config = driver._config(mixing_floor=0.001, research_scout=True)
+    monkeypatch.setattr(driver, "authenticate_scba_inputs", lambda **_: (_identity(), problem, config))
+    monkeypatch.setattr(driver, "_authenticated_initial_state", lambda **_: (None, None, None))
+    artifacts = tmp_path / "fresh-scout"
+    result = driver.preflight_scba_inputs(
+        fixture=tmp_path / "fixture", fc3_full=tmp_path / "fc3", phase_b_artifacts=tmp_path / "phase-b",
+        checkpoint=artifacts / "checkpoint/sigma-pp.h5",
+        output_json=artifacts / "outcomes/scba.json", output_hdf5=artifacts / "outcomes/scba-fields.h5",
+        source_tree_sha256=SOURCE_TREE, environment_sha256=ENVIRONMENT,
+        run_id="scout", coupling_scale=0.0175, research_scout=True,
+    )
+    assert result["passed"] is True
+    assert result["research_scout"]["max_iterations"] == 100
+    assert result["resume_exact_identity"] is False
+    assert not artifacts.exists()

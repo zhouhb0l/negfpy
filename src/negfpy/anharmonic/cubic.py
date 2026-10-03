@@ -432,7 +432,9 @@ def cubic_lesser_greater(
     is tested against the direct serial oracle.  The default remains
     ``"serial"``.  Exact sparse vertices dispatch to their direct kernel for
     ``"serial"`` and ``"threaded"`` (threaded sparse contraction is not yet
-    enabled), and to their zero-padded implementation for ``"fft"``.
+    enabled), and to their zero-padded implementation for ``"fft"``. Sparse
+    FFT accepts an explicit ``max_workers`` of 2--8 for independent slices;
+    the default None and 1 retain its serial path.
     """
 
     # The sparse module imports ``DenseCubicVertex`` for explicit conversion,
@@ -457,6 +459,7 @@ def cubic_lesser_greater(
             green_greater,
             grid,
             backend=sparse_backend,
+            max_workers=selected_workers if sparse_backend == "fft" else None,
         )
 
     lesser = _validated_green(

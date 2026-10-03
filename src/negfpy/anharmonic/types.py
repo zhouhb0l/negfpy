@@ -81,10 +81,7 @@ def _freeze_metadata_value(value: Any) -> Any:
         return value.item()
     if isinstance(value, Mapping):
         return MappingProxyType(
-            {
-                str(key): _freeze_metadata_value(item)
-                for key, item in value.items()
-            }
+            {str(key): _freeze_metadata_value(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_metadata_value(item) for item in value)
@@ -105,8 +102,7 @@ def _is_release_package_version(value: Any) -> bool:
     """Accept NEGFPy's certifiable canonical PEP 440 subset."""
 
     return bool(
-        isinstance(value, str)
-        and _RELEASE_PACKAGE_VERSION.fullmatch(value) is not None
+        isinstance(value, str) and _RELEASE_PACKAGE_VERSION.fullmatch(value) is not None
     )
 
 
@@ -192,7 +188,9 @@ def _freeze_current_spectra(
         frozen: dict[str, Array] = {}
         for key, spectrum in values.items():
             if not isinstance(key, str) or not key:
-                raise ValueError("contact_spectra mapping keys must be non-empty strings.")
+                raise ValueError(
+                    "contact_spectra mapping keys must be non-empty strings."
+                )
             frozen[key] = _readonly_real(spectrum, name=f"contact_spectra[{key!r}]")
         return MappingProxyType(frozen)
     return _readonly_real(values, name="contact_spectra")
@@ -215,8 +213,12 @@ class SolverScale:
     metadata: Metadata = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "omega0", _finite_real(self.omega0, name="omega0", positive=True))
-        object.__setattr__(self, "hbar", _finite_real(self.hbar, name="hbar", positive=True))
+        object.__setattr__(
+            self, "omega0", _finite_real(self.omega0, name="omega0", positive=True)
+        )
+        object.__setattr__(
+            self, "hbar", _finite_real(self.hbar, name="hbar", positive=True)
+        )
         if not isinstance(self.metadata, Mapping):
             raise TypeError("metadata must be a mapping.")
         metadata = dict(self.metadata)
@@ -243,24 +245,18 @@ class SolverScale:
 
         # These fields are reserved and derived from the actual scale. Caller
         # metadata may not override numerical conversion provenance.
-        metadata["unit_system"] = (
-            "reduced" if reduced else "physical_reference_scale"
-        )
+        metadata["unit_system"] = "reduced" if reduced else "physical_reference_scale"
         metadata["source_units"] = source_units
         metadata["source_units_declared"] = source_declared
         metadata["problem_units"] = "dimensionless_solver_units"
-        metadata["dynamical_matrix_to_solver_factor"] = (
-            1.0 / self.omega0**2
-        )
+        metadata["dynamical_matrix_to_solver_factor"] = 1.0 / self.omega0**2
         metadata["cubic_vertex_to_solver_factor"] = (
             np.sqrt(self.hbar) / self.omega0**2.5
         )
-        metadata["temperature_energy_to_solver_factor"] = (
-            1.0 / (self.hbar * self.omega0)
+        metadata["temperature_energy_to_solver_factor"] = 1.0 / (
+            self.hbar * self.omega0
         )
-        metadata["current_solver_to_physical_factor"] = (
-            self.hbar * self.omega0**2
-        )
+        metadata["current_solver_to_physical_factor"] = self.hbar * self.omega0**2
         object.__setattr__(self, "metadata", _freeze_mapping(metadata))
 
     @property
@@ -379,7 +375,11 @@ class HarmonicReservoir:
                 )
 
         indices = _normalize_indices(self.device_indices)
-        if coupling is not None and isinstance(indices, tuple) and len(indices) != coupling.shape[0]:
+        if (
+            coupling is not None
+            and isinstance(indices, tuple)
+            and len(indices) != coupling.shape[0]
+        ):
             raise ValueError(
                 "device_indices count must equal the number of device_to_lead rows."
             )
@@ -396,7 +396,9 @@ class HarmonicReservoir:
         if self.device_to_lead is not None:
             return self.device_to_lead
         if side == "left":
-            coupling = self.lead.d10 if self.lead.d10 is not None else self.lead.d01.conj().T
+            coupling = (
+                self.lead.d10 if self.lead.d10 is not None else self.lead.d01.conj().T
+            )
         else:
             coupling = self.lead.d01
         return _readonly_complex(coupling, name="device_to_lead")
@@ -416,7 +418,9 @@ class HarmonicReservoir:
 
         if self.device_indices is None:
             if n_contact > dim:
-                raise ValueError("contact dimension exceeds the finite-device dimension.")
+                raise ValueError(
+                    "contact dimension exceeds the finite-device dimension."
+                )
             if side == "left":
                 values = np.arange(n_contact, dtype=np.int64)
             else:
@@ -515,6 +519,10 @@ class SCBAConfig:
     max_workers: int | None = None
     max_memory_fraction: float = 0.70
     allow_memory_overcommit: bool = False
+    mixing_method: Literal["linear", "anderson"] = "linear"
+    anderson_depth: int = 4
+    anderson_regularization: float = 1e-10
+    anderson_max_step_ratio: float = 5.0
 
     def __post_init__(self) -> None:
         eta_lead = _finite_real(self.eta_lead, name="eta_lead", positive=True)
@@ -539,11 +547,29 @@ class SCBAConfig:
             )
 
         mixing = _finite_real(self.mixing, name="mixing", positive=True)
-        mixing_floor = _finite_real(self.mixing_floor, name="mixing_floor", positive=True)
+        mixing_floor = _finite_real(
+            self.mixing_floor, name="mixing_floor", positive=True
+        )
         if mixing > 1.0:
             raise ValueError("mixing cannot exceed one.")
         if mixing_floor > mixing:
             raise ValueError("mixing_floor cannot exceed mixing.")
+        if self.mixing_method not in {"linear", "anderson"}:
+            raise ValueError("mixing_method must be 'linear' or 'anderson'.")
+        depth = _positive_int(self.anderson_depth, name="anderson_depth")
+        if depth > 12:
+            raise ValueError("anderson_depth cannot exceed 12 (bounded dense history).")
+        regularization = _finite_real(
+            self.anderson_regularization, name="anderson_regularization", positive=True
+        )
+        step_ratio = _finite_real(
+            self.anderson_max_step_ratio, name="anderson_max_step_ratio", positive=True
+        )
+        if step_ratio < 1.0:
+            raise ValueError("anderson_max_step_ratio must be at least one.")
+        object.__setattr__(self, "anderson_depth", depth)
+        object.__setattr__(self, "anderson_regularization", regularization)
+        object.__setattr__(self, "anderson_max_step_ratio", step_ratio)
 
         for name in (
             "sigma_rtol",
@@ -565,9 +591,7 @@ class SCBAConfig:
         if self.hilbert_backend not in {"direct", "fft"}:
             raise ValueError("hilbert_backend must be 'direct' or 'fft'.")
         if self.backend not in {"serial", "threaded", "fft"}:
-            raise ValueError(
-                "backend must be 'serial', 'threaded', or 'fft'."
-            )
+            raise ValueError("backend must be 'serial', 'threaded', or 'fft'.")
         if self.on_nonconvergence not in {"raise", "return"}:
             raise ValueError("on_nonconvergence must be 'raise' or 'return'.")
         if not isinstance(self.surface_gf_method, str) or not self.surface_gf_method:
@@ -620,7 +644,9 @@ class KeldyshSpectrum:
                 "Keldysh spectra must have shape (n_frequency, ndof, ndof)."
             )
         if lesser.shape != retarded.shape or greater.shape != retarded.shape:
-            raise ValueError("retarded, lesser, and greater spectra must share one shape.")
+            raise ValueError(
+                "retarded, lesser, and greater spectra must share one shape."
+            )
         object.__setattr__(self, "retarded", retarded)
         object.__setattr__(self, "lesser", lesser)
         object.__setattr__(self, "greater", greater)
@@ -753,13 +779,11 @@ class SpatialCurrentReport:
         collision_spectra = self.collision_power_spectra
         if eom_spectra.ndim != 2 or eom_spectra.shape[0] < 1:
             raise ValueError(
-                "eom_exchange_spectra must have shape "
-                "(n_layers, n_positive)."
+                "eom_exchange_spectra must have shape " "(n_layers, n_positive)."
             )
         if collision_spectra.shape != eom_spectra.shape:
             raise ValueError(
-                "collision_power_spectra must match "
-                "eom_exchange_spectra."
+                "collision_power_spectra must match " "eom_exchange_spectra."
             )
         n_layers = eom_spectra.shape[0]
         for name in (
@@ -906,7 +930,9 @@ class AnharmonicResult:
             if not isinstance(spectrum, KeldyshSpectrum):
                 raise TypeError(f"{name} must be a KeldyshSpectrum instance.")
             if spectrum.shape != expected_shape:
-                raise ValueError("all Green-function and self-energy spectra must share one shape.")
+                raise ValueError(
+                    "all Green-function and self-energy spectra must share one shape."
+                )
         if expected_shape[0] != self.grid.n_points:
             raise ValueError("spectrum frequency dimension must match the signed grid.")
         if not isinstance(self.currents, CurrentReport):

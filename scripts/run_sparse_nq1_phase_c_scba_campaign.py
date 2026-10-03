@@ -73,7 +73,10 @@ def _manifest(
     segmented: bool = False,
     allow_existing_outputs: bool = False,
     allow_parent_source_tree_mismatch: bool = False,
+    research_scout: bool = False,
 ) -> dict[str, Any]:
+    if research_scout and (segmented or allow_existing_outputs):
+        raise common.CampaignError("research scouts are fresh, nonresumable and nonsegmented")
     repo = repo.resolve()
     artifacts = artifacts.resolve()
     checkpoint = artifacts / "checkpoint" / "sigma-pp.h5"
@@ -95,6 +98,7 @@ def _manifest(
         temperature_bias=temperature_bias,
         allow_existing_outputs=allow_existing_outputs,
         allow_parent_source_tree_mismatch=allow_parent_source_tree_mismatch,
+        research_scout=research_scout,
     )
     driver = repo / "scripts" / "validate_sparse_nq1_phase_c_scba.py"
     if not driver.is_file() or driver.is_symlink():
@@ -123,6 +127,12 @@ def _manifest(
         "distributions": common._versions(),
         "thread_limits": dict(sorted(case.phase_c.THREAD_LIMIT_ENV.items())),
     }
+    if research_scout:
+        document["scientific_scope"] = "bounded Anderson research scout; no pilot/release acceptance"
+        document["research_scout"] = preflight["research_scout"]
+        document["restart"]["resume_exact_identity"] = False
+        document["restart"]["resume_allowed"] = False
+        document["watchdog"]["wall_limit_seconds"] = case.RESEARCH_SCOUT_WALL_SECONDS
     if segmented:
         document["segmentation"] = {
             "enabled": True,
@@ -623,6 +633,97 @@ def _supervise_scba(
     )
 
 
+def _authenticate_scout_checkpoint(manifest: Mapping[str, Any]) -> tuple[Any, str]:
+    contract = {
+        "enabled": True, "max_iterations": case.RESEARCH_SCOUT_MAX_ITERATIONS,
+        "max_wall_seconds": case.RESEARCH_SCOUT_WALL_SECONDS,
+        "resume_allowed": False, "automatic_advance": False,
+    }
+    if manifest.get("research_scout") != contract:
+        raise common.CampaignError("research scout contract changed")
+    path = _regular_file(Path(manifest["outputs"]["checkpoint"]), "scout checkpoint")
+    before = _sha256(path)
+    checkpoint = _load_segment_checkpoint(path)
+    after = _sha256(path)
+    identity = checkpoint.identity
+    preflight = manifest["preflight"]
+    controls = preflight.get("controls", {})
+    if (
+        before != after
+        or identity.run_id != manifest.get("run_id")
+        or identity.source_tree_sha256 != manifest.get("source_tree_sha256")
+        or identity.environment_sha256 != manifest.get("environment_lock", {}).get("sha256")
+        or identity.identity_sha256 != preflight.get("checkpoint_identity_sha256")
+        or identity.configuration_sha256 != preflight.get("configuration_sha256")
+        or controls.get("mixing_method") != "anderson"
+        or controls.get("max_iterations") != case.RESEARCH_SCOUT_MAX_ITERATIONS
+        or not 0 < len(checkpoint.history) <= case.RESEARCH_SCOUT_MAX_ITERATIONS
+    ):
+        raise common.CampaignError("research scout checkpoint identity/budget changed")
+    return checkpoint, after
+
+
+def _scout_iteration_summary(checkpoint: Any) -> dict[str, Any]:
+    history = checkpoint.history
+    return {
+        "completed_iterations": len(history),
+        "first": case._plain(history[0]),
+        "last": case._plain(history[-1]),
+        "checkpoint_status": checkpoint.status,
+        "anderson": case._plain(getattr(checkpoint, "metadata", {}).get("anderson", {})),
+    }
+
+
+def _publish_scout_timeout(
+    artifacts: Path, manifest: Mapping[str, Any], manifest_path: Path,
+    log_path: Path, supervision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record the planned diagnostic cap without claiming scientific success."""
+    killed = supervision.get("killed_after_term_grace")
+    if (
+        supervision.get("watchdog_trigger") != "wall-timeout"
+        or supervision.get("wall_limit_seconds") != case.RESEARCH_SCOUT_WALL_SECONDS
+        or supervision.get("rss_limit_bytes") != SCBA_RSS_LIMIT_BYTES
+        or type(killed) is not bool
+        or supervision.get("returncode") != (-9 if killed else -15)
+    ):
+        raise common.CampaignError("research scout termination is ambiguous")
+    checkpoint, digest = _authenticate_scout_checkpoint(manifest)
+    if checkpoint.terminal or checkpoint.status not in {"in_progress", "infrastructure_interrupted"}:
+        raise common.CampaignError("timed-out scout checkpoint has unexpected terminal state")
+    if any(Path(manifest["outputs"][name]).exists() for name in ("json", "hdf5")):
+        raise common.CampaignError("timed-out scout unexpectedly published final outputs")
+    report = {
+        "schema": REPORT_SCHEMA, "campaign_manifest_sha256": _sha256(manifest_path),
+        "state": "scout-exhausted", "research_scout": True,
+        "stop_reason": "wall-timeout", "scba_converged": False,
+        "checkpoint_sha256": digest, "log_sha256": _sha256(log_path),
+        "supervision": dict(supervision),
+        "iteration_summary": _scout_iteration_summary(checkpoint),
+        "automatic_retry": False, "resume_allowed": False,
+        "automatic_advance": False, "controls_changed": False,
+        "release_certified": False,
+        "next_gate": "inspect closed history; no resume or automatic successor",
+    }
+    report_path = artifacts / "scba-report.json"
+    common._publish_once(report_path, _canonical(report))
+    sums = common._write_checksums(artifacts, (
+        manifest_path, artifacts / "status-running.json", log_path,
+        Path(manifest["outputs"]["checkpoint"]), report_path,
+    ))
+    status = {
+        "schema": STATUS_SCHEMA, "campaign_manifest_sha256": _sha256(manifest_path),
+        "state": "scout-exhausted", "research_scout": True,
+        "stop_reason": "wall-timeout", "scba_converged": False,
+        "report_sha256": _sha256(report_path),
+        "sha256sums_sha256": common._sha256_bytes(sums),
+        "automatic_retry": False, "resume_allowed": False,
+        "automatic_advance": False, "release_certified": False,
+    }
+    common._publish_once(artifacts / "status.json", _canonical(status))
+    return status
+
+
 def _publish_report(artifacts: Path, manifest_path: Path, running_path: Path, log_path: Path) -> dict[str, Any]:
     manifest_sha = _sha256(manifest_path)
     log = _load_json(log_path, "SCBA subprocess log")
@@ -635,7 +736,24 @@ def _publish_report(artifacts: Path, manifest_path: Path, running_path: Path, lo
     if outcome.get("campaign_manifest_sha256") != manifest_sha or not outcome.get("scba_executed"):
         raise common.CampaignError("SCBA outcome is not bound to the immutable campaign")
     converged = bool(outcome.get("result", {}).get("converged", False))
+    manifest = _load_json(manifest_path, "SCBA manifest")
+    scout = manifest.get("research_scout", {}).get("enabled") is True
     state = "passed" if converged else "scientific-failure"
+    scout_reason = None
+    if scout:
+        checkpoint_state, _checkpoint_sha = _authenticate_scout_checkpoint(manifest)
+        if converged:
+            if checkpoint_state.status != "completed":
+                raise common.CampaignError("scout convergence disagrees with checkpoint")
+            state = "scout-converged"
+        elif (
+            checkpoint_state.status == "scientific_failure"
+            and len(checkpoint_state.history) == case.RESEARCH_SCOUT_MAX_ITERATIONS
+            and outcome.get("result", {}).get("scientific_error", {}).get("type") == "SCBAConvergenceError"
+        ):
+            state = "scout-exhausted"
+            scout_reason = "iteration-limit"
+
     attempt_logs = _attempt_logs(artifacts)
     failure_records = _failure_records(artifacts)
     report = {
@@ -660,6 +778,10 @@ def _publish_report(artifacts: Path, manifest_path: Path, running_path: Path, lo
         ],
         "controls_changed": False, "release_certified": False,
         "next_gate": "refine frequency/cutoff/eta and validate conservation" if converged else "inspect fixed-control scientific failure",
+        **({"research_scout": True, "stop_reason": scout_reason,
+            "resume_allowed": False, "automatic_advance": False,
+            "iteration_summary": _scout_iteration_summary(checkpoint_state),
+            "next_gate": "inspect closed history and conservation before any new calculation"} if scout else {}),
     }
     report_path = artifacts / "scba-report.json"
     common._ensure_exact(report_path, _canonical(report))
@@ -674,6 +796,7 @@ def _publish_report(artifacts: Path, manifest_path: Path, running_path: Path, lo
         "scba_converged": converged, "release_certified": False,
         "report_sha256": _sha256(report_path), "sha256sums_sha256": common._sha256_bytes(sums),
         "automatic_retry": False,
+        **({"research_scout": True, "stop_reason": scout_reason, "resume_allowed": False, "automatic_advance": False} if scout else {}),
     }
     common._ensure_exact(artifacts / "status.json", _canonical(status))
     return status
@@ -702,8 +825,12 @@ def _infrastructure_failure(
     return status
 
 
-def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False, segmented: bool = False, launch_environment: Mapping[str, str] | None = None, allow_parent_source_tree_mismatch: bool = False) -> dict[str, Any]:
+def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, artifacts: Path, expected_commit: str, environment_lock: Path, run_id: str, coupling_scale: float, continuation_parent_artifacts: Path | None = None, continuation_axis: str | None = None, continuation_predictor: str | None = None, born_initial_hdf5: Path | None = None, grid_step: float | None = None, grid_n_positive: int | None = None, eta_lead: float | None = None, mixing: float | None = None, mixing_floor: float | None = None, temperature_bias: float | None = None, resume: bool = False, segmented: bool = False, launch_environment: Mapping[str, str] | None = None, allow_parent_source_tree_mismatch: bool = False, research_scout: bool = False) -> dict[str, Any]:
     artifacts = artifacts.resolve()
+    if research_scout and (resume or segmented):
+        raise common.CampaignError("research scouts cannot resume or use segmentation")
+    if research_scout and artifacts.exists() and any(artifacts.iterdir()):
+        raise common.CampaignError("research scout output is already consumed; use a new execution")
     artifacts.mkdir(parents=True, exist_ok=True)
     manifest_path = artifacts / "campaign-manifest.json"
     status_path = artifacts / "status.json"
@@ -730,6 +857,7 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         "temperature_bias": temperature_bias,
         "segmented": segmented,
         "allow_parent_source_tree_mismatch": allow_parent_source_tree_mismatch,
+        "research_scout": research_scout,
     }
     existing_manifest = manifest_path.exists() or manifest_path.is_symlink()
     if existing_manifest:
@@ -797,6 +925,8 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         command_parts.extend([
             "--born-initial-hdf5", str(born_initial["path"])
         ])
+    if research_scout:
+        command_parts.append("--research-scout")
     if not resume:
         command_parts.append("--no-resume")
     command = tuple(command_parts)
@@ -809,7 +939,9 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         wall_limit_seconds=(
-            SCBA_SEGMENT_WALL_LIMIT_SECONDS
+            case.RESEARCH_SCOUT_WALL_SECONDS
+            if research_scout
+            else SCBA_SEGMENT_WALL_LIMIT_SECONDS
             if segmented
             else SCBA_WALL_LIMIT_SECONDS
         ),
@@ -825,6 +957,12 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
     }
     common._publish_once(log_path, _canonical(log))
     stdout_path.unlink(missing_ok=True); stderr_path.unlink(missing_ok=True)
+    scout_stop_error = None
+    if research_scout and supervision["watchdog_trigger"] == "wall-timeout":
+        try:
+            return _publish_scout_timeout(artifacts, manifest, manifest_path, log_path, supervision)
+        except Exception as error:
+            scout_stop_error = f"research scout stop authentication failed: {error}"
     if segmented and supervision["watchdog_trigger"] == "wall-timeout":
         try:
             return _publish_segment_stop(
@@ -847,12 +985,17 @@ def run_campaign(*, repo: Path, fixture: Path, fc3_full: Path, phase_b: Path, ar
                 supervision,
             )
     if supervision["watchdog_trigger"] is not None or supervision["returncode"] not in {0, 2}:
-        return _infrastructure_failure(
+        failed = _infrastructure_failure(
             artifacts, manifest_path, log_path, failure_path,
             interrupted_sums_path,
-            "watchdog or non-driver exit; checkpoint preserved for inspection",
+            scout_stop_error or "watchdog or non-driver exit; checkpoint preserved for inspection",
             supervision,
         )
+        if research_scout:
+            failed.update({"state": "infrastructure-failed", "resume_required": False,
+                           "resume_allowed": False, "research_scout": True})
+            common._publish_once(status_path, _canonical(failed))
+        return failed
     return _publish_report(artifacts, manifest_path, running_path, log_path)
 
 
@@ -883,6 +1026,7 @@ def main() -> int:
     parser.add_argument("--mixing-floor", type=float)
     parser.add_argument("--temperature-bias", type=float)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--research-scout", action="store_true", help="fresh nonresumable Anderson g=.0175 trial capped at 100 iterations/3h")
     parser.add_argument("--resume", action="store_true", help="resume an archived infrastructure interruption with identical hashes")
     parser.add_argument(
         "--segmented",
@@ -893,12 +1037,12 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.preflight_only:
-            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch)
+            manifest = _manifest(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch, research_scout=args.research_scout)
             print(json.dumps(manifest, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
             return 0
-        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch)
+        status = run_campaign(repo=args.repo_root, fixture=args.fixture, fc3_full=args.fc3_full, phase_b=args.phase_b_artifacts, artifacts=args.artifacts, expected_commit=args.expected_commit, environment_lock=args.environment_lock, run_id=args.run_id, coupling_scale=args.coupling_scale, continuation_parent_artifacts=args.continuation_parent_artifacts, continuation_axis=args.continuation_axis, continuation_predictor=args.continuation_predictor, born_initial_hdf5=args.born_initial_hdf5, grid_step=args.grid_step, grid_n_positive=args.grid_n_positive, eta_lead=args.eta_lead, mixing=args.mixing, mixing_floor=args.mixing_floor, temperature_bias=args.temperature_bias, resume=args.resume, segmented=args.segmented, allow_parent_source_tree_mismatch=args.allow_parent_source_tree_mismatch, research_scout=args.research_scout)
         print(json.dumps(status, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
-        return 0 if status.get("state") in {"passed", "segment-exhausted"} else 2
+        return 0 if status.get("state") in {"passed", "segment-exhausted", "scout-converged", "scout-exhausted"} else 2
     except Exception as error:
         print(f"SCBA campaign infrastructure error: {type(error).__name__}: {error}", file=sys.stderr)
         return 3

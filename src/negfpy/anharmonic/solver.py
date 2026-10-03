@@ -72,7 +72,9 @@ def _cubic_execution_details(
         return "zero_vertex", "serial", 1
     if isinstance(problem.vertex, SparseCubicVertex):
         if config.backend == "fft":
-            return "sparse_zero_padded_fft", "fft", 1
+            from .sparse_cubic import _sparse_fft_worker_count
+
+            return "sparse_zero_padded_fft", "fft", _sparse_fft_worker_count(config.max_workers)
         # The first sparse integration deliberately routes a threaded request
         # through the deterministic direct oracle.  Metadata records the
         # effective serial execution rather than claiming unused workers.
@@ -132,12 +134,11 @@ def _guard_dense_memory(problem: CubicSCBAProblem, config: SCBAConfig) -> int:
         # only the cubic Hamiltonian storage changes.  Include its immutable
         # canonical arrays explicitly without materializing D^3 storage.
         stored_state += int(
-            problem.vertex.indices.nbytes
-            + problem.vertex.coefficients.nbytes
+            problem.vertex.indices.nbytes + problem.vertex.coefficients.nbytes
         )
     _, _, workers = _cubic_execution_details(problem, config)
     contraction_scratch = (
-        cubic_fft_scratch_bytes(problem.grid.n_points, problem.ndof)
+        workers * cubic_fft_scratch_bytes(problem.grid.n_points, problem.ndof)
         if config.backend == "fft"
         else workers * cubic_worker_scratch_bytes(problem.ndof)
     )
@@ -149,13 +150,17 @@ def _guard_dense_memory(problem: CubicSCBAProblem, config: SCBAConfig) -> int:
             problem.ndof,
         )
         if config.hilbert_backend == "fft"
-        else (
-            2
-            * problem.grid.n_points
-            * np.dtype(np.float64).itemsize
-        )
+        else (2 * problem.grid.n_points * np.dtype(np.float64).itemsize)
     )
     predicted = stored_state + contraction_scratch + hilbert_scratch
+    if config.mixing_method == "anderson":
+        # Paired state/residual history, differences and trial/rollback state.
+        predicted += (
+            (8 * config.anderson_depth + 28)
+            * problem.grid.n_points
+            * problem.ndof**2
+            * np.dtype(np.complex128).itemsize
+        )
     available = _available_memory_bytes()
     fraction = float(getattr(config, "max_memory_fraction", 0.70))
     allow = bool(getattr(config, "allow_memory_overcommit", False))
@@ -375,16 +380,10 @@ def _metadata(
         "method": method,
         "initialization": initialization,
         "vertex_convention": "H3=(1/3!)*sum(Psi_abc*u_a*u_b*u_c)",
-        "green_lesser_convention": (
-            "G^<_{ab}(t,t')=-(i/hbar)<u_b(t')u_a(t)>"
-        ),
-        "green_greater_convention": (
-            "G^>_{ab}(t,t')=-(i/hbar)<u_a(t)u_b(t')>"
-        ),
+        "green_lesser_convention": ("G^<_{ab}(t,t')=-(i/hbar)<u_b(t')u_a(t)>"),
+        "green_greater_convention": ("G^>_{ab}(t,t')=-(i/hbar)<u_a(t)u_b(t')>"),
         "fourier_forward": "F(omega)=integral_dt exp(+i*omega*t) F(t)",
-        "fourier_inverse": (
-            "F(t)=integral_domega/(2*pi) exp(-i*omega*t) F(omega)"
-        ),
+        "fourier_inverse": ("F(t)=integral_domega/(2*pi) exp(-i*omega*t) F(omega)"),
         "frequency_convention": "angular",
         "quadrature": "signed_uniform_rectangle_zero_extended",
         "reservoir_lesser_convention": "Sigma^<=-i*n_B*Gamma",
@@ -399,7 +398,7 @@ def _metadata(
         "requested_worker_count": requested_worker_count,
         "worker_count": worker_count,
         "blas_threads_during_threaded_cubic": (
-            1 if effective_backend == "threaded" else None
+            1 if effective_backend == "threaded" or (effective_backend == "fft" and worker_count > 1) else None
         ),
         "max_iterations": config.max_iterations,
         "min_iterations": config.min_iterations,
@@ -413,9 +412,7 @@ def _metadata(
         "identity_rtol": config.identity_rtol,
         "current_rtol": config.current_rtol,
         "current_atol": config.current_atol,
-        "current_atol_physical": (
-            config.current_atol * problem.scale.current_scale
-        ),
+        "current_atol_physical": (config.current_atol * problem.scale.current_scale),
         "tail_rtol": config.tail_rtol,
         "eta_lead": config.eta_lead,
         "eta_device": config.eta_device,
@@ -448,6 +445,14 @@ def _metadata(
         "python": platform.python_version(),
         "platform": platform.platform(),
     }
+    if config.mixing_method == "anderson":
+        metadata.update(
+            mixing_method=config.mixing_method,
+            anderson_depth=config.anderson_depth,
+            anderson_regularization=config.anderson_regularization,
+            anderson_max_step_ratio=config.anderson_max_step_ratio,
+            anderson_resume_supported=False,
+        )
     if sparse_vertex:
         metadata.update(
             {
@@ -580,6 +585,38 @@ def solve_one_shot_born(
     )
 
 
+def _fixed_point_evaluation(problem, left, right, lesser, greater, config):
+    """One full Dyson/bubble evaluation, including the unmixed residual."""
+
+    green, sigma_pp = _solve_green(problem, left, right, lesser, greater, config)
+    raw_lesser, raw_greater = cubic_lesser_greater(
+        problem.vertex,
+        green.lesser,
+        green.greater,
+        problem.grid,
+        backend=config.backend,
+        max_workers=config.max_workers,
+    )
+    raw_retarded = retarded_from_keldysh(
+        raw_lesser,
+        raw_greater,
+        problem.grid,
+        strategy=config.retarded_strategy,
+        hilbert_backend=config.hilbert_backend,
+    )
+    sigma_floor = (
+        config.sigma_atol / config.sigma_rtol
+        if config.sigma_rtol > 0.0
+        else np.finfo(float).tiny
+    )
+    residual = max(
+        relative_residual(raw_lesser, lesser, floor=sigma_floor),
+        relative_residual(raw_greater, greater, floor=sigma_floor),
+        relative_residual(raw_retarded, sigma_pp.retarded, floor=sigma_floor),
+    )
+    return green, sigma_pp, raw_lesser, raw_greater, residual
+
+
 def solve_scba(
     problem: CubicSCBAProblem,
     config: SCBAConfig,
@@ -594,11 +631,7 @@ def solve_scba(
         raise TypeError("config must be an SCBAConfig.")
 
     predicted = _guard_dense_memory(problem, config)
-    initialization = (
-        "zero"
-        if initial_sigma_pp is None
-        else "supplied_keldysh_pair"
-    )
+    initialization = "zero" if initial_sigma_pp is None else "supplied_keldysh_pair"
     initialization_hash = initial_self_energy_hash(
         problem,
         initial_sigma_pp,
@@ -682,12 +715,8 @@ def solve_scba(
                 backend=config.backend,
                 max_workers=config.max_workers,
             )
-            sigma_lesser = (
-                (1.0 - mixing) * sigma_lesser + mixing * replay_lesser
-            )
-            sigma_greater = (
-                (1.0 - mixing) * sigma_greater + mixing * replay_greater
-            )
+            sigma_lesser = (1.0 - mixing) * sigma_lesser + mixing * replay_lesser
+            sigma_greater = (1.0 - mixing) * sigma_greater + mixing * replay_greater
             previous_green = replay_green
         checkpoint_session.replay_complete()
 
@@ -695,52 +724,85 @@ def solve_scba(
     final_sigma: KeldyshSpectrum | None = None
     final_currents: CurrentReport | None = None
 
+    from ._anderson import AndersonHistory, physical_pair_admissible
+
+    accelerator = (
+        AndersonHistory(
+            config.anderson_depth,
+            config.anderson_regularization,
+            config.anderson_max_step_ratio,
+        )
+        if config.mixing_method == "anderson"
+        else None
+    )
+    # Pending proposals keep the previous accepted evaluation, so a rejected
+    # trial restores that state without a second expensive map evaluation.
+    pending_reference = None
+    anderson_events: list[dict[str, Any]] = []
+
+    def algorithm_metadata() -> dict[str, Any]:
+        return {
+            "mixing_method": "anderson",
+            "anderson_resume_supported": False,
+            "anderson": {
+                "map_evaluations": len(anderson_events),
+                "accepted": sum(
+                    e["step"] == "anderson_accepted" for e in anderson_events
+                ),
+                "rejected": sum(
+                    e["step"] == "anderson_rejected" for e in anderson_events
+                ),
+                "history_records_are_committed_states": True,
+                "events": tuple(dict(e) for e in anderson_events),
+            },
+        }
+
     for iteration in range(start_iteration, config.max_iterations + 1):
-        green, sigma_pp = _solve_green(
-            problem,
-            left,
-            right,
-            sigma_lesser,
-            sigma_greater,
-            config,
-        )
-        raw_lesser, raw_greater = cubic_lesser_greater(
-            problem.vertex,
-            green.lesser,
-            green.greater,
-            problem.grid,
-            backend=config.backend,
-            max_workers=config.max_workers,
-        )
-        raw_retarded = retarded_from_keldysh(
-            raw_lesser,
-            raw_greater,
-            problem.grid,
-            strategy=config.retarded_strategy,
-            hilbert_backend=config.hilbert_backend,
-        )
-        sigma_floor = (
-            config.sigma_atol / config.sigma_rtol
-            if config.sigma_rtol > 0.0
-            else np.finfo(float).tiny
-        )
-        sigma_residual = max(
-            relative_residual(
-                raw_lesser,
-                sigma_lesser,
-                floor=sigma_floor,
-            ),
-            relative_residual(
-                raw_greater,
-                sigma_greater,
-                floor=sigma_floor,
-            ),
-            relative_residual(
-                raw_retarded,
-                sigma_pp.retarded,
-                floor=sigma_floor,
-            ),
-        )
+        event: dict[str, Any] = {"iteration": iteration, "step": "linear"}
+        rejected_trial = False
+        try:
+            evaluation = _fixed_point_evaluation(
+                problem, left, right, sigma_lesser, sigma_greater, config
+            )
+        except (
+            ValueError,
+            FloatingPointError,
+            np.linalg.LinAlgError,
+            RuntimeError,
+        ) as exc:
+            if pending_reference is None:
+                raise
+            if isinstance(exc, RuntimeError) and not isinstance(
+                exc.__cause__, np.linalg.LinAlgError
+            ):
+                raise
+            evaluation = None
+            event["rejection_reason"] = type(exc).__name__
+        if pending_reference is not None:
+            trial_residual = None if evaluation is None else evaluation[-1]
+            rejected_trial = (
+                trial_residual is None
+                or not np.isfinite(trial_residual)
+                or trial_residual > pending_reference[-1]
+            )
+            event["trial_sigma_residual"] = (
+                trial_residual
+                if trial_residual is not None and np.isfinite(trial_residual)
+                else None
+            )
+            event["reference_sigma_residual"] = pending_reference[-1]
+            event["step"] = (
+                "anderson_rejected" if rejected_trial else "anderson_accepted"
+            )
+            if rejected_trial:
+                evaluation = pending_reference
+                sigma_lesser, sigma_greater = (
+                    evaluation[1].lesser,
+                    evaluation[1].greater,
+                )
+                accelerator.clear()
+            pending_reference = None
+        green, sigma_pp, raw_lesser, raw_greater, sigma_residual = evaluation
         green_residual = _green_residual(green, previous_green, config)
         identity_residual = max(
             _spectral_identity_residual(green),
@@ -752,9 +814,7 @@ def solve_scba(
             currents,
             config,
         )
-        current_absolute_floor = (
-            config.current_atol * problem.scale.current_scale
-        )
+        current_absolute_floor = config.current_atol * problem.scale.current_scale
         collision_allowed = max(
             current_absolute_floor,
             config.current_rtol
@@ -800,17 +860,16 @@ def solve_scba(
         direction_valid = True
         if problem.left.temperature > problem.right.temperature:
             direction_valid = bool(
-                currents.left >= -current_allowed
-                and currents.right <= current_allowed
+                currents.left >= -current_allowed and currents.right <= current_allowed
             )
         elif problem.right.temperature > problem.left.temperature:
             direction_valid = bool(
-                currents.right >= -current_allowed
-                and currents.left <= current_allowed
+                currents.right >= -current_allowed and currents.left <= current_allowed
             )
 
         passed = bool(
-            iteration >= config.min_iterations
+            not rejected_trial
+            and iteration >= config.min_iterations
             and sigma_residual <= config.sigma_rtol
             and green_residual <= config.green_rtol
             and identity_residual <= config.identity_rtol
@@ -829,8 +888,7 @@ def solve_scba(
         if will_continue:
             if (
                 previous_sigma_residual is not None
-                and sigma_residual
-                > previous_sigma_residual * (1.0 + 1.0e-12)
+                and sigma_residual > previous_sigma_residual * (1.0 + 1.0e-12)
             ):
                 residual_increase_streak += 1
             else:
@@ -858,6 +916,31 @@ def solve_scba(
         final_green = green
         final_sigma = sigma_pp
         final_currents = currents
+        # Each proposal is evaluated on the next ordinary iteration. Rejected
+        # proposals count against the same max_iterations budget, never pass,
+        # and leave the durable state at the previous accepted evaluation.
+        next_lesser = (1.0 - mixing) * sigma_lesser + mixing * raw_lesser
+        next_greater = (1.0 - mixing) * sigma_greater + mixing * raw_greater
+        if accelerator is not None:
+            if (
+                not rejected_trial
+                and iteration < config.max_iterations
+                and will_continue
+            ):
+                proposal, reason = accelerator.propose(
+                    (sigma_lesser, sigma_greater), (raw_lesser, raw_greater), mixing
+                )
+                if proposal is not None:
+                    if physical_pair_admissible(proposal, problem.grid):
+                        next_lesser, next_greater = proposal
+                        pending_reference = evaluation
+                    else:
+                        reason = "physical_guard"
+                        accelerator.clear()
+                event["next_proposal"] = reason
+            anderson_events.append(event)
+            if checkpoint_session is not None:
+                checkpoint_session.set_algorithm_metadata(algorithm_metadata())
         if consecutive >= config.consecutive_passes:
             result = _finalize_result(
                 problem,
@@ -887,6 +970,10 @@ def solve_scba(
                     ),
                     status="completed",
                 )
+            if accelerator is not None:
+                result = replace(
+                    result, metadata={**result.metadata, **algorithm_metadata()}
+                )
             return result
 
         if checkpoint_session is not None and iteration < config.max_iterations:
@@ -902,12 +989,7 @@ def solve_scba(
                 ),
             )
 
-        sigma_lesser = (
-            (1.0 - mixing) * sigma_lesser + mixing * raw_lesser
-        )
-        sigma_greater = (
-            (1.0 - mixing) * sigma_greater + mixing * raw_greater
-        )
+        sigma_lesser, sigma_greater = next_lesser, next_greater
         previous_green = green
 
     assert final_green is not None
@@ -928,6 +1010,8 @@ def solve_scba(
         initialization_hash=initialization_hash,
         predicted_memory_bytes=predicted,
     )
+    if accelerator is not None:
+        result = replace(result, metadata={**result.metadata, **algorithm_metadata()})
     if checkpoint_session is not None:
         checkpoint_session.record_terminal(
             sigma_lesser=final_sigma.lesser,

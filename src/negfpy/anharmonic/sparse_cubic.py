@@ -9,9 +9,9 @@ explicit, memory-guarded operations.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
-import math
 import os
 from itertools import permutations
 import struct
@@ -641,12 +641,47 @@ def _sparse_bubble_direct(
     return result
 
 
+def _contract_fft_slices(
+    vertex: SparseCubicVertex,
+    schedule: _SparseContractionSchedule,
+    transformed_green: Array,
+    transformed_bubble: Array,
+    workers: int,
+) -> None:
+    def evaluate_slice(index: int) -> None:
+        # Each slice owns its output and retains the serial contraction order.
+        transformed_bubble[index] = _sparse_pair_contraction(
+            vertex, schedule, transformed_green[index], transformed_green[index]
+        )
+
+    padded = len(transformed_green)
+    if workers == 1:
+        for index in range(padded):
+            evaluate_slice(index)
+        return
+
+    from threadpoolctl import threadpool_limits
+
+    def evaluate_partition(offset: int) -> None:
+        for index in range(offset, padded, workers):
+            evaluate_slice(index)
+
+    # Bound submitted work and scratch space to the requested worker count.
+    # The shared schedule is read-only; no reductions cross thread boundaries.
+    with threadpool_limits(limits=1, user_api="blas"):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            tuple(executor.map(evaluate_partition, range(workers)))
+
+
 def _sparse_bubble_fft(
     vertex: SparseCubicVertex,
     schedule: _SparseContractionSchedule,
     green: Array,
     grid: SignedFrequencyGrid,
+    *,
+    max_workers: int | None = None,
 ) -> Array:
+    workers = _sparse_fft_worker_count(max_workers)
     n_frequency = grid.n_points
     result = np.zeros(
         (n_frequency, vertex.ndof, vertex.ndof),
@@ -668,13 +703,10 @@ def _sparse_bubble_fft(
         (padded, len(schedule.active), len(schedule.active)),
         dtype=np.complex128,
     )
-    for index in range(padded):
-        transformed_bubble[index] = _sparse_pair_contraction(
-            vertex,
-            schedule,
-            transformed_green[index],
-            transformed_green[index],
-        )
+
+    _contract_fft_slices(
+        vertex, schedule, transformed_green, transformed_bubble, workers
+    )
     del transformed_green
     full = np.fft.ifft(transformed_bubble, axis=0)
     start = grid.zero_index
@@ -684,12 +716,22 @@ def _sparse_bubble_fft(
             schedule.active,
             schedule.active,
         )
-    ] = (
-        0.5j
-        * grid.integration_weight
-        * full[start : start + n_frequency]
-    )
+    ] = 0.5j * grid.integration_weight * full[start : start + n_frequency]
     return result
+
+
+def _sparse_fft_worker_count(max_workers: int | None) -> int:
+    """Resolve an explicit, bounded FFT slice request; defaults stay serial."""
+    if max_workers is None:
+        return 1
+    if isinstance(max_workers, (bool, np.bool_)) or not isinstance(
+        max_workers, (int, np.integer)
+    ):
+        raise TypeError("sparse FFT max_workers must be an integer or None")
+    workers = int(max_workers)
+    if not 1 <= workers <= 8:
+        raise ValueError("sparse FFT max_workers must be between 1 and 8")
+    return workers
 
 
 def cubic_sparse_lesser_greater(
@@ -699,11 +741,14 @@ def cubic_sparse_lesser_greater(
     grid: SignedFrequencyGrid,
     *,
     backend: str = "direct",
+    max_workers: int | None = None,
 ) -> tuple[Array, Array]:
     """Return sparse cubic lesser/greater self-energies.
 
     ``direct`` is the deterministic oracle. ``fft`` is the exactly
     zero-padded linear-convolution implementation and never wraps the cutoff.
+    FFT slices may opt into 2--8 workers; None and 1 preserve serial execution.
+    The direct oracle always remains serial.
     """
 
     if not isinstance(vertex, SparseCubicVertex):
@@ -712,15 +757,23 @@ def cubic_sparse_lesser_greater(
         raise TypeError("grid must be a SignedFrequencyGrid.")
     if backend not in {"direct", "fft"}:
         raise ValueError("backend must be 'direct' or 'fft'.")
-    lesser = _validated_green(green_lesser, grid=grid, ndof=vertex.ndof, name="green_lesser")
-    greater = _validated_green(green_greater, grid=grid, ndof=vertex.ndof, name="green_greater")
-    schedule = _compiled_sparse_schedule(vertex)
-    operation = (
-        _sparse_bubble_direct if backend == "direct" else _sparse_bubble_fft
+    if backend == "fft":
+        workers = _sparse_fft_worker_count(max_workers)
+    lesser = _validated_green(
+        green_lesser, grid=grid, ndof=vertex.ndof, name="green_lesser"
     )
+    greater = _validated_green(
+        green_greater, grid=grid, ndof=vertex.ndof, name="green_greater"
+    )
+    schedule = _compiled_sparse_schedule(vertex)
+    if backend == "fft":
+        return (
+            _sparse_bubble_fft(vertex, schedule, lesser, grid, max_workers=workers),
+            _sparse_bubble_fft(vertex, schedule, greater, grid, max_workers=workers),
+        )
     return (
-        operation(vertex, schedule, lesser, grid),
-        operation(vertex, schedule, greater, grid),
+        _sparse_bubble_direct(vertex, schedule, lesser, grid),
+        _sparse_bubble_direct(vertex, schedule, greater, grid),
     )
 
 
