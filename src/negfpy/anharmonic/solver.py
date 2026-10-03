@@ -652,6 +652,7 @@ def solve_scba(
     # execution path without adding checkpoint controls to this public API.
     from ._checkpoint_v2 import (
         SCBAContinuationState,
+        _ANDERSON_DAMPING_CURRENT,
         _active_solver_checkpoint_session,
     )
 
@@ -744,6 +745,7 @@ def solve_scba(
         return {
             "mixing_method": "anderson",
             "anderson_resume_supported": False,
+            "anderson_damping_controller": _ANDERSON_DAMPING_CURRENT,
             "anderson": {
                 "map_evaluations": len(anderson_events),
                 "accepted": sum(
@@ -885,7 +887,11 @@ def solve_scba(
         consecutive = consecutive + 1 if passed else 0
 
         will_continue = consecutive < config.consecutive_passes
-        if will_continue:
+        # A rejected trial restores an evaluation whose damping controller was
+        # already advanced when that reference was accepted. Reprocessing its
+        # equal residual would erase an increase streak and delay the next
+        # reduction, so rollback must leave the controller unchanged.
+        if will_continue and not rejected_trial:
             if (
                 previous_sigma_residual is not None
                 and sigma_residual > previous_sigma_residual * (1.0 + 1.0e-12)

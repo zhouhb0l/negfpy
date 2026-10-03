@@ -15,9 +15,13 @@ from negfpy.anharmonic import (
 )
 from negfpy.anharmonic._anderson import AndersonHistory, physical_pair_admissible
 from negfpy.anharmonic._checkpoint_v2 import (
+    SCBAContinuationState,
+    _validate_checkpoint_for_solver,
     load_scba_checkpoint_v2_self_validating,
+    restore_scba_checkpoint_result_v2,
     solve_sparse_scba_checkpointed,
 )
+from negfpy.anharmonic._checkpoint import CheckpointCorruptionError
 from negfpy.anharmonic._provenance import _update_value, configuration_hash
 from negfpy.anharmonic.sparse_cubic import SparseCubicVertex
 from negfpy.anharmonic.toy import pinned_scalar_chain
@@ -194,6 +198,123 @@ def test_actual_residual_rejection_restores_prior_state_and_counts_budget(
     checkpoint = load_scba_checkpoint_v2_self_validating(path)
     np.testing.assert_array_equal(checkpoint.sigma_lesser, evaluations[1][1].lesser)
     assert checkpoint.metadata["anderson"]["events"][-1]["trial_sigma_residual"] == 10.0
+
+
+@pytest.mark.parametrize("stop_at_rejection", [False, True])
+def test_rejected_trial_preserves_damping_streak_and_linear_trajectory(
+    monkeypatch, tmp_path, stop_at_rejection
+):
+    """Reject with a two-increase streak; the next linear state must halve.
+
+    Use real Dyson/bubble states with a controlled merit sequence to isolate
+    the controller. The trial consumes one evaluation, but must not change the
+    fallback trajectory or process its restored reference a second time.
+    """
+    real = solver._fixed_point_evaluation
+    baseline_inputs = []
+    accelerated_inputs = []
+
+    def baseline_evaluation(*args):
+        baseline_inputs.append(np.array(args[3], copy=True))
+        evaluation = real(*args)
+        return (*evaluation[:-1], 0.1 * len(baseline_inputs))
+
+    monkeypatch.setattr(solver, "_fixed_point_evaluation", baseline_evaluation)
+    baseline_count = 3 if stop_at_rejection else 5
+    baseline = solver.solve_scba(
+        _problem(), _config(max_iterations=baseline_count, min_iterations=1)
+    )
+    if not stop_at_rejection:
+        assert baseline.history[3].mixing == 0.15
+
+    proposal_calls = 0
+
+    def single_proposal(self, state, raw, mixing):
+        nonlocal proposal_calls
+        proposal_calls += 1
+        if proposal_calls == 3:
+            # A physical convex trial, evaluated and forced to fail below.
+            proposal = tuple(
+                (1 - 0.5 * mixing) * a + 0.5 * mixing * b
+                for a, b in zip(state, raw)
+            )
+            return proposal, "proposed"
+        return None, "insufficient_history"
+
+    def accelerated_evaluation(*args):
+        accelerated_inputs.append(np.array(args[3], copy=True))
+        evaluation = real(*args)
+        index = len(accelerated_inputs)
+        residual = 10.0 if index == 4 else 0.1 * (index - (index > 4))
+        return (*evaluation[:-1], residual)
+
+    monkeypatch.setattr(AndersonHistory, "propose", single_proposal)
+    monkeypatch.setattr(solver, "_fixed_point_evaluation", accelerated_evaluation)
+    problem = _problem()
+    config = _config(
+        mixing_method="anderson", max_iterations=baseline_count + 1, min_iterations=1
+    )
+    path = tmp_path / "controller.h5"
+    accelerated = _checkpoint_run(path, problem, config)
+    assert accelerated.metadata["anderson"]["rejected"] == 1
+    assert not accelerated.history[3].passed
+    assert accelerated.history[3].sigma_residual == baseline.history[2].sigma_residual
+    # Omitting the rejected evaluation gives the exact baseline damping and
+    # scientific input sequence. Without controller-neutral rollback the
+    # fourth accepted evaluation retains 0.3 rather than reducing to 0.15.
+    committed_history = accelerated.history[:3] + accelerated.history[4:]
+    assert [row.mixing for row in committed_history] == [
+        row.mixing for row in baseline.history
+    ]
+    committed_inputs = accelerated_inputs[:3] + accelerated_inputs[4:]
+    for actual, expected in zip(committed_inputs, baseline_inputs):
+        np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(accelerated.sigma_pp.lesser, baseline.sigma_pp.lesser)
+    checkpoint = load_scba_checkpoint_v2_self_validating(path)
+    assert checkpoint.metadata["anderson_damping_controller"] == "rejection-neutral-v2"
+    assert checkpoint.solver_state.residual_increase_streak == (2 if stop_at_rejection else 1)
+    restored = _checkpoint_run(path, problem, config)
+    assert restored.history == accelerated.history
+    assert restored.metadata["anderson"] == accelerated.metadata["anderson"]
+    assert restored.metadata["anderson_damping_controller"] == "rejection-neutral-v2"
+    np.testing.assert_array_equal(restored.sigma_pp.lesser, accelerated.sigma_pp.lesser)
+
+    # The reader must authenticate events rather than treat a claimed rejected
+    # row as permission to skip an arbitrary controller transition.
+    altered = dict(checkpoint.metadata)
+    algorithm = dict(altered["anderson"])
+    events = [dict(event) for event in algorithm["events"]]
+    for invalid_reference in (999.0, "invalid"):
+        events[3]["reference_sigma_residual"] = invalid_reference
+        algorithm["events"] = events
+        altered["anderson"] = algorithm
+        with pytest.raises(CheckpointCorruptionError, match="trial reference"):
+            _validate_checkpoint_for_solver(
+                replace(checkpoint, metadata=altered), problem, config
+            )
+    altered = dict(checkpoint.metadata, anderson_damping_controller="unknown-version")
+    with pytest.raises(CheckpointCorruptionError, match="unknown Anderson"):
+        _validate_checkpoint_for_solver(replace(checkpoint, metadata=altered), problem, config)
+
+    if stop_at_rejection:
+        # A historical checkpoint with no version records the original reset
+        # to zero. Historical readback uses legacy semantics, not the new rule.
+        legacy_metadata = dict(checkpoint.metadata)
+        legacy_metadata.pop("anderson_damping_controller")
+        legacy = replace(
+            checkpoint, metadata=legacy_metadata,
+            solver_state=SCBAContinuationState(
+                config.mixing, checkpoint.history[-1].sigma_residual, 0, 0
+            ),
+        )
+        legacy_result = restore_scba_checkpoint_result_v2(legacy, problem, config)
+        assert legacy_result.metadata["anderson_damping_controller"] == "reprocess-restored-reference-v1"
+        # A versionless new-state record cannot silently replay as the old
+        # controller: its preserved streak disagrees with the legacy contract.
+        with pytest.raises(CheckpointCorruptionError, match="continuation state"):
+            _validate_checkpoint_for_solver(
+                replace(checkpoint, metadata=legacy_metadata), problem, config
+            )
 
 
 def test_anderson_resume_forbidden_but_terminal_readback_matches(monkeypatch, tmp_path):

@@ -72,6 +72,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RESUMABLE_STATUSES = frozenset({"in_progress", "infrastructure_interrupted"})
 _TERMINAL_STATUSES = frozenset({"completed", "scientific_failure"})
 _STATUSES = _RESUMABLE_STATUSES | _TERMINAL_STATUSES
+_ANDERSON_DAMPING_LEGACY = "reprocess-restored-reference-v1"
+_ANDERSON_DAMPING_CURRENT = "rejection-neutral-v2"
 _ROOT_KEYS = frozenset(
     {
         "identity_json",
@@ -1066,6 +1068,82 @@ def load_scba_checkpoint_v2_self_validating(
     return load_scba_checkpoint_v2(source, expected_identity=identity)
 
 
+def _anderson_rejected_rows(checkpoint: SCBACheckpointV2) -> frozenset[int]:
+    """Authenticate versioned event semantics before controller replay.
+
+    Metadata is bound by the checkpoint's existing integrity manifest and
+    source identity. Old checkpoints without this version retain their old
+    replay behavior; self-validating historical reads do not reinterpret them.
+    Restart still requires the independently constructed exact source identity.
+    """
+    semantics = checkpoint.metadata.get(
+        "anderson_damping_controller", _ANDERSON_DAMPING_LEGACY
+    )
+    if semantics == _ANDERSON_DAMPING_LEGACY:
+        return frozenset()
+    if semantics != _ANDERSON_DAMPING_CURRENT:
+        raise CheckpointCorruptionError("unknown Anderson damping-controller semantics.")
+    algorithm = checkpoint.metadata.get("anderson", {})
+    if not isinstance(algorithm, Mapping):
+        raise CheckpointCorruptionError("Anderson event metadata is invalid.")
+    events = algorithm.get("events", ())
+    if not isinstance(events, (tuple, list)) or len(events) != len(checkpoint.history):
+        raise CheckpointCorruptionError("Anderson events do not align with history.")
+    rejected = set()
+    accepted_count = 0
+    for index, (item, event) in enumerate(zip(checkpoint.history, events)):
+        if not isinstance(event, Mapping) or event.get("iteration") != item.iteration:
+            raise CheckpointCorruptionError("Anderson event iteration is inconsistent.")
+        step = event.get("step")
+        if step not in {"linear", "anderson_accepted", "anderson_rejected"}:
+            raise CheckpointCorruptionError("Anderson event step is invalid.")
+        has_pending = index > 0 and events[index - 1].get("next_proposal") == "proposed"
+        if (step != "linear") != has_pending:
+            raise CheckpointCorruptionError("Anderson trial has no matching proposal.")
+        if step == "linear":
+            continue
+        previous = checkpoint.history[index - 1]
+        reference = event.get("reference_sigma_residual")
+        trial = event.get("trial_sigma_residual")
+        if (
+            isinstance(reference, bool)
+            or not isinstance(reference, (int, float))
+            or not np.isfinite(reference)
+            or reference != previous.sigma_residual
+            or (
+                trial is not None
+                and (
+                    isinstance(trial, bool)
+                    or not isinstance(trial, (int, float))
+                    or not np.isfinite(trial)
+                    or trial < 0.0
+                )
+            )
+        ):
+            raise CheckpointCorruptionError("Anderson trial reference is inconsistent.")
+        if step == "anderson_rejected":
+            if (
+                item.passed
+                or item.sigma_residual != reference
+                or item.mixing != previous.mixing
+                or (trial is not None and trial <= reference)
+            ):
+                raise CheckpointCorruptionError("rejected Anderson trial is inconsistent.")
+            rejected.add(item.iteration)
+        else:
+            if trial is None or trial > reference or item.sigma_residual != trial:
+                raise CheckpointCorruptionError("accepted Anderson trial is inconsistent.")
+            accepted_count += 1
+    if checkpoint.history and (
+        algorithm.get("map_evaluations") != len(events)
+        or algorithm.get("accepted") != accepted_count
+        or algorithm.get("rejected") != len(rejected)
+        or algorithm.get("history_records_are_committed_states") is not True
+    ):
+        raise CheckpointCorruptionError("Anderson event counts are inconsistent.")
+    return frozenset(rejected)
+
+
 def _validate_checkpoint_for_solver(
     checkpoint: SCBACheckpointV2,
     problem: CubicSCBAProblem,
@@ -1092,6 +1170,11 @@ def _validate_checkpoint_for_solver(
             f"restart shape {expected_shape}."
         )
     count = len(checkpoint.history)
+    rejected_rows = (
+        _anderson_rejected_rows(checkpoint)
+        if config.mixing_method == "anderson"
+        else frozenset()
+    )
     mixing = config.mixing
     previous_residual: float | None = None
     increase_streak = 0
@@ -1102,7 +1185,7 @@ def _validate_checkpoint_for_solver(
             raise CheckpointCorruptionError(
                 "checkpoint consecutive-pass history is inconsistent."
             )
-        if consecutive < config.consecutive_passes:
+        if consecutive < config.consecutive_passes and item.iteration not in rejected_rows:
             if (
                 previous_residual is not None
                 and item.sigma_residual > previous_residual * (1.0 + 1.0e-12)
@@ -1215,6 +1298,9 @@ def restore_scba_checkpoint_result_v2(
                 **result.metadata,
                 "anderson": checkpoint.metadata.get("anderson", {}),
                 "anderson_resume_supported": False,
+                "anderson_damping_controller": checkpoint.metadata.get(
+                    "anderson_damping_controller", _ANDERSON_DAMPING_LEGACY
+                ),
             },
         )
     return result
@@ -1330,7 +1416,8 @@ class _SolverCheckpointSession:
 
         if config.mixing_method == "anderson":
             self._algorithm_metadata.update(
-                mixing_method="anderson", anderson_resume_supported=False
+                mixing_method="anderson", anderson_resume_supported=False,
+                anderson_damping_controller=_ANDERSON_DAMPING_CURRENT,
             )
         state = SCBAContinuationState(config.mixing, None, 0, 0)
         record = SCBACheckpointV2(
