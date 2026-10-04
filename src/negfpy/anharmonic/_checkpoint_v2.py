@@ -1537,11 +1537,24 @@ class _SolverCheckpointSession:
     def mark_interrupted(self, error: BaseException) -> None:
         if self.checkpoint is None or self.checkpoint.terminal:
             return
+        # A stop can arrive after algorithm metadata/timings have advanced but
+        # before their iteration is published, or after publication but before
+        # self.checkpoint is assigned. Use the actual published record as one
+        # coherent snapshot; pending events must not be paired with old history.
+        published = load_scba_checkpoint_v2(
+            self.path, expected_identity=self.identity
+        )
+        if published.terminal:
+            self.checkpoint = published
+            return
+        timings = self._timings()
+        timings["iteration_seconds"] = published.timings["iteration_seconds"]
         record = replace(
-            self.checkpoint,
-            timings=self._timings(),
+            published,
+            timings=timings,
             status="infrastructure_interrupted",
-            metadata=self._metadata(
+            metadata=dict(
+                published.metadata,
                 interruption_type=type(error).__name__,
                 interruption_message=str(error),
             ),

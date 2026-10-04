@@ -697,3 +697,47 @@ def test_zero_vertex_ness_gates_all_retarded_passivity(
             f"{label} passivity" in failure
             for failure in gated_report.failures
         )
+
+
+def test_scba_diagnostics_honor_sparse_fft_workers_without_changing_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import negfpy.anharmonic.sparse_cubic as sparse_module
+
+    problem = replace(
+        _problem(SignedFrequencyGrid(step=0.25, n_positive=12)),
+        vertex=sparse_module.SparseCubicVertex.from_dense(
+            DenseCubicVertex(np.full((1, 1, 1), 0.002))
+        ),
+    )
+    config = SCBAConfig(
+        eta_lead=0.05,
+        backend="fft",
+        max_iterations=6,
+        on_nonconvergence="return",
+    )
+    result = solve_scba(problem, config)
+    assert np.max(np.abs(result.sigma_pp.lesser)) > 0.0
+    reference = check_solution(problem, result, config)
+
+    # Observe the actual sparse FFT execution, without replacing its numerical
+    # work. Both lesser and greater recomputations must use the configured
+    # count, including the existing serial default.
+    calls: list[int] = []
+    original = sparse_module._contract_fft_slices
+
+    def observed_slices(vertex, schedule, transformed, output, workers):
+        calls.append(workers)
+        return original(vertex, schedule, transformed, output, workers)
+
+    monkeypatch.setattr(sparse_module, "_contract_fft_slices", observed_slices)
+    for workers in (None, 1, 2, 8):
+        calls.clear()
+        report = check_solution(
+            problem, result, replace(config, max_workers=workers)
+        )
+        assert calls == [1 if workers is None else workers] * 2
+        assert report.passed == reference.passed
+        assert report.release_certified == reference.release_certified
+        assert report.failures == reference.failures
+        assert report.metrics == reference.metrics

@@ -298,6 +298,144 @@ def test_infrastructure_interruption_exactly_resumes_iteration_history(
     assert terminal.timings["reconstruction_seconds"] > 0.0
 
 
+@pytest.mark.parametrize("boundary", ["before_record", "before_publish", "after_publish"])
+def test_anderson_interruption_preserves_the_published_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    import negfpy.anharmonic._checkpoint_v2 as checkpoint_module
+
+    problem = _problem()
+    config = replace(
+        _config(), mixing_method="anderson", anderson_policy="scaled-trust-v1"
+    )
+    path = tmp_path / "interrupted-publication.h5"
+    snapshots = []
+    real_record = checkpoint_module._SolverCheckpointSession.record_iteration
+    real_write = checkpoint_module.write_scba_checkpoint_v2
+
+    def stop() -> None:
+        snapshots.append(load_scba_checkpoint_v2_self_validating(path))
+        raise RuntimeError("simulated planned stop at publication")
+
+    def interrupted_record(self, **kwargs):
+        if boundary == "before_record" and len(kwargs["history"]) == 2:
+            stop()
+        return real_record(self, **kwargs)
+
+    def interrupted_write(target, record):
+        at_boundary = record.status == "in_progress" and len(record.history) == 2
+        if at_boundary and boundary == "before_publish":
+            stop()
+        result = real_write(target, record)
+        if at_boundary and boundary == "after_publish":
+            stop()
+        return result
+
+    monkeypatch.setattr(
+        checkpoint_module._SolverCheckpointSession, "record_iteration", interrupted_record
+    )
+    monkeypatch.setattr(checkpoint_module, "write_scba_checkpoint_v2", interrupted_write)
+    with pytest.raises(RuntimeError, match="planned stop at publication"):
+        _run(path, problem, config)
+
+    published = snapshots[0]
+    interrupted = load_scba_checkpoint_v2_self_validating(path)
+    assert interrupted.status == "infrastructure_interrupted"
+    assert len(interrupted.history) == (2 if boundary == "after_publish" else 1)
+    assert interrupted.history == published.history
+    assert interrupted.solver_state == published.solver_state
+    assert interrupted.timings["iteration_seconds"] == published.timings["iteration_seconds"]
+    assert interrupted.metadata == dict(
+        published.metadata,
+        interruption_type="RuntimeError",
+        interruption_message="simulated planned stop at publication",
+    )
+    np.testing.assert_array_equal(interrupted.sigma_lesser, published.sigma_lesser)
+    np.testing.assert_array_equal(interrupted.sigma_greater, published.sigma_greater)
+    checkpoint_module._validate_checkpoint_for_solver(interrupted, problem, config)
+    assert not interrupted.resumable
+
+
+@pytest.mark.parametrize("converged", [False, True])
+def test_anderson_finalization_stop_keeps_last_published_history_and_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    converged: bool,
+) -> None:
+    import negfpy.anharmonic._checkpoint_v2 as checkpoint_module
+
+    problem = _problem()
+    config = replace(
+        _config(), mixing_method="anderson", anderson_policy="scaled-trust-v1",
+        min_iterations=1, consecutive_passes=1 if converged else 2,
+        max_iterations=5 if converged else 2, on_nonconvergence="return",
+    )
+    path = tmp_path / "interrupted-finalization.h5"
+    snapshots = []
+
+    def interrupted_finalize(*args, **kwargs):
+        assert kwargs["converged"] is converged
+        snapshots.append(load_scba_checkpoint_v2_self_validating(path))
+        assert len(kwargs["history"]) == len(snapshots[0].history) + 1
+        raise RuntimeError("simulated planned stop during finalization")
+
+    monkeypatch.setattr(solver_module, "_finalize_result", interrupted_finalize)
+    with pytest.raises(RuntimeError, match="planned stop during finalization"):
+        _run(path, problem, config)
+
+    published = snapshots[0]
+    interrupted = load_scba_checkpoint_v2_self_validating(path)
+    assert interrupted.status == "infrastructure_interrupted"
+    assert interrupted.history == published.history
+    assert interrupted.solver_state == published.solver_state
+    assert interrupted.metadata == dict(
+        published.metadata,
+        interruption_type="RuntimeError",
+        interruption_message="simulated planned stop during finalization",
+    )
+    assert interrupted.timings["iteration_seconds"] == published.timings["iteration_seconds"]
+    np.testing.assert_array_equal(interrupted.sigma_lesser, published.sigma_lesser)
+    np.testing.assert_array_equal(interrupted.sigma_greater, published.sigma_greater)
+    checkpoint_module._validate_checkpoint_for_solver(interrupted, problem, config)
+    assert not interrupted.terminal and not interrupted.resumable
+
+
+def test_stop_after_terminal_publication_preserves_terminal_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import negfpy.anharmonic._checkpoint_v2 as checkpoint_module
+
+    problem = _problem()
+    config = replace(
+        _config(), mixing_method="anderson", anderson_policy="scaled-trust-v1"
+    )
+    path = tmp_path / "published-terminal.h5"
+    published_bytes = []
+    real_write = checkpoint_module.write_scba_checkpoint_v2
+
+    def interrupted_write(target, record):
+        result = real_write(target, record)
+        if record.terminal:
+            published_bytes.append(path.read_bytes())
+            raise RuntimeError("simulated stop after terminal publication")
+        return result
+
+    monkeypatch.setattr(checkpoint_module, "write_scba_checkpoint_v2", interrupted_write)
+    with pytest.raises(RuntimeError, match="stop after terminal publication") as raised:
+        _run(path, problem, config)
+
+    assert not getattr(raised.value, "__notes__", ())
+    assert path.read_bytes() == published_bytes[0]
+    terminal = load_scba_checkpoint_v2_self_validating(path)
+    assert terminal.status == "completed"
+    assert terminal.metadata["interruption_type"] is None
+    assert terminal.metadata["interruption_message"] is None
+    checkpoint_module._validate_checkpoint_for_solver(terminal, problem, config)
+
+
 def test_v2_rejects_source_environment_grid_config_and_input_mismatch(
     tmp_path: Path,
 ) -> None:

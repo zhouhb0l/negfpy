@@ -979,6 +979,7 @@ def check_solution(
             result.green.greater,
             result.grid,
             backend=recomputation_backend,
+            max_workers=config.max_workers,
         )
         raw_retarded = retarded_from_keldysh(
             raw_lesser,
