@@ -155,8 +155,12 @@ def _guard_dense_memory(problem: CubicSCBAProblem, config: SCBAConfig) -> int:
     predicted = stored_state + contraction_scratch + hilbert_scratch
     if config.mixing_method == "anderson":
         # Paired state/residual history, differences and trial/rollback state.
+        # Scaled QR additionally keeps up to depth orthogonal field pairs.
+        history_arrays = ((10 * config.anderson_depth + 32)
+                          if config.anderson_policy == "scaled-trust-v1"
+                          else (8 * config.anderson_depth + 28))
         predicted += (
-            (8 * config.anderson_depth + 28)
+            history_arrays
             * problem.grid.n_points
             * problem.ndof**2
             * np.dtype(np.complex128).itemsize
@@ -451,6 +455,9 @@ def _metadata(
             anderson_depth=config.anderson_depth,
             anderson_regularization=config.anderson_regularization,
             anderson_max_step_ratio=config.anderson_max_step_ratio,
+            anderson_policy=config.anderson_policy,
+            anderson_trust_radius=config.anderson_trust_radius,
+            anderson_rank_rtol=config.anderson_rank_rtol,
             anderson_resume_supported=False,
         )
     if sparse_vertex:
@@ -725,13 +732,20 @@ def solve_scba(
     final_sigma: KeldyshSpectrum | None = None
     final_currents: CurrentReport | None = None
 
-    from ._anderson import AndersonHistory, physical_pair_admissible
+    from ._anderson import (
+        AndersonHistory, physical_pair_admissible,
+        residual_scales, scaled_residual_merit,
+    )
 
     accelerator = (
         AndersonHistory(
             config.anderson_depth,
             config.anderson_regularization,
             config.anderson_max_step_ratio,
+            policy=config.anderson_policy,
+            trust_radius=config.anderson_trust_radius,
+            rank_rtol=config.anderson_rank_rtol,
+            absolute_floor=config.sigma_atol,
         )
         if config.mixing_method == "anderson"
         else None
@@ -739,6 +753,7 @@ def solve_scba(
     # Pending proposals keep the previous accepted evaluation, so a rejected
     # trial restores that state without a second expensive map evaluation.
     pending_reference = None
+    pending_metric = None
     anderson_events: list[dict[str, Any]] = []
 
     def algorithm_metadata() -> dict[str, Any]:
@@ -746,6 +761,7 @@ def solve_scba(
             "mixing_method": "anderson",
             "anderson_resume_supported": False,
             "anderson_damping_controller": _ANDERSON_DAMPING_CURRENT,
+            "anderson_policy": config.anderson_policy,
             "anderson": {
                 "map_evaluations": len(anderson_events),
                 "accepted": sum(
@@ -787,6 +803,18 @@ def solve_scba(
                 or not np.isfinite(trial_residual)
                 or trial_residual > pending_reference[-1]
             )
+            if config.anderson_policy == "scaled-trust-v1":
+                scales, reference_merit = pending_metric
+                trial_merit = None if evaluation is None else scaled_residual_merit(
+                    (evaluation[1].lesser, evaluation[1].greater),
+                    (evaluation[2], evaluation[3]), scales,
+                )
+                if trial_merit is not None and not np.isfinite(trial_merit):
+                    trial_merit = None
+                rejected_trial = (rejected_trial or trial_merit is None
+                                  or trial_merit > reference_merit)
+                event.update(reference_merit=reference_merit, trial_merit=trial_merit,
+                             merit_scales=list(scales))
             event["trial_sigma_residual"] = (
                 trial_residual
                 if trial_residual is not None and np.isfinite(trial_residual)
@@ -796,6 +824,7 @@ def solve_scba(
             event["step"] = (
                 "anderson_rejected" if rejected_trial else "anderson_accepted"
             )
+            accelerator.feedback(not rejected_trial)
             if rejected_trial:
                 evaluation = pending_reference
                 sigma_lesser, sigma_greater = (
@@ -804,6 +833,7 @@ def solve_scba(
                 )
                 accelerator.clear()
             pending_reference = None
+            pending_metric = None
         green, sigma_pp, raw_lesser, raw_greater, sigma_residual = evaluation
         green_residual = _green_residual(green, previous_green, config)
         identity_residual = max(
@@ -936,12 +966,25 @@ def solve_scba(
                 proposal, reason = accelerator.propose(
                     (sigma_lesser, sigma_greater), (raw_lesser, raw_greater), mixing
                 )
+                if config.anderson_policy == "scaled-trust-v1":
+                    event["proposal_details"] = dict(accelerator.details)
                 if proposal is not None:
                     if physical_pair_admissible(proposal, problem.grid):
                         next_lesser, next_greater = proposal
                         pending_reference = evaluation
+                        if config.anderson_policy == "scaled-trust-v1":
+                            scales = residual_scales(
+                                (sigma_lesser, sigma_greater), (raw_lesser, raw_greater),
+                                config.sigma_atol,
+                            )
+                            pending_metric = (scales, scaled_residual_merit(
+                                (sigma_lesser, sigma_greater), (raw_lesser, raw_greater),
+                                scales,
+                            ))
+                            event["proposal_details"]["reference_merit"] = pending_metric[1]
                     else:
                         reason = "physical_guard"
+                        accelerator.feedback(False)
                         accelerator.clear()
                 event["next_proposal"] = reason
             anderson_events.append(event)

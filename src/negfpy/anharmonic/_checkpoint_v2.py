@@ -1068,7 +1068,8 @@ def load_scba_checkpoint_v2_self_validating(
     return load_scba_checkpoint_v2(source, expected_identity=identity)
 
 
-def _anderson_rejected_rows(checkpoint: SCBACheckpointV2) -> frozenset[int]:
+def _anderson_rejected_rows(checkpoint: SCBACheckpointV2,
+                            policy: str = "legacy") -> frozenset[int]:
     """Authenticate versioned event semantics before controller replay.
 
     Metadata is bound by the checkpoint's existing integrity manifest and
@@ -1076,10 +1077,15 @@ def _anderson_rejected_rows(checkpoint: SCBACheckpointV2) -> frozenset[int]:
     replay behavior; self-validating historical reads do not reinterpret them.
     Restart still requires the independently constructed exact source identity.
     """
+    recorded_policy = checkpoint.metadata.get("anderson_policy", "legacy")
+    if recorded_policy != policy or recorded_policy not in {"legacy", "scaled-trust-v1"}:
+        raise CheckpointCorruptionError("Anderson globalization policy is inconsistent.")
     semantics = checkpoint.metadata.get(
         "anderson_damping_controller", _ANDERSON_DAMPING_LEGACY
     )
     if semantics == _ANDERSON_DAMPING_LEGACY:
+        if policy != "legacy":
+            raise CheckpointCorruptionError("scaled Anderson requires current damping semantics.")
         return frozenset()
     if semantics != _ANDERSON_DAMPING_CURRENT:
         raise CheckpointCorruptionError("unknown Anderson damping-controller semantics.")
@@ -1121,17 +1127,38 @@ def _anderson_rejected_rows(checkpoint: SCBACheckpointV2) -> frozenset[int]:
             )
         ):
             raise CheckpointCorruptionError("Anderson trial reference is inconsistent.")
+        merit_rejected = False
+        if policy == "scaled-trust-v1":
+            reference_merit = event.get("reference_merit")
+            trial_merit = event.get("trial_merit")
+            scales = event.get("merit_scales")
+            proposal = events[index - 1].get("proposal_details", {})
+            valid_number = lambda x: (not isinstance(x, bool)
+                                      and isinstance(x, (int, float))
+                                      and np.isfinite(x) and x >= 0.0)
+            if (
+                not valid_number(reference_merit)
+                or (trial_merit is not None and not valid_number(trial_merit))
+                or not isinstance(scales, (list, tuple)) or len(scales) != 2
+                or any(not valid_number(x) or x <= 0.0 for x in scales)
+                or not isinstance(proposal, Mapping)
+                or reference_merit != proposal.get("reference_merit")
+                or list(scales) != list(proposal.get("scales", ()))
+            ):
+                raise CheckpointCorruptionError("Anderson trial scaled merit is inconsistent.")
+            merit_rejected = trial_merit is None or trial_merit > reference_merit
         if step == "anderson_rejected":
             if (
                 item.passed
                 or item.sigma_residual != reference
                 or item.mixing != previous.mixing
-                or (trial is not None and trial <= reference)
+                or (trial is not None and trial <= reference and not merit_rejected)
             ):
                 raise CheckpointCorruptionError("rejected Anderson trial is inconsistent.")
             rejected.add(item.iteration)
         else:
-            if trial is None or trial > reference or item.sigma_residual != trial:
+            if (trial is None or trial > reference or item.sigma_residual != trial
+                    or merit_rejected):
                 raise CheckpointCorruptionError("accepted Anderson trial is inconsistent.")
             accepted_count += 1
     if checkpoint.history and (
@@ -1171,7 +1198,7 @@ def _validate_checkpoint_for_solver(
         )
     count = len(checkpoint.history)
     rejected_rows = (
-        _anderson_rejected_rows(checkpoint)
+        _anderson_rejected_rows(checkpoint, config.anderson_policy)
         if config.mixing_method == "anderson"
         else frozenset()
     )
@@ -1298,6 +1325,7 @@ def restore_scba_checkpoint_result_v2(
                 **result.metadata,
                 "anderson": checkpoint.metadata.get("anderson", {}),
                 "anderson_resume_supported": False,
+                "anderson_policy": checkpoint.metadata.get("anderson_policy", "legacy"),
                 "anderson_damping_controller": checkpoint.metadata.get(
                     "anderson_damping_controller", _ANDERSON_DAMPING_LEGACY
                 ),
@@ -1418,6 +1446,7 @@ class _SolverCheckpointSession:
             self._algorithm_metadata.update(
                 mixing_method="anderson", anderson_resume_supported=False,
                 anderson_damping_controller=_ANDERSON_DAMPING_CURRENT,
+                anderson_policy=config.anderson_policy,
             )
         state = SCBAContinuationState(config.mixing, None, 0, 0)
         record = SCBACheckpointV2(

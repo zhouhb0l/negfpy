@@ -523,6 +523,9 @@ class SCBAConfig:
     anderson_depth: int = 4
     anderson_regularization: float = 1e-10
     anderson_max_step_ratio: float = 5.0
+    anderson_policy: Literal["legacy", "scaled-trust-v1"] = "legacy"
+    anderson_trust_radius: float = 1.0
+    anderson_rank_rtol: float = 1e-10
 
     def __post_init__(self) -> None:
         eta_lead = _finite_real(self.eta_lead, name="eta_lead", positive=True)
@@ -570,6 +573,22 @@ class SCBAConfig:
         object.__setattr__(self, "anderson_depth", depth)
         object.__setattr__(self, "anderson_regularization", regularization)
         object.__setattr__(self, "anderson_max_step_ratio", step_ratio)
+        if self.anderson_policy not in {"legacy", "scaled-trust-v1"}:
+            raise ValueError("unsupported anderson_policy.")
+        radius = _finite_real(
+            self.anderson_trust_radius, name="anderson_trust_radius", positive=True
+        )
+        rank_rtol = _finite_real(
+            self.anderson_rank_rtol, name="anderson_rank_rtol", positive=True
+        )
+        if rank_rtol >= 1.0:
+            raise ValueError("anderson_rank_rtol must be less than one.")
+        if self.anderson_policy == "legacy" and (radius != 1.0 or rank_rtol != 1e-10):
+            raise ValueError("trust controls require anderson_policy='scaled-trust-v1'.")
+        if self.anderson_policy != "legacy" and self.mixing_method != "anderson":
+            raise ValueError("scaled-trust-v1 requires Anderson mixing.")
+        object.__setattr__(self, "anderson_trust_radius", radius)
+        object.__setattr__(self, "anderson_rank_rtol", rank_rtol)
 
         for name in (
             "sigma_rtol",

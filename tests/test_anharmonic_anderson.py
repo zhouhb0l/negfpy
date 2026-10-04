@@ -13,7 +13,9 @@ from negfpy.anharmonic import (
     SCBAConfig,
     SignedFrequencyGrid,
 )
-from negfpy.anharmonic._anderson import AndersonHistory, physical_pair_admissible
+from negfpy.anharmonic._anderson import (
+    AndersonHistory, physical_pair_admissible, residual_scales,
+)
 from negfpy.anharmonic._checkpoint_v2 import (
     SCBAContinuationState,
     _validate_checkpoint_for_solver,
@@ -77,6 +79,9 @@ def test_linear_hash_unchanged_and_all_anderson_controls_are_bound():
         "anderson_depth",
         "anderson_regularization",
         "anderson_max_step_ratio",
+        "anderson_policy",
+        "anderson_trust_radius",
+        "anderson_rank_rtol",
     }
     for field in fields(config):
         if field.name not in names:
@@ -92,6 +97,16 @@ def test_linear_hash_unchanged_and_all_anderson_controls_are_bound():
     ):
         hashes.add(configuration_hash(replace(active, **{name: value})))
     assert len(hashes) == 5
+    old_anderson = hashlib.sha256()
+    for field in fields(active):
+        if field.name not in {"anderson_policy", "anderson_trust_radius", "anderson_rank_rtol"}:
+            _update_value(old_anderson, field.name)
+            _update_value(old_anderson, getattr(active, field.name))
+    assert configuration_hash(active) == old_anderson.hexdigest()
+    trust = replace(active, anderson_policy="scaled-trust-v1")
+    assert len({configuration_hash(active), configuration_hash(trust),
+                configuration_hash(replace(trust, anderson_trust_radius=2.0)),
+                configuration_hash(replace(trust, anderson_rank_rtol=1e-8))}) == 4
 
 
 @pytest.mark.parametrize(
@@ -103,6 +118,11 @@ def test_linear_hash_unchanged_and_all_anderson_controls_are_bound():
         {"anderson_regularization": 0},
         {"anderson_regularization": float("nan")},
         {"anderson_max_step_ratio": 0.9},
+        {"anderson_policy": "unknown"},
+        {"anderson_policy": "scaled-trust-v1"},
+        {"anderson_trust_radius": 2.0},
+        {"anderson_rank_rtol": 1.0},
+        {"anderson_trust_radius": float("nan")},
     ],
 )
 def test_invalid_controls_rejected(updates):
@@ -154,10 +174,13 @@ def test_physical_guard_rejects_bad_pairs(fault):
     assert not physical_pair_admissible((lesser, greater), grid)
 
 
-def test_real_scba_acceleration_matches_linear_fixed_point():
+@pytest.mark.parametrize("policy", ["legacy", "scaled-trust-v1"])
+def test_real_scba_acceleration_matches_linear_fixed_point(policy):
     problem = _problem()
     linear = solver.solve_scba(problem, _config())
-    accelerated = solver.solve_scba(problem, _config(mixing_method="anderson"))
+    accelerated = solver.solve_scba(
+        problem, _config(mixing_method="anderson", anderson_policy=policy)
+    )
     assert linear.converged and accelerated.converged
     assert len(accelerated.history) < len(linear.history) // 2
     assert accelerated.history[-1].sigma_residual <= 1e-7
@@ -171,8 +194,9 @@ def test_real_scba_acceleration_matches_linear_fixed_point():
     )
 
 
+@pytest.mark.parametrize("policy", ["legacy", "scaled-trust-v1"])
 def test_actual_residual_rejection_restores_prior_state_and_counts_budget(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, policy
 ):
     real = solver._fixed_point_evaluation
     evaluations = []
@@ -187,7 +211,8 @@ def test_actual_residual_rejection_restores_prior_state_and_counts_budget(
     monkeypatch.setattr(solver, "_fixed_point_evaluation", worsening_trial)
     # On the third and final evaluation the proposal worsens. The terminal
     # durable state must be iteration 2, never the rejected extrapolation.
-    config = _config(mixing_method="anderson", max_iterations=3, min_iterations=1)
+    config = _config(mixing_method="anderson", anderson_policy=policy,
+                     max_iterations=3, min_iterations=1)
     path = tmp_path / "rejected.h5"
     result = _checkpoint_run(path, _problem(), config)
     assert len(evaluations) == len(result.history) == 3
@@ -201,8 +226,9 @@ def test_actual_residual_rejection_restores_prior_state_and_counts_budget(
 
 
 @pytest.mark.parametrize("stop_at_rejection", [False, True])
+@pytest.mark.parametrize("policy", ["legacy", "scaled-trust-v1"])
 def test_rejected_trial_preserves_damping_streak_and_linear_trajectory(
-    monkeypatch, tmp_path, stop_at_rejection
+    monkeypatch, tmp_path, stop_at_rejection, policy
 ):
     """Reject with a two-increase streak; the next linear state must halve.
 
@@ -232,6 +258,7 @@ def test_rejected_trial_preserves_damping_streak_and_linear_trajectory(
     def single_proposal(self, state, raw, mixing):
         nonlocal proposal_calls
         proposal_calls += 1
+        self.details = {"scales": list(residual_scales(state, raw, self.absolute_floor))}
         if proposal_calls == 3:
             # A physical convex trial, evaluated and forced to fail below.
             proposal = tuple(
@@ -252,7 +279,8 @@ def test_rejected_trial_preserves_damping_streak_and_linear_trajectory(
     monkeypatch.setattr(solver, "_fixed_point_evaluation", accelerated_evaluation)
     problem = _problem()
     config = _config(
-        mixing_method="anderson", max_iterations=baseline_count + 1, min_iterations=1
+        mixing_method="anderson", anderson_policy=policy,
+        max_iterations=baseline_count + 1, min_iterations=1
     )
     path = tmp_path / "controller.h5"
     accelerated = _checkpoint_run(path, problem, config)
@@ -296,7 +324,7 @@ def test_rejected_trial_preserves_damping_streak_and_linear_trajectory(
     with pytest.raises(CheckpointCorruptionError, match="unknown Anderson"):
         _validate_checkpoint_for_solver(replace(checkpoint, metadata=altered), problem, config)
 
-    if stop_at_rejection:
+    if stop_at_rejection and policy == "legacy":
         # A historical checkpoint with no version records the original reset
         # to zero. Historical readback uses legacy semantics, not the new rule.
         legacy_metadata = dict(checkpoint.metadata)
@@ -344,3 +372,115 @@ def test_anderson_resume_forbidden_but_terminal_readback_matches(monkeypatch, tm
     assert restored.history == result.history
     assert restored.metadata["anderson"] == result.metadata["anderson"]
     np.testing.assert_array_equal(restored.sigma_pp.lesser, result.sigma_pp.lesser)
+
+
+def _physical_affine_pair(amplitude):
+    value = -1j * np.full((3, 1, 1), amplitude)
+    return value, value.copy()
+
+
+@pytest.mark.parametrize("mixing", [0.2, 0.001])
+@pytest.mark.parametrize("slope,intercept,initial", [(0.98, 1.0, 1.0), (1.02, -0.02, 0.8)])
+def test_scaled_trust_recovers_near_unit_root_with_collapsed_mixing(
+    mixing, slope, intercept, initial
+):
+    legacy = AndersonHistory(4, 1e-10, 5.0)
+    trust = AndersonHistory(4, 1e-10, 5.0, policy="scaled-trust-v1")
+    state = _physical_affine_pair(initial)
+    for iteration in range(8):
+        x = float(-state[0][0, 0, 0].imag)
+        raw = _physical_affine_pair(slope * x + intercept)
+        old_proposal, old_reason = legacy.propose(state, raw, mixing)
+        proposal, reason = trust.propose(state, raw, mixing)
+        if iteration == 1:
+            assert old_proposal is None and old_reason == "step_bound"
+            assert proposal is not None and reason == "proposed"
+        if proposal is not None:
+            assert physical_pair_admissible(proposal, SignedFrequencyGrid(0.1, 1))
+            trial = float(-proposal[0][0, 0, 0].imag)
+            assert abs(slope * trial + intercept - trial) <= abs(slope * x + intercept - x) + 1e-12
+        state = proposal if proposal is not None else tuple(
+            (1 - mixing) * a + mixing * b for a, b in zip(state, raw)
+        )
+    np.testing.assert_allclose(-state[0].imag, intercept / (1 - slope), atol=1e-7)
+
+
+def test_scaled_qr_svd_truncates_dependent_history_and_radius_is_independent():
+    mixer = AndersonHistory(4, 1e-10, 5, policy="scaled-trust-v1", trust_radius=0.5)
+    for x in (1.0, 1.1, 1.2, 1.3):
+        proposal, reason = mixer.propose(
+            _physical_affine_pair(x), _physical_affine_pair(0.98 * x + 1), 0.001
+        )
+    assert proposal is not None and reason == "proposed"
+    assert mixer.details["retained_rank"] == 1
+    assert mixer.details["clip_factor"] < 1
+    assert mixer.details["trust_radius"] == 0.5
+    before = mixer.radius
+    mixer.feedback(False)
+    assert mixer.radius == before / 2
+    mixer.clear()
+    assert mixer.radius == before / 2  # clearing secants does not reset the guard
+    mixer.feedback(True)
+    assert mixer.radius == before * 0.75
+
+
+def test_scaled_policy_does_not_repair_an_unphysical_root():
+    mixer = AndersonHistory(4, 1e-10, 5, policy="scaled-trust-v1", trust_radius=10)
+    mixer.propose(_physical_affine_pair(1), _physical_affine_pair(1.04), 0.001)
+    x = 1.00004
+    proposal, reason = mixer.propose(
+        _physical_affine_pair(x), _physical_affine_pair(1.02 * x + 0.02), 0.001
+    )
+    assert reason == "proposed"
+    assert not physical_pair_admissible(proposal, SignedFrequencyGrid(0.1, 1))
+
+
+def test_scaled_merit_rejection_and_checkpoint_authentication(monkeypatch, tmp_path):
+    import negfpy.anharmonic._anderson as anderson
+    merits = iter([1.0, 2.0])
+    monkeypatch.setattr(anderson, "scaled_residual_merit", lambda *args: next(merits))
+    config = _config(mixing_method="anderson", anderson_policy="scaled-trust-v1",
+                     max_iterations=3, min_iterations=1)
+    problem = _problem()
+    path = tmp_path / "merit-rejected.h5"
+    result = _checkpoint_run(path, problem, config)
+    event = result.metadata["anderson"]["events"][-1]
+    assert event["step"] == "anderson_rejected"
+    assert event["trial_sigma_residual"] < event["reference_sigma_residual"]
+    assert event["trial_merit"] > event["reference_merit"]
+    checkpoint = load_scba_checkpoint_v2_self_validating(path)
+    _validate_checkpoint_for_solver(checkpoint, problem, config)
+    restored = _checkpoint_run(path, problem, config)
+    assert restored.metadata["anderson_policy"] == "scaled-trust-v1"
+    assert restored.metadata["anderson"] == result.metadata["anderson"]
+    for fault in ("policy", "merit", "scales"):
+        metadata = dict(checkpoint.metadata)
+        if fault == "policy":
+            metadata["anderson_policy"] = "legacy"
+        else:
+            algorithm = dict(metadata["anderson"])
+            events = [dict(event) for event in algorithm["events"]]
+            if fault == "merit":
+                events[-1]["trial_merit"] = 0.5
+            else:
+                events[-1]["merit_scales"] = [1.0, 1.0]
+            algorithm["events"] = events
+            metadata["anderson"] = algorithm
+        with pytest.raises(CheckpointCorruptionError):
+            _validate_checkpoint_for_solver(replace(checkpoint, metadata=metadata), problem, config)
+
+
+def test_scaled_radius_is_invariant_to_units_and_inactive_matrix_padding():
+    amplitudes = []
+    for dimension, units in ((1, 1.0), (3, 1.0), (3, 1e-6)):
+        mixer = AndersonHistory(4, 1e-10, 5, policy="scaled-trust-v1")
+        def pair(x, dimension=dimension, units=units):
+            value = np.zeros((3, dimension, dimension), dtype=complex)
+            value[:, 0, 0] = -1j * x * units
+            return value, value.copy()
+        mixer.propose(pair(1.0), pair(1.98), 0.001)
+        x = 1.00098
+        proposal, reason = mixer.propose(pair(x), pair(0.98 * x + 1), 0.001)
+        assert reason == "proposed" and mixer.details["clip_factor"] < 1
+        amplitudes.append(-proposal[0][0, 0, 0].imag / units)
+    np.testing.assert_allclose(amplitudes, amplitudes[0], rtol=1e-12)

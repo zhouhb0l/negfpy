@@ -326,7 +326,12 @@ def configuration_hash(config: SCBAConfig) -> str:
         getattr(config, name) == value for name, value in anderson_defaults.items()
     )
     digest = hashlib.sha256()
+    # Opt-in globalization must not change either historical linear or
+    # historical Anderson hashes when its controls are inactive/default.
+    trust_fields = {"anderson_policy", "anderson_trust_radius", "anderson_rank_rtol"}
     for description in fields(config):
+        if config.anderson_policy == "legacy" and description.name in trust_fields:
+            continue
         if legacy_linear and description.name in anderson_defaults:
             continue
         _update_value(digest, description.name)
