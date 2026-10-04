@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 import os
 import platform
 from typing import Any
@@ -58,6 +59,43 @@ from .types import (
 
 
 Array = np.ndarray
+
+
+class ResearchMapBudgetExhausted(Exception):
+    """A cooperative research-map stop, never a numerical failure or retry."""
+
+
+def _research_identity(research_map):
+    """Validate the explicit, serializable identity without storing a callback."""
+    if not isinstance(research_map.identity, dict) or not research_map.identity:
+        raise ValueError("research_map.identity must be a nonempty JSON dictionary.")
+    for name in ("evaluate", "metadata", "committed"):
+        if not callable(getattr(research_map, name, None)):
+            raise TypeError(f"research_map.{name} must be callable.")
+    return json.loads(json.dumps(research_map.identity, allow_nan=False))
+
+
+def _research_evaluate(research_map, problem, left, right, lesser, greater,
+                       config, *, purpose):
+    evaluation = research_map.evaluate(
+        problem, left, right, lesser, greater, config, purpose=purpose,
+    )
+    if not isinstance(evaluation, tuple) or len(evaluation) != 5:
+        raise TypeError("Research evaluator must return one complete five-field evaluation.")
+    green, sigma, raw_lesser, raw_greater, residual = evaluation
+    if not isinstance(green, KeldyshSpectrum) or not isinstance(sigma, KeldyshSpectrum):
+        raise TypeError("Research evaluation requires complete Keldysh spectra.")
+    shape = (problem.grid.n_points, problem.ndof, problem.ndof)
+    if green.shape != shape or sigma.shape != shape:
+        raise ValueError("Research spectra do not match the problem shape.")
+    if not np.array_equal(sigma.lesser, lesser) or not np.array_equal(sigma.greater, greater):
+        raise ValueError("Research evaluation changed its input self-energy.")
+    for value in (raw_lesser, raw_greater):
+        if np.shape(value) != shape or not np.all(np.isfinite(value)):
+            raise ValueError("Research raw map must contain complete finite arrays.")
+    if residual is None or not np.isfinite(residual) or residual < 0:
+        raise ValueError("Research evaluation must have a complete finite residual.")
+    return evaluation
 
 
 def _cubic_execution_details(
@@ -493,7 +531,40 @@ def _finalize_result(
     initialization: str,
     initialization_hash: str,
     predicted_memory_bytes: int,
+    research_map=None,
+    research_evaluation=None,
+    research_stop_reason: str | None = None,
 ) -> AnharmonicResult:
+    research_metadata = {}
+    research_raw_pair = None
+    if research_map is not None:
+        if research_evaluation is None or not history:
+            raise ValueError("A research result requires a retained evaluated state.")
+        final_check_completed = False
+        final_stop_reason = None
+        try:
+            final_evaluation = _research_evaluate(
+                research_map, problem, left, right, sigma_pp.lesser,
+                sigma_pp.greater, config, purpose="final_diagnostics",
+            )
+        except ResearchMapBudgetExhausted as exc:
+            final_evaluation = research_evaluation
+            final_stop_reason = str(exc)
+            converged = False
+        else:
+            final_check_completed = True
+            research_map.committed(
+                final_evaluation, history[-1], {"step": "final_diagnostics"},
+            )
+        research_raw_pair = (final_evaluation[2], final_evaluation[3])
+        research_metadata = {
+            "research_map_identity": _research_identity(research_map),
+            "research_map": json.loads(json.dumps(research_map.metadata(), allow_nan=False)),
+            "research_stop_reason": research_stop_reason,
+            "research_final_stop_reason": final_stop_reason,
+            "research_final_check_completed": final_check_completed,
+            "research_resume_supported": False,
+        }
     provisional = AnharmonicResult(
         method=method,
         grid=problem.grid,
@@ -506,16 +577,19 @@ def _finalize_result(
         history=history,
         converged=converged,
         release_certified=False,
-        metadata=_metadata(
+        metadata={**_metadata(
             problem,
             config,
             method=method,
             initialization=initialization,
             initialization_hash=initialization_hash,
             predicted_memory_bytes=predicted_memory_bytes,
-        ),
+        ), **research_metadata},
     )
-    diagnostics = check_solution(problem, provisional, config)
+    diagnostics = (check_solution(problem, provisional, config)
+                   if research_map is None else check_solution(
+                       problem, provisional, config, research_raw_pair=research_raw_pair,
+                   ))
     release_certified = bool(
         converged
         and method == "scba"
@@ -526,7 +600,8 @@ def _finalize_result(
     return replace(
         provisional,
         diagnostics=diagnostics,
-        release_certified=release_certified,
+        release_certified=release_certified and research_map is None,
+        converged=converged if research_map is None else converged and diagnostics.passed,
     )
 
 
@@ -629,14 +704,35 @@ def solve_scba(
     config: SCBAConfig,
     *,
     initial_sigma_pp: KeldyshSpectrum | None = None,
+    research_map=None,
 ) -> AnharmonicResult:
-    """Solve the full dense cubic self-consistent Born fixed point."""
+    """Solve the cubic fixed point, optionally with an explicit research map.
+
+    A research object provides JSON-safe ``identity`` and ``metadata()``,
+    ``evaluate(problem, left, right, lesser, greater, config, *, purpose)``
+    returning the five fields used by ``_fixed_point_evaluation``, and
+    ``committed(evaluation, history_record, event)``. It owns the actual map
+    evaluation/time budgets and raises ``ResearchMapBudgetExhausted`` for a
+    cooperative stop, including an incomplete map. Numerical failures must
+    keep their original exceptions. Purpose is ``iteration`` or
+    ``final_diagnostics``; all calls must use the same declared map.
+
+    Rejected trials consume that object's budget. A stop retains the last
+    controller-committed evaluation, never an unevaluated mixed proposal. A
+    final map budget stop still checks its saved raw pair but forbids a
+    convergence claim. Research callbacks cannot use resumable checkpoints.
+    """
 
     if not isinstance(problem, CubicSCBAProblem):
         raise TypeError("problem must be a CubicSCBAProblem.")
     if not isinstance(config, SCBAConfig):
         raise TypeError("config must be an SCBAConfig.")
 
+    if research_map is not None:
+        _research_identity(research_map)
+        from ._checkpoint_v2 import _active_solver_checkpoint_session
+        if _active_solver_checkpoint_session() is not None:
+            raise ValueError("Research maps cannot read or write resumable checkpoints.")
     predicted = _guard_dense_memory(problem, config)
     initialization = "zero" if initial_sigma_pp is None else "supplied_keldysh_pair"
     initialization_hash = initial_self_energy_hash(
@@ -731,6 +827,8 @@ def solve_scba(
     final_green: KeldyshSpectrum | None = None
     final_sigma: KeldyshSpectrum | None = None
     final_currents: CurrentReport | None = None
+    final_evaluation = None
+    research_stop_reason = None
 
     from ._anderson import (
         AndersonHistory, physical_pair_admissible,
@@ -779,9 +877,20 @@ def solve_scba(
         event: dict[str, Any] = {"iteration": iteration, "step": "linear"}
         rejected_trial = False
         try:
-            evaluation = _fixed_point_evaluation(
-                problem, left, right, sigma_lesser, sigma_greater, config
-            )
+            if research_map is None:
+                evaluation = _fixed_point_evaluation(
+                    problem, left, right, sigma_lesser, sigma_greater, config
+                )
+            else:
+                evaluation = _research_evaluate(
+                    research_map, problem, left, right, sigma_lesser,
+                    sigma_greater, config, purpose="iteration",
+                )
+        except ResearchMapBudgetExhausted as exc:
+            if research_map is None or final_evaluation is None:
+                raise
+            research_stop_reason = str(exc)
+            break
         except (
             ValueError,
             FloatingPointError,
@@ -952,6 +1061,7 @@ def solve_scba(
         final_green = green
         final_sigma = sigma_pp
         final_currents = currents
+        final_evaluation = evaluation
         # Each proposal is evaluated on the next ordinary iteration. Rejected
         # proposals count against the same max_iterations budget, never pass,
         # and leave the durable state at the previous accepted evaluation.
@@ -990,6 +1100,8 @@ def solve_scba(
             anderson_events.append(event)
             if checkpoint_session is not None:
                 checkpoint_session.set_algorithm_metadata(algorithm_metadata())
+        if research_map is not None:
+            research_map.committed(evaluation, history[-1], dict(event))
         if consecutive >= config.consecutive_passes:
             result = _finalize_result(
                 problem,
@@ -1005,6 +1117,11 @@ def solve_scba(
                 initialization=initialization,
                 initialization_hash=initialization_hash,
                 predicted_memory_bytes=predicted,
+                **({} if research_map is None else {
+                    "research_map": research_map,
+                    "research_evaluation": final_evaluation,
+                    "research_stop_reason": research_stop_reason,
+                }),
             )
             if checkpoint_session is not None:
                 checkpoint_session.record_terminal(
@@ -1058,6 +1175,11 @@ def solve_scba(
         initialization=initialization,
         initialization_hash=initialization_hash,
         predicted_memory_bytes=predicted,
+        **({} if research_map is None else {
+            "research_map": research_map,
+            "research_evaluation": final_evaluation,
+            "research_stop_reason": research_stop_reason or "iteration_limit",
+        }),
     )
     if accelerator is not None:
         result = replace(result, metadata={**result.metadata, **algorithm_metadata()})
@@ -1091,4 +1213,4 @@ def solve_scba(
     return result
 
 
-__all__ = ["solve_one_shot_born", "solve_scba"]
+__all__ = ["ResearchMapBudgetExhausted", "solve_one_shot_born", "solve_scba"]

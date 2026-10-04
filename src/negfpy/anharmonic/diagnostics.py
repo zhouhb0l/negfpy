@@ -759,6 +759,8 @@ def check_solution(
     problem: CubicSCBAProblem,
     result: AnharmonicResult,
     config: SCBAConfig,
+    *,
+    research_raw_pair: tuple[Array, Array] | None = None,
 ) -> DiagnosticReport:
     """Evaluate essential and release-certification gates.
 
@@ -777,6 +779,16 @@ def check_solution(
         raise ValueError("result and problem must use the same frequency grid.")
     if result.green.ndof != problem.ndof:
         raise ValueError("result spectrum dimension does not match the problem.")
+
+    research = "research_map_identity" in result.metadata
+    if research != (research_raw_pair is not None):
+        raise ValueError("Research diagnostics require the explicit research raw map pair.")
+    if research_raw_pair is not None:
+        if len(research_raw_pair) != 2 or any(
+            np.shape(value) != result.sigma_pp.shape or not np.all(np.isfinite(value))
+            for value in research_raw_pair
+        ):
+            raise ValueError("Research diagnostic raw pair must have complete finite arrays.")
 
     spectra = {
         "green": result.green,
@@ -973,14 +985,22 @@ def check_solution(
         recomputation_backend = (
             "fft" if config.backend == "fft" else "serial"
         )
-        raw_lesser, raw_greater = cubic_lesser_greater(
-            problem.vertex,
-            result.green.lesser,
-            result.green.greater,
-            result.grid,
-            backend=recomputation_backend,
-            max_workers=config.max_workers,
-        )
+        if research_raw_pair is None:
+            raw_lesser, raw_greater = cubic_lesser_greater(
+                problem.vertex,
+                result.green.lesser,
+                result.green.greater,
+                result.grid,
+                backend=recomputation_backend,
+                max_workers=config.max_workers,
+            )
+        else:
+            raw_lesser, raw_greater = research_raw_pair
+            metrics["research_final_check_completed"] = float(
+                result.metadata.get("research_final_check_completed") is True
+            )
+            if not metrics["research_final_check_completed"]:
+                essential_failures.append("Research final map check stopped at its budget.")
         raw_retarded = retarded_from_keldysh(
             raw_lesser,
             raw_greater,
@@ -1629,6 +1649,8 @@ def check_solution(
     else:
         metrics["equilibrium_current_abs_error"] = 0.0
 
+    if research:
+        release_failures.append("release: selectively refined research map is not release-certified")
     if method != "scba":
         release_failures.append(
             "release: only a self-consistent Born result can be certified"
