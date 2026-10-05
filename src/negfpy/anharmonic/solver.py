@@ -534,6 +534,7 @@ def _finalize_result(
     research_map=None,
     research_evaluation=None,
     research_stop_reason: str | None = None,
+    research_moment=None,
 ) -> AnharmonicResult:
     research_metadata = {}
     research_raw_pair = None
@@ -597,12 +598,24 @@ def _finalize_result(
         and provisional.has_release_certifying_provenance
         and provisional.metadata["certification_contract"] == "dense_v0.1"
     )
-    return replace(
+    result = replace(
         provisional,
         diagnostics=diagnostics,
         release_certified=release_certified and research_map is None,
         converged=converged if research_map is None else converged and diagnostics.passed,
     )
+    if research_moment is not None:
+        coarse = diagnostics.metrics["green_spectral_moment_residual"]
+        if final_check_completed:
+            moment_report = research_moment.evaluate(
+                problem, config, final_evaluation[1], coarse_residual=coarse,
+            )
+        else:
+            moment_report = research_moment.skip(
+                coarse_residual=coarse, reason="fresh_final_map_incomplete",
+            )
+        result = replace(result, metadata={**result.metadata, "research_moment": moment_report})
+    return result
 
 
 def solve_one_shot_born(
@@ -705,6 +718,7 @@ def solve_scba(
     *,
     initial_sigma_pp: KeldyshSpectrum | None = None,
     research_map=None,
+    research_moment=None,
 ) -> AnharmonicResult:
     """Solve the cubic fixed point, optionally with an explicit research map.
 
@@ -721,12 +735,25 @@ def solve_scba(
     controller-committed evaluation, never an unevaluated mixed proposal. A
     final map budget stop still checks its saved raw pair but forbids a
     convergence claim. Research callbacks cannot use resumable checkpoints.
+
+    ``research_moment`` is an optional ``ResearchMomentDiagnostic`` requiring
+    an explicit research map. After a completed fresh final map it integrates
+    that map's retained input, stores separate metadata and leaf evidence,
+    and leaves the historical diagnostics and convergence decision unchanged.
     """
 
     if not isinstance(problem, CubicSCBAProblem):
         raise TypeError("problem must be a CubicSCBAProblem.")
     if not isinstance(config, SCBAConfig):
         raise TypeError("config must be an SCBAConfig.")
+
+    if research_moment is not None:
+        from .research_moment import ResearchMomentDiagnostic
+        if not isinstance(research_moment, ResearchMomentDiagnostic):
+            raise TypeError("research_moment must be a ResearchMomentDiagnostic.")
+        if research_map is None:
+            raise ValueError("A final research moment diagnostic requires an explicit research_map.")
+        research_moment.prepare(problem, config)
 
     if research_map is not None:
         _research_identity(research_map)
@@ -1121,6 +1148,7 @@ def solve_scba(
                     "research_map": research_map,
                     "research_evaluation": final_evaluation,
                     "research_stop_reason": research_stop_reason,
+                    "research_moment": research_moment,
                 }),
             )
             if checkpoint_session is not None:
@@ -1179,6 +1207,7 @@ def solve_scba(
             "research_map": research_map,
             "research_evaluation": final_evaluation,
             "research_stop_reason": research_stop_reason or "iteration_limit",
+            "research_moment": research_moment,
         }),
     )
     if accelerator is not None:
