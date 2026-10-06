@@ -535,6 +535,7 @@ def _finalize_result(
     research_evaluation=None,
     research_stop_reason: str | None = None,
     research_moment=None,
+    research_current=None,
 ) -> AnharmonicResult:
     research_metadata = {}
     research_raw_pair = None
@@ -615,6 +616,18 @@ def _finalize_result(
                 coarse_residual=coarse, reason="fresh_final_map_incomplete",
             )
         result = replace(result, metadata={**result.metadata, "research_moment": moment_report})
+    if research_current is not None:
+        if final_check_completed:
+            current_report = research_current.evaluate(
+                problem, config, final_evaluation[1], coarse_currents=currents,
+            )
+        else:
+            current_report = research_current.skip(
+                coarse_currents=currents, reason="fresh_final_map_incomplete",
+            )
+        result = replace(
+            result, metadata={**result.metadata, "research_current": current_report}
+        )
     return result
 
 
@@ -719,6 +732,7 @@ def solve_scba(
     initial_sigma_pp: KeldyshSpectrum | None = None,
     research_map=None,
     research_moment=None,
+    research_current=None,
 ) -> AnharmonicResult:
     """Solve the cubic fixed point, optionally with an explicit research map.
 
@@ -740,6 +754,13 @@ def solve_scba(
     an explicit research map. After a completed fresh final map it integrates
     that map's retained input, stores separate metadata and leaf evidence,
     and leaves the historical diagnostics and convergence decision unchanged.
+
+    ``research_current`` is an optional ``ResearchCurrentDiagnostic`` with the
+    same final-map requirement. It integrates the fixed retained input over
+    the positive domain with linear-Keldysh interpolation. Its sampled
+    integration, coarse comparison, and conservation evidence are separate
+    from SCBA acceptance. When both diagnostics are supplied, the moment check
+    runs first and both consume the same immutable final-map input.
     """
 
     if not isinstance(problem, CubicSCBAProblem):
@@ -754,6 +775,14 @@ def solve_scba(
         if research_map is None:
             raise ValueError("A final research moment diagnostic requires an explicit research_map.")
         research_moment.prepare(problem, config)
+
+    if research_current is not None:
+        from .research_current import ResearchCurrentDiagnostic
+        if not isinstance(research_current, ResearchCurrentDiagnostic):
+            raise TypeError("research_current must be a ResearchCurrentDiagnostic.")
+        if research_map is None:
+            raise ValueError("A final research current diagnostic requires an explicit research_map.")
+        research_current.prepare(problem, config)
 
     if research_map is not None:
         _research_identity(research_map)
@@ -1149,6 +1178,7 @@ def solve_scba(
                     "research_evaluation": final_evaluation,
                     "research_stop_reason": research_stop_reason,
                     "research_moment": research_moment,
+                    "research_current": research_current,
                 }),
             )
             if checkpoint_session is not None:
@@ -1208,6 +1238,7 @@ def solve_scba(
             "research_evaluation": final_evaluation,
             "research_stop_reason": research_stop_reason or "iteration_limit",
             "research_moment": research_moment,
+            "research_current": research_current,
         }),
     )
     if accelerator is not None:

@@ -112,6 +112,9 @@ def test_v2_keeps_public_solver_signatures_unchanged() -> None:
         "problem",
         "config",
         "initial_sigma_pp",
+        "research_map",
+        "research_moment",
+        "research_current",
     ]
 
 

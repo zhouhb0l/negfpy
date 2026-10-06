@@ -175,6 +175,7 @@ from .retarded import (
     principal_value_cauchy_fft,
     retarded_from_keldysh,
 )
+from .research_current import ResearchCurrentDiagnostic
 from .solver import solve_one_shot_born, solve_scba
 from .sparse_cubic import (
     SparseCubicVertex,
@@ -277,6 +278,7 @@ __all__ = [
     "PhononDOS",
     "RTAThermalConductivity",
     "ReferenceIssue",
+    "ResearchCurrentDiagnostic",
     "SCBAConfig",
     "SCBAConvergenceError",
     "SCBAIteration",
