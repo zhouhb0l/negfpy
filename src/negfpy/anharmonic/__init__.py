@@ -67,6 +67,7 @@ from .crystal import (
     validate_crystal_mapping,
 )
 from .cubic import cubic_lesser_greater
+from .cubic_cut_current import CubicCutCurrentOperator, build_cubic_cut_current_operator
 from .current_comparison import compare_current_quadrature
 from .current import (
     bond_heat_current_spectra,
@@ -282,6 +283,8 @@ __all__ = [
     "RTAThermalConductivity",
     "ReferenceIssue",
     "ResearchCurrentDiagnostic",
+    "CubicCutCurrentOperator",
+    "build_cubic_cut_current_operator",
     "SCBAConfig",
     "SCBAConvergenceError",
     "SCBAIteration",
