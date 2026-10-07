@@ -68,6 +68,12 @@ from .crystal import (
 )
 from .cubic import cubic_lesser_greater
 from .cubic_cut_current import CubicCutCurrentOperator, build_cubic_cut_current_operator
+from .three_point import (
+    combine_cubic_moments,
+    connected_cubic_moments,
+    correlations_from_green,
+    static_cubic_shift,
+)
 from .current_comparison import compare_current_quadrature
 from .current import (
     bond_heat_current_spectra,
@@ -285,6 +291,10 @@ __all__ = [
     "ResearchCurrentDiagnostic",
     "CubicCutCurrentOperator",
     "build_cubic_cut_current_operator",
+    "combine_cubic_moments",
+    "connected_cubic_moments",
+    "correlations_from_green",
+    "static_cubic_shift",
     "SCBAConfig",
     "SCBAConvergenceError",
     "SCBAIteration",
