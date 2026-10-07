@@ -67,12 +67,14 @@ from .crystal import (
     validate_crystal_mapping,
 )
 from .cubic import cubic_lesser_greater
+from .current_comparison import compare_current_quadrature
 from .current import (
     bond_heat_current_spectra,
     bond_heat_currents,
     collision_power,
     contact_heat_current,
     energy_exchange_spectrum,
+    harmonic_cut_current_contribution_spectra,
     projected_collision_power_spectra,
     projected_eom_exchange_spectra,
     self_energy_nonlocal_ratio,
@@ -176,6 +178,7 @@ from .retarded import (
     retarded_from_keldysh,
 )
 from .research_current import ResearchCurrentDiagnostic
+from .research_layer_balance import evaluate_layer_energy_balance
 from .solver import solve_one_shot_born, solve_scba
 from .sparse_cubic import (
     SparseCubicVertex,
@@ -295,6 +298,8 @@ __all__ = [
     "antihermitian_residual",
     "assemble_rta_thermal_conductivity",
     "bond_heat_current_spectra",
+    "harmonic_cut_current_contribution_spectra",
+    "evaluate_layer_energy_balance",
     "bond_heat_currents",
     "bose_occupation_signed",
     "broadening",
@@ -303,6 +308,7 @@ __all__ = [
     "build_contact_spectra",
     "check_solution",
     "collision_power",
+    "compare_current_quadrature",
     "compare_fc2_random_q",
     "compare_interaction_strengths",
     "compare_linewidths",

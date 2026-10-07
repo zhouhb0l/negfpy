@@ -97,32 +97,19 @@ def _validate_problem_pair(
         raise ValueError(f"green must have shape {expected}; got {green.shape}.")
 
 
-def _project_layer_spectra(
+def _project_layer_diagonal_spectra(
     problem: CubicSCBAProblem,
-    matrix_spectrum: Array,
+    diagonal: Array,
 ) -> Array:
-    """Project one signed matrix kernel onto layers at positive frequency."""
+    """Project a signed kernel diagonal without allocating matrix products."""
 
     positive = problem.grid.positive_indices
     frequencies = problem.grid.values[positive]
-    spectra = np.zeros(
-        (problem.device.n_layers, positive.size),
-        dtype=float,
-    )
     npl = problem.device.dof_per_layer
-    for layer in range(problem.device.n_layers):
-        layer_slice = slice(layer * npl, (layer + 1) * npl)
-        trace = np.trace(
-            matrix_spectrum[:, layer_slice, layer_slice],
-            axis1=-2,
-            axis2=-1,
-        )
-        spectra[layer] = (
-            problem.scale.current_scale
-            * frequencies
-            * np.real(trace[positive])
-        )
-    return spectra
+    traces = diagonal[positive].reshape(
+        positive.size, problem.device.n_layers, npl
+    ).sum(axis=-1)
+    return problem.scale.current_scale * frequencies * traces.real.T
 
 
 def projected_eom_exchange_spectra(
@@ -148,13 +135,13 @@ def projected_eom_exchange_spectra(
     _validate_problem_pair(problem, self_energy, green)
     green_advanced = np.swapaxes(green.retarded.conj(), -1, -2)
     sigma_advanced = np.swapaxes(self_energy.retarded.conj(), -1, -2)
-    kernel = (
-        self_energy.retarded @ green.lesser
-        + self_energy.lesser @ green_advanced
-        - green.retarded @ self_energy.lesser
-        - green.lesser @ sigma_advanced
+    diagonal = (
+        np.einsum("wij,wji->wi", self_energy.retarded, green.lesser)
+        + np.einsum("wij,wji->wi", self_energy.lesser, green_advanced)
+        - np.einsum("wij,wji->wi", green.retarded, self_energy.lesser)
+        - np.einsum("wij,wji->wi", green.lesser, sigma_advanced)
     )
-    return _project_layer_spectra(problem, kernel)
+    return _project_layer_diagonal_spectra(problem, diagonal)
 
 
 def projected_collision_power_spectra(
@@ -171,11 +158,11 @@ def projected_collision_power_spectra(
     """
 
     _validate_problem_pair(problem, self_energy, green)
-    kernel = (
-        self_energy.greater @ green.lesser
-        - self_energy.lesser @ green.greater
+    diagonal = (
+        np.einsum("wij,wji->wi", self_energy.greater, green.lesser)
+        - np.einsum("wij,wji->wi", self_energy.lesser, green.greater)
     )
-    return _project_layer_spectra(problem, kernel)
+    return _project_layer_diagonal_spectra(problem, diagonal)
 
 
 def _harmonic_bond_current_is_valid(problem: CubicSCBAProblem) -> bool:
@@ -214,16 +201,32 @@ def bond_heat_current_spectra(
 
     if not isinstance(problem, CubicSCBAProblem):
         raise TypeError("problem must be a CubicSCBAProblem.")
-    if not isinstance(green, KeldyshSpectrum):
-        raise TypeError("green must be a KeldyshSpectrum.")
-    expected = (problem.grid.n_points, problem.ndof, problem.ndof)
-    if green.shape != expected:
-        raise ValueError(f"green must have shape {expected}; got {green.shape}.")
     if not _harmonic_bond_current_is_valid(problem):
         raise NotImplementedError(
             "The harmonic bond-current operator is incomplete because the "
             "cubic vertex crosses a layer boundary."
         )
+    return harmonic_cut_current_contribution_spectra(problem, green)
+
+
+def harmonic_cut_current_contribution_spectra(
+    problem: CubicSCBAProblem,
+    green: KeldyshSpectrum,
+) -> Array:
+    """Return only the harmonic contribution, including for cross-cut cubic support.
+
+    Positive current runs from layer I to I+1. Shape and units match
+    :func:`bond_heat_current_spectra`, but this explicitly partial observable
+    is available regardless of cubic topology. It omits the cubic Hamiltonian
+    current and must not be used to assert full spatial conservation.
+    """
+    if not isinstance(problem, CubicSCBAProblem):
+        raise TypeError("problem must be a CubicSCBAProblem.")
+    if not isinstance(green, KeldyshSpectrum):
+        raise TypeError("green must be a KeldyshSpectrum.")
+    expected = (problem.grid.n_points, problem.ndof, problem.ndof)
+    if green.shape != expected:
+        raise ValueError(f"green must have shape {expected}; got {green.shape}.")
 
     n_layers = problem.device.n_layers
     npl = problem.device.dof_per_layer
@@ -422,6 +425,7 @@ __all__ = [
     "collision_power",
     "contact_heat_current",
     "energy_exchange_spectrum",
+    "harmonic_cut_current_contribution_spectra",
     "projected_collision_power_spectra",
     "projected_eom_exchange_spectra",
     "self_energy_nonlocal_ratio",
