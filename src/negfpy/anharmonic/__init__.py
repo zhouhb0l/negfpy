@@ -68,6 +68,7 @@ from .crystal import (
 )
 from .cubic import cubic_lesser_greater
 from .cubic_cut_current import CubicCutCurrentOperator, build_cubic_cut_current_operator
+from .contracted_cubic_current import ContractedCubicCut, build_contracted_cubic_cut
 from .three_point import (
     combine_cubic_moments,
     connected_cubic_moments,
@@ -291,6 +292,8 @@ __all__ = [
     "ResearchCurrentDiagnostic",
     "CubicCutCurrentOperator",
     "build_cubic_cut_current_operator",
+    "ContractedCubicCut",
+    "build_contracted_cubic_cut",
     "combine_cubic_moments",
     "connected_cubic_moments",
     "correlations_from_green",
