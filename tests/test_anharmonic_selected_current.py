@@ -10,14 +10,19 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from negfpy.anharmonic import KeldyshSpectrum, SignedFrequencyGrid, SolverScale
+from negfpy.anharmonic import (
+    CENTERED_FIXED_FIELD_MEAN_POLICY,
+    KeldyshSpectrum,
+    SignedFrequencyGrid,
+    SolverScale,
+)
 from negfpy.anharmonic.contracted_cubic_current import build_contracted_cubic_cut
 from negfpy.anharmonic.selected_current import collect_selected_cut_spectra
 import negfpy.anharmonic.selected_current as selected_module
 from test_anharmonic_cubic_cut_current import _problem, _tensor
 
 
-POLICY = "centered-fixed-field-diagnostic"
+POLICY = CENTERED_FIXED_FIELD_MEAN_POLICY
 
 
 def _case():
@@ -88,9 +93,11 @@ def test_selected_two_cuts_match_full_green_and_preserve_inputs():
         np.testing.assert_allclose(result["harmonic"], 18 * expected_harmonic, atol=2e-16)
         assert result["mean_policy"] == POLICY
         assert result["harmonic_current_included"]
+        assert result["displacement_mean_prescribed_zero"]
         for label in ("physical_means_solved", "static_feedback_included", "counterterm_added",
                       "full_material_current_validated", "input_centering_verified",
-                      "spatial_validation_passed", "changes_solver_acceptance", "disconnected_means_included"):
+                      "spatial_validation_passed", "changes_solver_acceptance", "disconnected_means_included",
+                      "physical_force_balance_claimed", "posthoc_static_mean_allowed"):
             assert result[label] is False
     assert not spectra.metadata["frequency_accuracy_verified"]
     assert not spectra.metadata["full_green_frequency_history_retained"]

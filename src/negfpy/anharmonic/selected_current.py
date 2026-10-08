@@ -14,6 +14,9 @@ from .grid import SignedFrequencyGrid
 from .three_point import _complex
 
 
+CENTERED_FIXED_FIELD_MEAN_POLICY = "centered-fixed-field-diagnostic"
+
+
 @dataclass(frozen=True, slots=True)
 class SelectedCutSpectra:
     """Union of required greater-G rows and harmonic current spectra.
@@ -38,7 +41,7 @@ class SelectedCutSpectra:
         This labels a diagnostic of supplied bubble fields; it neither solves
         physical means nor retroactively adds a counterterm to their Hamiltonian.
         """
-        if mean_policy != "centered-fixed-field-diagnostic":
+        if mean_policy != CENTERED_FIXED_FIELD_MEAN_POLICY:
             raise ValueError("Explicit centered-fixed-field-diagnostic mean_policy is required.")
         if isinstance(cut, (bool, np.bool_)) or not isinstance(cut, (int, np.integer)):
             raise ValueError("cut must be an integer present in the selected spectra.")
@@ -64,8 +67,11 @@ class SelectedCutSpectra:
             "centered_total": total * plan.operator.current_scale,
             "harmonic_current_included": True,
             "physical_means_solved": False,
+            "displacement_mean_prescribed_zero": True,
+            "physical_force_balance_claimed": False,
             "static_feedback_included": False,
             "counterterm_added": False,
+            "posthoc_static_mean_allowed": False,
             "full_material_current_validated": False,
             "input_centering_verified": False,
         })
@@ -143,3 +149,10 @@ def collect_selected_cut_spectra(plans, grid, evaluate, *, max_evaluations,
         "changes_solver_acceptance": False,
     }
     return SelectedCutSpectra(plans, grid, rows, active, greater, harmonic, metadata)
+
+
+__all__ = [
+    "CENTERED_FIXED_FIELD_MEAN_POLICY",
+    "SelectedCutSpectra",
+    "collect_selected_cut_spectra",
+]

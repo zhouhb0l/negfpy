@@ -19,12 +19,16 @@ Evaluation-count and byte limits fail before allocation; the time limit is
 checked between calls. An enclosing process timeout is needed for stalled calls.
 
 For each cut, `selected.integrate(cut, lags,
-mean_policy="centered-fixed-field-diagnostic")` reports harmonic current,
+mean_policy=CENTERED_FIXED_FIELD_MEAN_POLICY)` reports harmonic current,
 connected one-vertex cubic current, and their centered sum. The harmonic term
 uses Re integral omega G<, while the connected kernel uses C=i integral G>
 and P=integral omega G>. The two Keldysh fields are never interchanged or inferred
 from a single equilibrium temperature. Each physical current scale is applied
 once. This path reuses the prior equal-coordinate-leg cut operator unchanged.
+
+The exported constant has the value `centered-fixed-field-diagnostic`. Its
+full research interpretation is fixed in the
+[Nq=1 mean-policy contract](research-nq1-mean-policy.md).
 
 The centering policy is an explicit diagnostic assumption. It does not solve
 static means, add a physical linear counterterm, or supply their induced
