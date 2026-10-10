@@ -5,6 +5,16 @@ Status: locked release roadmap with a remotely certified dense
 `0.2.0` gate. Exact conventions and current validation gaps are normative in
 `anharmonic_theory.md` and `anharmonic_validation.md`.
 
+## Research execution update — 2026-10-10
+
+Centered g=.03 equilibrium and biased SCBA are accepted for the declared
+research model. The completed eight-cut fixed-field diagnostic has a 0.011399%
+current spread relative to the contact; it does not certify a release.
+Lead-buffer construction and exact fixed-field mapping are now implemented;
+material buffer and interacting-crop invariance remain open. See
+[the current practical sequence](research-lead-buffer.md#current-practical-roadmap-2026-10-10).
+The historical release roadmap and its required gates follow below.
+
 ## 1. Decision
 
 Develop anharmonic transport as a subpackage:
