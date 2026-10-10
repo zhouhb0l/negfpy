@@ -70,6 +70,7 @@ from .cubic import cubic_lesser_greater
 from .cubic_cut_current import CubicCutCurrentOperator, build_cubic_cut_current_operator
 from .contracted_cubic_current import ContractedCubicCut, build_contracted_cubic_cut
 from .fixed_field_green import FixedFieldGreenEvaluator
+from .memory_diagnostics import diagnose_current_memory
 from .selected_current import (
     CENTERED_FIXED_FIELD_MEAN_POLICY,
     SelectedCutSpectra,
@@ -233,6 +234,7 @@ from .types import (
 
 __all__ = [
     "FixedFieldGreenEvaluator",
+    "diagnose_current_memory",
     "CENTERED_FIXED_FIELD_MEAN_POLICY",
     "SelectedCutSpectra",
     "collect_selected_cut_spectra",
