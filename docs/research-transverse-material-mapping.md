@@ -60,6 +60,41 @@ geometry, crop, scaling, and expansion metadata. Its coefficients use solver
 units; its term weights remain unapplied until `fourier_transverse_cubic`.
 Do not pass these terms through `mass_normalize_cubic_terms` again.
 
+For large image schedules, the additional `fourier_material_cubic` path
+constructs the complete reduced vertex without materializing scalar term
+objects:
+
+```python
+from negfpy.anharmonic.transverse_material import fourier_material_cubic
+
+streamed = fourier_material_cubic(
+    mesh,
+    normalized,
+    geometry,
+    n_device_layers=n_layers,
+    interaction_layers=interaction_layers,
+    scale=scale,
+)
+vertex = streamed.vertex
+```
+
+The returned `FourierMaterialCubic` contains `vertex` and immutable
+`metadata`. It performs a count-only geometry pass before dense allocation,
+then streams weighted 3×3×3 blocks into the vertex in a second pass. The
+source identities, all-leg crop, integer phase folding, weights, and solver
+conversion match the scalar path. No extra coupling-strength multiplier
+is applied; metadata records `coupling_applied=false`.
+
+Its default `max_bytes` is 64 MiB, `max_geometry_evaluations` is one
+million image/coset evaluations across both passes, and
+`max_phase_evaluations` is one million nonzero-scalar/momentum-pair
+contributions. These can be explicitly bounded for a larger input-only
+pilot without changing dense SCBA limits. The phase budget is
+\(N_q^2N_{\mathrm{scalar}}\), although one image phase is reused across
+its Cartesian components and longitudinal anchors. Metadata reports the
+retained scalar count, both geometry passes, phase-work count, and vertex
+payload bytes. It does not claim that scalar Python terms were created.
+
 The normalized FC3 builder currently requires a passing, complete
 permutation audit of the full raw source. Compact FC3 remains unsupported
 by that path until its paired certification is implemented. FC2 uses the
@@ -302,6 +337,15 @@ The synthetic `r0` case exercises representation weights; it is not a
 validation of shortest-image selection for an actual material dataset.
 These new reference cases validate the raw-input mapping and Fourier
 transforms; they do not add a material SCBA calculation.
+
+The later streaming path passed eight additional focused checks on its
+first run in 2.34 seconds, without fixes or rerun. The new file
+[`test_anharmonic_transverse_material_streaming.py`](../tests/test_anharmonic_transverse_material_streaming.py)
+compares streamed and scalar vertices on four fixtures covering Gamma,
+complex four-q phases, sheared cosets, duplicated images, `r0` expansion,
+two transverse axes, and all Cartesian block components. It also verifies
+that byte, geometry, phase-work, and changed-source rejection precede
+dense vertex allocation. The original 23-check result remains separate.
 
 Realistic IFC dataset integration, material-specific acoustic audits,
 interaction-crop and transverse-mesh convergence, strong-coupling
