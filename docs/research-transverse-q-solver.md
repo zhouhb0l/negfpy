@@ -306,10 +306,14 @@ The subsequent
 [crystal-image adapter](research-transverse-material-mapping.md) constructs
 the finite-device schedule and harmonic providers from audited source IFCs
 and passes 23 synthetic unit/reference checks.
+The [paired-q thermal contact builder](research-transverse-contacts.md)
+also passes 18 focused checks, including mixed acoustic/gapped supercell
+comparisons. It uses the continuous fixed-broadening zero-frequency limit
+in every stable sector; the older gapped helper's zero assignment remains
+a separate convention.
 
 No test on a single chosen frequency grid establishes its cutoff or
-quadrature accuracy. Actual material dataset integration, extending and
-verifying the existing Nq=1 acoustic-contact treatment for complex paired
-q, robustness at stronger coupling, scalable contraction, restart support,
-and q-mesh convergence remain separate work. The adapters have not yet
-mapped or solved an actual material dataset.
+quadrature accuracy. Actual material dataset integration, material-specific
+acoustic audits, robustness at stronger coupling, scalable contraction,
+restart support, and q-mesh convergence remain separate work.
+The adapters have not yet mapped or solved an actual material dataset.

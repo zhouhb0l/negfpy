@@ -33,7 +33,6 @@ from ._harmonic import (
 from .grid import SignedFrequencyGrid
 from .types import HarmonicReservoir, KeldyshSpectrum
 
-
 if TYPE_CHECKING:
     from .layered import LayeredHarmonicModel
 
@@ -641,14 +640,45 @@ def _build_acoustic_contact_descriptor(
     surface_gf_method: str,
     spectral_classification: _LeadSpectralClassification | None = None,
 ) -> _AcousticContactDescriptor:
-    if not np.isfinite(eta_lead) or eta_lead <= 0.0:
-        raise ValueError("eta_lead must be finite and strictly positive.")
+    """Keep the established acoustic-only entry point and zero convention."""
     spectral = spectral_classification or _classify_lead_spectrum(reservoir.lead)
     if spectral.classification != "acoustic" or not spectral.passed:
         raise ValueError(
             "an acoustic descriptor requires a lead classified as acoustic; "
             f"got {spectral.classification}."
         )
+    return _build_fixed_eta_contact_descriptor(
+        reservoir, side=side, ndof=ndof, eta_lead=eta_lead,
+        surface_gf_method=surface_gf_method, spectral_classification=spectral,
+    )
+
+
+def _build_fixed_eta_contact_descriptor(
+    reservoir: HarmonicReservoir,
+    *,
+    side: ContactSide,
+    ndof: int,
+    eta_lead: float,
+    surface_gf_method: str,
+    spectral_classification: _LeadSpectralClassification | None = None,
+) -> _AcousticContactDescriptor:
+    """Shared fixed-eta derivative for stable acoustic or gapped sectors.
+
+    Gapped sectors also have a nonzero Gamma/omega limit at finite eta.
+    The new transverse path uses that limit consistently across all q.
+    Existing gapped contact construction does not call this helper.
+    The internal descriptor shape and acoustic payload identity are retained.
+    """
+    if not np.isfinite(eta_lead) or eta_lead <= 0.0:
+        raise ValueError("eta_lead must be finite and strictly positive.")
+    spectral = spectral_classification or _classify_lead_spectrum(reservoir.lead)
+    if spectral.classification not in {"acoustic", "gapped"} or not spectral.passed:
+        raise ValueError(
+            "a fixed-eta descriptor requires a stable acoustic or gapped lead; "
+            f"got {spectral.classification}."
+        )
+    if spectral.lead_physics_sha256 != harmonic_lead_physics_sha256(reservoir.lead):
+        raise ValueError("Cached spectral classification belongs to a different lead.")
     method = surface_gf_method.strip().lower()
     a, b = _surface_orientation(reservoir.lead, side)
     if method in {"analytic_diagonal", "analytic-diagonal"}:

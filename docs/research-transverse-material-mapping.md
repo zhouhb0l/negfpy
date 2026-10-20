@@ -250,12 +250,13 @@ transverse coordinates as the cubic input interface.
 Reservoir temperatures, broadening, and contact coupling choices remain
 explicit caller inputs to `build_transverse_problem`. This adapter does not
 define an acoustic zero-frequency prescription. The existing gapped contact
-helper is suitable only for leads that satisfy its gap guard. The audited
-Nq=1 acoustic treatment already exists in
-[`contacts.py`](../src/negfpy/anharmonic/contacts.py) and
-[`acoustic_contacts.py`](../src/negfpy/anharmonic/acoustic_contacts.py).
-Extending and verifying that path for complex paired-q contacts remains
-separate work; the new geometry adapter does not imply that extension.
+helper is suitable only for leads that satisfy its gap guard. The separate
+[paired-q contact builder](research-transverse-contacts.md) now extends the
+existing Nq=1 acoustic descriptor machinery to complex q pairs, with
+18 focused unit/reference checks passing. It provides the continuous fixed-broadening
+zero limit in both acoustic and gapped stable sectors and supplies
+precomputed `at_q` callbacks to the mapped problem. The older gapped
+helper retains its different zero-node convention.
 
 ## Bounds and validation status
 
@@ -302,8 +303,8 @@ validation of shortest-image selection for an actual material dataset.
 These new reference cases validate the raw-input mapping and Fourier
 transforms; they do not add a material SCBA calculation.
 
-Realistic IFC dataset integration, complex paired-q acoustic-contact
-validation, interaction-crop and transverse-mesh convergence,
-strong-coupling robustness, and computational scaling remain later stages.
+Realistic IFC dataset integration, material-specific acoustic audits,
+interaction-crop and transverse-mesh convergence, strong-coupling
+robustness, and computational scaling remain later stages.
 This code introduces no material transport or release claim and does not
 change the accepted Nq=1 results.

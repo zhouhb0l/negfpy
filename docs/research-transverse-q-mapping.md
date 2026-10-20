@@ -213,13 +213,15 @@ positive frequencies within the same q; physical reflection pairs q
 with \(-q\).
 
 The gapped helper does not supply an acoustic or Ohmic Bose-times-broadening
-limit. The existing audited Nq=1 acoustic descriptors in `contacts.py` and
-`acoustic_contacts.py` provide a basis for later complex paired-q
-extension and verification. Such reservoirs require a separately declared
-callback implementing their zero-frequency prescription. The general
-callback path checks the supplied joint identities and correlation
-positivity; passing those checks alone does not certify an arbitrary
-callback as a passive, thermal, or causal reservoir model.
+limit. The separate [paired-q contact builder](research-transverse-contacts.md)
+now extends the existing acoustic descriptor machinery to complex q pairs.
+It uses the continuous fixed-broadening zero limit in every stable sector,
+including gapped ones, and passes 18 focused unit/reference checks. Its `at_q`
+method supplies a precomputed callback to this interface. The older gapped
+helper's zero assignment is unchanged and is a different convention.
+The general callback path checks the supplied joint identities and
+correlation positivity; passing those checks alone does not certify an
+arbitrary callback as a passive, thermal, or causal reservoir model.
 
 The default Fourier guards allow 100,000 input cubic contributions,
 1,000,000 phase evaluations, and a 64 MiB dense reduced-vertex payload.
@@ -250,11 +252,11 @@ tests and four independent raw-image reference cases pass; see the
 The old Nq=1 mapped harmonic and cubic objects have already collapsed
 transverse winding and cannot reconstruct that information.
 
-Extension and verification of the existing acoustic-contact path for
-complex paired q, realistic dataset validation, boundary-model convergence,
-and material transport remain explicit later work. Neither adapter
-silently infers missing terms or adds symmetrization or acoustic-sum-rule
-corrections.
+The paired-q acoustic-contact extension passes its focused synthetic
+validation. Realistic dataset validation, material-specific
+acoustic audits, boundary-model convergence, and material transport remain
+explicit later work. Neither adapter silently infers missing terms or
+adds symmetrization or acoustic-sum-rule corrections.
 
 ## Validation
 
