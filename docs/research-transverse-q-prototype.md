@@ -172,8 +172,10 @@ G^<(q,-\omega)=G^>(-q,\omega)^T.
 The self-energies obey the corresponding relation. Applying a same-q
 Nq=1 frequency-reflection rule independently at each q is generally
 incorrect. This becomes visible on a four-point mesh containing opposite
-quarter-period momenta. A later coupled-q solver must adapt its field
-validation, reconstruction, and iteration to these paired identities.
+quarter-period momenta. The subsequent
+[bounded coupled-q toy solver](research-transverse-q-solver.md) implements
+field validation, reconstruction, and iteration with these paired
+identities.
 
 The algebraic Born kernel can also be tested with arbitrary finite complex
 Green arrays. Agreement in such a test checks the contraction and Fourier
@@ -241,3 +243,11 @@ greater use the same supported tuples. The stored vertex and combined
 output-array payload each have a default 64 MiB limit. These are array and
 work guards, not a process-memory guarantee. The reference implementation
 uses deterministic direct sums and is intended for small tests.
+
+The next milestone is implemented separately in
+[`transverse_solver.py`](../src/negfpy/anharmonic/transverse_solver.py):
+a bounded toy SCBA iteration with independent one- and four-q dense
+real-space comparisons. Its
+[solver guide](research-transverse-q-solver.md) records the API, passing
+checks, and remaining scope. The Born kernel documented here remains a
+contraction of supplied Green functions; it does not itself solve SCBA.
