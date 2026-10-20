@@ -5,7 +5,23 @@ Status: locked release roadmap with a remotely certified dense
 `0.2.0` gate. Exact conventions and current validation gaps are normative in
 `anharmonic_theory.md` and `anharmonic_validation.md`.
 
-## Research execution update — 2026-10-10
+## Research execution update — 2026-10-20
+
+A bounded dense coupled-q Born reference is now implemented in
+`transverse_q.py`. It retains the full q-prime sum, exact momentum folding,
+complex cubic-vertex phases and the explicit `1/Nq` weight. Independent finite
+supercell tests cover 1x1, 2x1, 4x1 and 2x2 meshes, including Nq=1 reduction,
+cell-origin covariance and paired q/frequency bosonic identities. See
+[the prototype conventions and API](research-transverse-q-prototype.md).
+
+This is a synthetic contraction milestone. Coupled-q Dyson/Keldysh iteration,
+retarded reconstruction, material FC3 Fourier mapping and material transport
+are not implemented by it. The next bounded step is a coupled-q toy solver
+with joint opposite-q field validation. Existing Nq=1 fields and scientific
+acceptance remain separate; the prototype does not grant an Nq=1 or multi-q
+material release.
+
+## Historical research execution update — 2026-10-10
 
 Centered g=.03 equilibrium and biased SCBA are accepted for the declared
 research model. The completed eight-cut fixed-field diagnostic has a 0.011399%
@@ -783,7 +799,7 @@ The annotated tag `v0.1.0-rc1` identifies this passed toy release.
 | `0.1.0` | Python-only dense cubic SCBA for validated toy models | **Passed.** Exact commit `ad255896...` is tagged `v0.1.0-rc1`; the strict remote report declares `release_certified=true`. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions and do not calibrate the production prefactor. |
 | `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | In progress. Full/compact FC2/FC3 ingestion, immutable crystal mapping, translational FC3, deterministic mode-space interactions and linewidths, exact 3x3x3 scientific agreement, task-level target-\(q\) MPI, independent phono3py MPI reference generation, bounded \(V^{(3)}\) sampling, and strict evidence aggregation are implemented. Release remains blocked on exact-new-commit 3x3x3 and 5x5x5 serial/MPI equality plus the complete 11x11x11 external campaign. |
 | `0.3.0` | Sparse real-space SCBA for quasi-1D material devices | Development implementation exists: complete-support `SparseCubicVertex`, authenticated silicon (N_q=1) mapping, atomic SCBA checkpoints, and bounded dense/sparse equality tests. Release remains blocked on the refined material fixed-point, conservation, refinement, and lead-buffer-invariance archive. See `docs/validation/sparse-nq1-phase-c.md`. |
-| `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Not implemented. It requires explicit coupled \(q'\) sums, momentum folding, and validated \(1/N_q\) normalization. |
+| `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Bounded coupled-q Born reference implemented and checked against small real-space supercells, including complex vertices, exact folding and \(1/N_q\) normalization. The coupled-q self-consistent solver and material mapping remain unimplemented; see `research-transverse-q-prototype.md`. |
 | `1.0.0` | Silicon/interface paper benchmarks, restart, convergence archive, production CPU performance | The private atomic HDF5 mechanism is implemented, but release restart equivalence and the material/performance benchmarks are not. The attached Guo papers define later targets; they are not evidence for the dense toy candidate. |
 
 Optional LOA/Padé, local self-energy approximations, quartic
