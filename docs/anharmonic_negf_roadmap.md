@@ -5,7 +5,7 @@ Status: locked release roadmap with a remotely certified dense
 `0.2.0` gate. Exact conventions and current validation gaps are normative in
 `anharmonic_theory.md` and `anharmonic_validation.md`.
 
-## Research execution update — 2026-10-20
+## Research execution update — 2026-10-21
 
 A bounded dense coupled-q Born reference is now implemented in
 `transverse_q.py`. It retains the full q-prime sum, exact momentum folding,
@@ -43,9 +43,17 @@ It applies the continuous fixed-broadening zero-frequency limit to every
 stable sector, including gapped ones, and checks the full signed mesh
 jointly. Its 16 unit tests and two independent supercell references pass; see
 [the contact conventions and API](research-transverse-contacts.md).
-Actual material dataset integration and material transport remain later
-stages. Existing Nq=1 fields and scientific acceptance remain separate;
-these prototypes grant no Nq=1 or multi-q material release.
+The next stage is now in preparation: an actual-material input pilot on
+four transverse q points, retaining the nine-layer geometry, declared
+interaction crop, \(g=.03\), and fixed lead/device broadening. It will
+check the complete unscaled vertex and report its norms at \(g=.03\),
+alongside a three-node contact window without SCBA or current integration.
+A streaming 3×3×3 image-block mapper avoids materializing the scalar term
+schedule and passes eight new focused checks. See
+[the bounded material-input scope](research-transverse-material-pilot.md).
+Material transport and scalable SCBA remain later stages. Existing Nq=1
+fields and scientific acceptance remain separate; these prototypes grant
+no Nq=1 or multi-q material release.
 
 ## Historical research execution update — 2026-10-10
 
