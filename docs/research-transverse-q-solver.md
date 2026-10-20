@@ -296,7 +296,15 @@ These checks complement the earlier Born-kernel tests, including
 cell-origin covariance. They do not certify arbitrary supplied contact
 fields as thermal, passive, or causal reservoirs.
 
+The subsequent
+[explicit real-space input adapter](research-transverse-q-mapping.md)
+is implemented and passes 26 focused mapping/reference tests. It maps
+finite-device cubic terms with transverse offsets, supplies declared FC2/FC3 unit conversions,
+and joins harmonic providers and signed contact callbacks to this solver.
+It includes a gapped harmonic-contact helper.
+
 No test on a single chosen frequency grid establishes its cutoff or
-quadrature accuracy. Robustness at stronger coupling, material Fourier
-mapping, realistic q-dependent contacts, scalable contraction, restart
-support, and q-mesh convergence remain separate work.
+quadrature accuracy. Raw material IFC-to-finite-device mapping, acoustic
+contact handling, robustness at stronger coupling, scalable contraction,
+restart support, and q-mesh convergence remain separate work. The adapter
+has not yet mapped or solved an actual material dataset.

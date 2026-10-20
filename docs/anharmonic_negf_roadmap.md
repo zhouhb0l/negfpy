@@ -25,9 +25,16 @@ as do focused harmonic-current, equilibrium, reflection, positivity, and
 iteration-control tests. The final combined run passes all 20 solver tests.
 See
 [the solver implementation and validation](research-transverse-q-solver.md).
-Material FC3 Fourier mapping and material transport remain outside this
-milestone. Existing Nq=1 fields and scientific acceptance remain separate;
-neither prototype grants an Nq=1 or multi-q material release.
+An explicit real-space input adapter is now implemented in
+`transverse_mapping.py` and passes 26 focused mapping/reference tests.
+It preserves finite transport indices while Fourier transforming transverse cubic offsets,
+provides declared mass/unit conversion, and joins harmonic providers and
+signed contact callbacks; a gapped harmonic-contact helper is included.
+See [the mapping interface and boundaries](research-transverse-q-mapping.md).
+Mapping actual raw IFC datasets into the required finite-device schedule
+and material transport remain later stages. Existing Nq=1 fields and
+scientific acceptance remain separate; these prototypes grant no Nq=1 or
+multi-q material release.
 
 ## Historical research execution update — 2026-10-10
 
@@ -807,7 +814,7 @@ The annotated tag `v0.1.0-rc1` identifies this passed toy release.
 | `0.1.0` | Python-only dense cubic SCBA for validated toy models | **Passed.** Exact commit `ad255896...` is tagged `v0.1.0-rc1`; the strict remote report declares `release_certified=true`. Mingo and Wang \(O(T^4)\) remain nonblocking historical extensions and do not calibrate the production prefactor. |
 | `0.2.0` | phono3py FC3 import and bulk three-phonon linewidth validation | In progress. Full/compact FC2/FC3 ingestion, immutable crystal mapping, translational FC3, deterministic mode-space interactions and linewidths, exact 3x3x3 scientific agreement, task-level target-\(q\) MPI, independent phono3py MPI reference generation, bounded \(V^{(3)}\) sampling, and strict evidence aggregation are implemented. Release remains blocked on exact-new-commit 3x3x3 and 5x5x5 serial/MPI equality plus the complete 11x11x11 external campaign. |
 | `0.3.0` | Sparse real-space SCBA for quasi-1D material devices | Development implementation exists: complete-support `SparseCubicVertex`, authenticated silicon (N_q=1) mapping, atomic SCBA checkpoints, and bounded dense/sparse equality tests. Release remains blocked on the refined material fixed-point, conservation, refinement, and lead-buffer-invariance archive. See `docs/validation/sparse-nq1-phase-c.md`. |
-| `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Bounded coupled-q Born reference implemented and checked against small real-space supercells, including complex vertices, exact folding and \(1/N_q\) normalization. The bounded toy SCBA solver passes one- and four-q self-consistent dense-supercell comparisons plus focused physical and iteration-control tests. Strong-coupling robustness, material mapping, material transport, and computational scaling remain later work. See `research-transverse-q-prototype.md` and `research-transverse-q-solver.md`. |
+| `0.4.0` | Transverse-momentum SCBA for 2D/3D geometries | Bounded coupled-q Born and toy SCBA implementations pass small dense-supercell comparisons and focused physical/iteration-control tests. The explicit real-space term/harmonic/contact adapter passes 26 focused tests, including independent DFT and SCBA comparisons. Actual raw IFC-to-finite-device mapping, acoustic contacts, strong-coupling robustness, material transport, and computational scaling remain later work. See `research-transverse-q-prototype.md`, `research-transverse-q-solver.md`, and `research-transverse-q-mapping.md`. |
 | `1.0.0` | Silicon/interface paper benchmarks, restart, convergence archive, production CPU performance | The private atomic HDF5 mechanism is implemented, but release restart equivalence and the material/performance benchmarks are not. The attached Guo papers define later targets; they are not evidence for the dense toy candidate. |
 
 Optional LOA/Padé, local self-energy approximations, quartic
