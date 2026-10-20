@@ -302,9 +302,14 @@ is implemented and passes 26 focused mapping/reference tests. It maps
 finite-device cubic terms with transverse offsets, supplies declared FC2/FC3 unit conversions,
 and joins harmonic providers and signed contact callbacks to this solver.
 It includes a gapped harmonic-contact helper.
+The subsequent
+[crystal-image adapter](research-transverse-material-mapping.md) constructs
+the finite-device schedule and harmonic providers from audited source IFCs
+and passes 23 synthetic unit/reference checks.
 
 No test on a single chosen frequency grid establishes its cutoff or
-quadrature accuracy. Raw material IFC-to-finite-device mapping, acoustic
-contact handling, robustness at stronger coupling, scalable contraction,
-restart support, and q-mesh convergence remain separate work. The adapter
-has not yet mapped or solved an actual material dataset.
+quadrature accuracy. Actual material dataset integration, extending and
+verifying the existing Nq=1 acoustic-contact treatment for complex paired
+q, robustness at stronger coupling, scalable contraction, restart support,
+and q-mesh convergence remain separate work. The adapters have not yet
+mapped or solved an actual material dataset.

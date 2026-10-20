@@ -9,10 +9,12 @@ All 26 focused mapping tests pass, including independent real-space DFT
 and self-consistent comparisons. No actual material dataset has been
 mapped or solved by this milestone.
 
-The adapter establishes an interface for later material integration. It
-does not derive a finite-device interaction crop from raw FC3, recover
-transverse phases from old Nq=1 fields, or certify material transport.
-Accepted Nq=1 inputs and historical results remain separate.
+This module accepts an explicit finite-device interaction schedule.
+The subsequent [crystal-image adapter](research-transverse-material-mapping.md)
+now constructs that schedule from audited source IFCs and passes 23
+focused synthetic checks. Neither path recovers transverse phases from old
+Nq=1 fields or certifies material transport. Accepted Nq=1 inputs and
+historical results remain separate.
 
 ## API
 
@@ -211,11 +213,13 @@ positive frequencies within the same q; physical reflection pairs q
 with \(-q\).
 
 The gapped helper does not supply an acoustic or Ohmic Bose-times-broadening
-limit. Such reservoirs require a separately declared callback implementing
-their analytic zero-frequency prescription. The general callback path
-checks the supplied joint identities and correlation positivity; passing
-those checks alone does not certify an arbitrary callback as a passive,
-thermal, or causal reservoir model.
+limit. The existing audited Nq=1 acoustic descriptors in `contacts.py` and
+`acoustic_contacts.py` provide a basis for later complex paired-q
+extension and verification. Such reservoirs require a separately declared
+callback implementing their zero-frequency prescription. The general
+callback path checks the supplied joint identities and correlation
+positivity; passing those checks alone does not certify an arbitrary
+callback as a passive, thermal, or causal reservoir model.
 
 The default Fourier guards allow 100,000 input cubic contributions,
 1,000,000 phase evaluations, and a 64 MiB dense reduced-vertex payload.
@@ -235,19 +239,22 @@ transform also sums transport offsets. Setting the longitudinal momentum
 to zero would still collapse those offsets; it would not create a
 finite-device interaction.
 
-A later material adapter must retain the explicit source terms, map each
-leg to a finite transport-layer DOF and an integer transverse cell,
-translate the phase convention, preserve image and optional anchor-average
-weights, and enforce the declared interaction crop. It must join the FC2
-and FC3 geometries and unit conventions before calling this adapter.
+The separate implementation in `transverse_material.py` now retains the
+explicit audited source terms, maps each leg to a finite transport-layer
+DOF and an integer transverse cell, preserves image and optional
+anchor-average weights, and enforces a declared all-leg interaction crop.
+It joins the FC2 and FC3 primitive identities and unit conventions, and
+regenerates the FC2 image phases from the source geometry. Its 19 unit
+tests and four independent raw-image reference cases pass; see the
+[crystal-to-device mapping guide](research-transverse-material-mapping.md).
 The old Nq=1 mapped harmonic and cubic objects have already collapsed
 transverse winding and cannot reconstruct that information.
 
-That source-to-device mapping remains unimplemented here. Shortest-image
-selection, transport principal-layer construction, boundary support,
-acoustic contacts, realistic dataset validation, and material convergence
-remain explicit later work. No automatic term inference, range truncation,
-symmetrization, or acoustic-sum-rule correction is implied by this API.
+Extension and verification of the existing acoustic-contact path for
+complex paired q, realistic dataset validation, boundary-model convergence,
+and material transport remain explicit later work. Neither adapter
+silently infers missing terms or adds symmetrization or acoustic-sum-rule
+corrections.
 
 ## Validation
 
