@@ -138,6 +138,16 @@ class _LeadSpectralClassification:
     curvature_eigenvalues_half_h: Array
     curvature_consistent: bool
     soft_minima_q: Array
+    soft_minima_branches: Array
+    soft_minima_eigenvalues: Array
+    soft_minima_brackets: Array
+    soft_minima_gamma_compatible: Array
+    gamma_basin_resolved: bool
+    gamma_basin_curvatures: Array
+    gamma_q_resolution: float
+    gamma_energy_resolution: float
+    gamma_slope_norm: float
+    gamma_slope_tolerance: float
     failure_reasons: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -169,6 +179,14 @@ class _LeadSpectralClassification:
             "soft_minima_q",
             _readonly(self.soft_minima_q, dtype=np.dtype(np.float64)),
         )
+        for name in ("soft_minima_eigenvalues", "soft_minima_brackets", "gamma_basin_curvatures"):
+            object.__setattr__(self, name, _readonly(getattr(self, name), dtype=np.dtype(np.float64)))
+        object.__setattr__(self, "soft_minima_branches", _readonly(
+            self.soft_minima_branches, dtype=np.dtype(np.int64),
+        ))
+        object.__setattr__(self, "soft_minima_gamma_compatible", _readonly(
+            self.soft_minima_gamma_compatible, dtype=np.dtype(np.bool_),
+        ))
 
 
 def _validate_q_samples(q_samples: int) -> int:
@@ -204,7 +222,9 @@ def _classify_lead_spectrum(
 
     shifted_low = np.asarray([branch_value(q, 0) for q in shifted_q])
     shifted_minimum = min(float(np.min(shifted_low)), branch_value(0.0, 0))
-    shifted_refined: list[tuple[float, float]] = []
+    # Keep the optimizer's original location, value and bracket. A minimum
+    # below frequency resolution is not a precisely determined q coordinate.
+    shifted_refined: list[tuple[float, float, float, float]] = []
     shifted_candidates = [
         index
         for index in range(count)
@@ -222,7 +242,9 @@ def _classify_lead_spectrum(
         if not result.success or not np.isfinite(result.fun):
             raise ValueError("could not refine the harmonic lead band minimum.")
         shifted_minimum = min(shifted_minimum, float(result.fun))
-        shifted_refined.append((float(result.x), float(result.fun)))
+        shifted_refined.append((
+            float(result.x), float(result.fun), center - shifted_step, center + shifted_step,
+        ))
 
     empty = np.empty((0,), dtype=np.float64)
     empty_modes = np.empty((d00.shape[0], 0), dtype=np.complex128)
@@ -248,6 +270,16 @@ def _classify_lead_spectrum(
             curvature_eigenvalues_half_h=empty,
             curvature_consistent=True,
             soft_minima_q=empty,
+            soft_minima_branches=np.empty(0, dtype=np.int64),
+            soft_minima_eigenvalues=empty,
+            soft_minima_brackets=np.empty((0, 2)),
+            soft_minima_gamma_compatible=np.empty(0, dtype=bool),
+            gamma_basin_resolved=False,
+            gamma_basin_curvatures=np.empty((0, 0)),
+            gamma_q_resolution=0.0,
+            gamma_energy_resolution=0.0,
+            gamma_slope_norm=0.0,
+            gamma_slope_tolerance=0.0,
             failure_reasons=(),
         )
 
@@ -285,10 +317,10 @@ def _classify_lead_spectrum(
         dtype=np.float64,
     )
     sampled_minimum = float(np.min(spectra))
-    refined_minimum = min(sampled_minimum, float(np.min(gamma_values)))
-    soft_locations: list[float] = [
-        qpoint
-        for qpoint, value in shifted_refined
+    refined_minimum = min(shifted_minimum, sampled_minimum, float(np.min(gamma_values)))
+    soft_candidates: list[tuple[int, float, float, float, float]] = [
+        (0, qpoint, value, lower, upper)
+        for qpoint, value, lower, upper in shifted_refined
         if value <= eigenvalue_tolerance
     ]
     for branch in range(d00.shape[0]):
@@ -312,7 +344,10 @@ def _classify_lead_spectrum(
                 raise ValueError("could not refine a soft harmonic-lead basin.")
             refined_minimum = min(refined_minimum, float(result.fun))
             if float(result.fun) <= eigenvalue_tolerance:
-                soft_locations.append(float(result.x))
+                soft_candidates.append((
+                    branch, float(result.x), float(result.fun),
+                    center - shifted_step, center + shifted_step,
+                ))
 
     h = 2.0 * np.pi / 1024.0
     curvature_values: list[Array] = []
@@ -338,6 +373,54 @@ def _classify_lead_spectrum(
         )
     )
 
+    # The projected second derivative above omits optical relaxation. Measure
+    # the actual lowest branches before assigning a q-resolution radius: a
+    # quartic or flat branch can have positive *projected* curvature.
+    energy_resolution = 4.0 * eigenvalue_tolerance
+    slope_tolerance = max(128.0 * _EPS * full_scale, energy_resolution / h)
+    slope_norm, q_resolution = 0.0, 0.0
+    basin_curvatures = np.empty((0, 0), dtype=np.float64)
+    basin_resolved = False
+    if nullity and np.all(null[:nullity]) and not np.any(null[nullity:]):
+        slope = nullspace.conj().T @ (1j * (d01 - d10)) @ nullspace
+        slope_norm = float(np.linalg.norm(slope, ord=2))
+        probes = np.asarray((-h, -h / 2.0, h / 2.0, h))
+        probe_spectra = np.asarray([
+            np.linalg.eigvalsh(_bulk_dynamical(d00, d01, d10, q))[:nullity]
+            for q in probes
+        ])
+        refined_minimum = min(refined_minimum, float(np.min(probe_spectra)))
+        rises = probe_spectra - gamma_values[:nullity]
+        basin_curvatures = rises / probes[:, None]**2
+        lower = np.min(basin_curvatures, axis=0)
+        upper = np.max(basin_curvatures, axis=0)
+        # A rise subtracts two uncertain eigenvalues; compare the two most
+        # uncertain coefficients conservatively when checking quadratic form.
+        coefficient_error = 2.0 * eigenvalue_tolerance / probes**2
+        quadratic = bool(np.all(
+            upper - lower <= 5.0e-3 * upper + 2.0 * np.max(coefficient_error)
+        ))
+        if (curvature_consistent and slope_norm <= slope_tolerance
+                and np.all(rises > 32.0 * eigenvalue_tolerance) and quadratic):
+            lower_curvature = 0.5 * float(np.min(basin_curvatures))
+            proposed_resolution = float(np.sqrt(energy_resolution / lower_curvature))
+            # The unresolved core must fit well inside the sampled local basin.
+            if proposed_resolution < h / 4.0:
+                q_resolution = proposed_resolution
+                basin_resolved = True
+
+    compatible, outside_gamma = [], []
+    for branch, qpoint, value, lower, upper in soft_candidates:
+        equivalent_gamma = 2.0 * np.pi * round(qpoint / (2.0 * np.pi))
+        gamma_candidate = bool(
+            null[branch]
+            and lower <= equivalent_gamma <= upper
+            and abs(value - gamma_values[branch]) <= energy_resolution
+        )
+        resolved_displacement = basin_resolved and _wrapped_abs_q(qpoint) > q_resolution
+        outside_gamma.append(not gamma_candidate or resolved_displacement)
+        compatible.append(basin_resolved and gamma_candidate and not resolved_displacement)
+
     failures: list[str] = []
     if refined_minimum < -stability_tolerance:
         classification: LeadKind = "unstable"
@@ -347,10 +430,16 @@ def _classify_lead_spectrum(
             failures.append("Gamma has no acoustic nullspace")
         if asr_residual / full_scale > 1.0e-10:
             failures.append("Gamma-nullspace residual exceeds the ASR tolerance")
-        if any(_wrapped_abs_q(q) > 1.0e-7 for q in soft_locations):
+        if any(outside_gamma):
             failures.append("a soft local minimum is not at Gamma")
+        elif not all(compatible):
+            failures.append("a soft local minimum has unresolved Gamma compatibility")
         if not curvature_consistent:
             failures.append("acoustic curvature is nonpositive or unresolved")
+        if slope_norm > slope_tolerance:
+            failures.append("Gamma-nullspace first derivative is resolved")
+        if not basin_resolved:
+            failures.append("Gamma acoustic basin is nonquadratic or unresolved")
         classification = "acoustic" if not failures else "invalid-soft"
 
     return _LeadSpectralClassification(
@@ -372,7 +461,17 @@ def _classify_lead_spectrum(
         curvature_eigenvalues_h=curvature_values[0],
         curvature_eigenvalues_half_h=curvature_values[1],
         curvature_consistent=curvature_consistent,
-        soft_minima_q=np.asarray(soft_locations, dtype=np.float64),
+        soft_minima_q=np.asarray([c[1] for c in soft_candidates], dtype=np.float64),
+        soft_minima_branches=np.asarray([c[0] for c in soft_candidates], dtype=np.int64),
+        soft_minima_eigenvalues=np.asarray([c[2] for c in soft_candidates], dtype=np.float64),
+        soft_minima_brackets=np.asarray([c[3:] for c in soft_candidates], dtype=np.float64).reshape(-1, 2),
+        soft_minima_gamma_compatible=np.asarray(compatible, dtype=bool),
+        gamma_basin_resolved=basin_resolved,
+        gamma_basin_curvatures=basin_curvatures,
+        gamma_q_resolution=q_resolution,
+        gamma_energy_resolution=energy_resolution,
+        gamma_slope_norm=slope_norm,
+        gamma_slope_tolerance=slope_tolerance,
         failure_reasons=tuple(failures),
     )
 
@@ -400,6 +499,14 @@ class HarmonicLeadClassification:
     curvature_eigenvalues_h: Array
     curvature_eigenvalues_half_h: Array
     soft_minima_q: Array
+    soft_minima_gamma_compatible: Array
+    gamma_basin_resolved: bool
+    gamma_basin_curvatures: Array
+    gamma_q_resolution: float
+    gamma_energy_resolution: float
+    gamma_slope_norm: float
+    gamma_slope_tolerance: float
+    classification_policy: str
     failure_reasons: tuple[str, ...]
     classification_sha256: str
 
@@ -409,12 +516,16 @@ class HarmonicLeadClassification:
             "curvature_eigenvalues_h",
             "curvature_eigenvalues_half_h",
             "soft_minima_q",
+            "gamma_basin_curvatures",
         ):
             object.__setattr__(
                 self,
                 name,
                 _readonly(getattr(self, name), dtype=np.dtype(np.float64)),
             )
+        object.__setattr__(self, "soft_minima_gamma_compatible", _readonly(
+            self.soft_minima_gamma_compatible, dtype=np.dtype(np.bool_),
+        ))
 
 
 def classify_harmonic_lead(
@@ -502,7 +613,16 @@ def classify_harmonic_lead(
         "negfpy-solver-scale-v1",
         {"omega0": float(model.scale.omega0), "hbar": float(model.scale.hbar)},
     )
+    gamma_evidence = {
+        name: getattr(spectral, name) for name in (
+            "soft_minima_gamma_compatible", "gamma_basin_resolved", "gamma_basin_curvatures",
+            "gamma_q_resolution", "gamma_energy_resolution", "gamma_slope_norm",
+            "gamma_slope_tolerance",
+        )
+    }
+    gamma_evidence["classification_policy"] = "gamma-basin-resolution-v1"
     payload = {
+        **gamma_evidence,
         "classification": classification,
         "lead_physics_sha256": digest_bytes(spectral.lead_physics_sha256),
         "fc2_content_sha256": digest_bytes(model.fc2_content_sha256),
@@ -527,8 +647,9 @@ def classify_harmonic_lead(
         "soft_minima_q": np.asarray(spectral.soft_minima_q, dtype=np.float64),
         "failure_reasons": tuple(failures),
     }
-    report_hash = domain_digest("negfpy-harmonic-lead-classification-v1", payload)
+    report_hash = domain_digest("negfpy-harmonic-lead-classification-v2", payload)
     return HarmonicLeadClassification(
+        **gamma_evidence,
         classification=classification,
         passed=passed,
         lead_physics_sha256=spectral.lead_physics_sha256,

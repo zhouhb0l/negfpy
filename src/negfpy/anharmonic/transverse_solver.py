@@ -17,6 +17,11 @@ import numpy as np
 from .grid import SignedFrequencyGrid
 from .momentum import UniformBZMesh
 from .retarded import retarded_from_keldysh
+from .transverse_fft import (
+    _active_coordinates,
+    _workspace_bytes,
+    cubic_born_self_energy_q_fft,
+)
 from .transverse_q import TransverseCubicVertex, cubic_born_self_energy_q
 from .types import SolverScale
 
@@ -198,8 +203,13 @@ class TransverseSCBAConfig:
     identity_rtol: float = 1e-8
     identity_atol: float = 1e-11
     max_pair_evaluations: int = 100_000
+    born_backend: str = "direct"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.born_backend, str):
+            raise TypeError("born_backend must be 'direct' or 'fft'.")
+        if self.born_backend not in ("direct", "fft"):
+            raise ValueError("born_backend must be 'direct' or 'fft'.")
         _positive_integer(self.max_iterations, "max_iterations")
         _positive_integer(self.max_pair_evaluations, "max_pair_evaluations")
         _nonnegative(self.mixing, "mixing")
@@ -246,6 +256,7 @@ class TransverseSCBAResult:
     sigma_pp: TransverseSpectrum
     currents: TransverseCurrents
     history: tuple[TransverseIteration, ...]
+    born_backend: str = "direct"
 
 
 def transverse_heat_current(
@@ -309,7 +320,21 @@ def solve_transverse_scba(
         raise TypeError("config must be a TransverseSCBAConfig.")
     mesh, grid = problem.vertex.mesh, problem.grid
     # Guard a complete map before doing any Dyson or PV work.
-    pairs = mesh.n_qpoints**2 * (3 * grid.n_positive**2 + 3 * grid.n_positive + 1)
+    if config.born_backend == "direct":
+        pairs = mesh.n_qpoints**2 * (3 * grid.n_positive**2 + 3 * grid.n_positive + 1)
+        born_map = cubic_born_self_energy_q
+    else:
+        # Reuse the kernel's exact-support planner; a full-D estimate would
+        # incorrectly reject valid sparse-support FFT problems.
+        active = len(_active_coordinates(problem.vertex.coefficients))
+        n_fft = 1 << (2 * grid.n_points - 2).bit_length()
+        pairs = mesh.n_qpoints**2 * n_fft if active else 0
+        workspace = _workspace_bytes(
+            mesh.n_qpoints, grid.n_points, n_fft, problem.vertex.ndof, active,
+        )
+        if workspace > _MAX_BYTES:
+            raise ValueError("Planned coupled-q FFT workspace exceeds the 64 MiB prototype limit.")
+        born_map = cubic_born_self_energy_q_fft
     if pairs > config.max_pair_evaluations:
         raise ValueError("Coupled-q map exceeds max_pair_evaluations.")
 
@@ -337,7 +362,7 @@ def solve_transverse_scba(
         identity = validate(sigma)
         green = _dyson(problem, sigma)
         identity = max(identity, validate(green))
-        lesser, greater = cubic_born_self_energy_q(
+        lesser, greater = born_map(
             grid, problem.vertex, green.lesser, green.greater,
             max_pair_evaluations=config.max_pair_evaluations,
         )
@@ -368,7 +393,7 @@ def solve_transverse_scba(
         if converged or iteration == config.max_iterations:
             return TransverseSCBAResult(
                 converged, "fixed_point" if converged else "max_iterations",
-                green, sigma, currents, tuple(history),
+                green, sigma, currents, tuple(history), config.born_backend,
             )
         alpha = config.mixing
         sigma = reconstruct_transverse_spectrum(

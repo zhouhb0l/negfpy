@@ -171,6 +171,44 @@ Dyson or principal-value work begins. Exceeding that map budget rejects the
 call. Each stored three-component spectrum is limited to 64 MiB; this is an
 array-payload guard, not a bound on the entire process.
 
+## Optional frequency-FFT Born map
+
+`TransverseSCBAConfig(born_backend="fft")` selects the validated zero-padded
+frequency convolution from `transverse_fft.py`. The default remains
+`born_backend="direct"`. The selected name is recorded in
+`result.born_backend`, including an iteration-limit stop. This choice changes
+only evaluation of the fresh lesser/greater Born pair. Dyson/Keldysh solves,
+causal reconstruction, joint identities, correlation positivity, raw unmixed
+residuals, current screens, damping, and the returned evaluated-state semantics
+are shared unchanged.
+
+The FFT implements the same finite-grid, zero-extended rectangular sum with
+the same full internal-q routing and normalization. It compresses the exact
+nonzero vertex support on all three legs and scatters back to the original
+device coordinates; no numerical support threshold or device truncation is
+introduced. Floating-point transform and summation order can change residuals
+at roundoff level, so iteration counts very close to a tolerance boundary are
+not guaranteed to be identical for arbitrary inputs.
+
+`max_pair_evaluations` counts work for the selected backend. For direct
+summation it counts `Nq**2 * (3*M**2 + 3*M + 1)` supported tuples, where
+`M=grid.n_positive`. For FFT it counts `Nq**2 * Nfft` three-stage contractions
+per contour component, with `Nfft` the next power of two at least
+`2*Nomega-1`; an exactly zero vertex requires zero contractions. These counts
+are different units of work and are not a speedup estimate. Both are checked
+before the first Dyson solve. The FFT's explicit workspace planner is also
+checked against 64 MiB before iteration. The existing 64 MiB three-component
+spectrum cap stays in force, and the FFT kernel retains its own 64 MiB output
+and workspace guards. These array limits exclude input arrays, Python overhead
+and library scratch; they are not a process memory guarantee.
+
+New small synthetic comparisons cover an interacting one-q fixed point and a
+complex nonlocal four-q fixed point, bounded iteration stops, tiny-mixing raw
+residuals, backend-specific work limits, and the FFT workspace gate. The
+separate kernel benchmark is not repeated by these solver checks. This
+integration does not expand the dense toy solver's material-size limits or
+establish a material-scale acceleration factor.
+
 ## Joint momentum and frequency checks
 
 Lesser and greater fields are anti-Hermitian within each q block:
