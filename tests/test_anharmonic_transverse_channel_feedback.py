@@ -460,6 +460,12 @@ def test_nonfinite_new_input_rejected_before_inverse(monkeypatch):
         _evaluate(args, sigma_input=sigma)
 
 
-def test_bounded_fresh_loop_has_no_restart_entrypoint():
-    with pytest.raises(TypeError, match="sigma_initial"):
+def test_fresh_defaults_require_explicit_continuation_entrypoint(monkeypatch):
+    calls = _fake(monkeypatch, mapped=_constant(0))
+    fresh = feedback.run_channel_scba(*_fixture(), config=_config(max_evaluations=1))
+    assert fresh.state.index == 1 and calls == [None]
+    with pytest.raises(ValueError, match="first_index"):
         feedback.run_channel_scba(*_fixture(), sigma_initial=_constant(0), config=_config())
+    resumed = feedback.run_channel_scba(*_fixture(), sigma_initial=_constant(0),
+                                      first_index=4, config=_config(max_evaluations=1))
+    assert resumed.state.index == 4 and resumed.state.sigma_input is not None

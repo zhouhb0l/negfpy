@@ -54,6 +54,15 @@ class ChannelBornMapEvaluation:
     plan: MaterialMapPlan
     input_sigma_is_zero: bool
     g: float
+    zero_frequency_context: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelSigmaResidual(MaterialSigmaResidual):
+    """Original residual scalars plus global maximum matrix coordinates."""
+
+    error_location: tuple[int, ...] = ()
+    scale_location: tuple[int, ...] = ()
 
 
 def _real(value, name):
@@ -215,7 +224,8 @@ def plan_channel_born_map(
                                            external_tile=external_tile,bin_tile=bin_tile)
     component = 16*nq*nw*a*a
     green = mapped = 3*component
-    dyson = 16*48*d*d + 16*(nq+nw+4*d)
+    # Twelve extra full matrices cover the single Gamma/zero product context.
+    dyson = 16*60*d*d + 16*(nq+nw+4*d)
     nfft = 1 << (2*nw-2).bit_length()
     reconstruction = (16*nw*a*a + 32*nfft*(a*a+1) + 17*a*a) if a else 0
     validation = 16*28*max(a,1)**2
@@ -234,6 +244,75 @@ def channel_exchange(source_c, source_d, green_c, green_d) -> float:
     """
     return float((np.einsum('ij,ji->',source_d,green_c)
                   -np.einsum('ij,ji->',source_c,green_d)).real)
+
+
+def _zero_frequency_context(q, w, grid, mesh, operator, r, c, dgreen, cs, ds,
+                            dynamical, left, right, sigma_input, rtol, atol):
+    """One full-matrix Gamma/zero diagnostic, retaining only scalar metadata.
+
+    Extra matrix products are diagnostic references and never replace a field
+    or participate in a guard. Twelve matrix payloads are included in the plan.
+    A diagnostic overflow is recorded instead of creating a new solver gate.
+    Ratios use this one point's scales, not whole-grid acceptance scales.
+    """
+    metadata = {'diagnostic_only': True, 'q_index': int(q), 'frequency_index': int(w),
+                'omega': float(grid.values[w]),
+                'q_address': [int(v) for v in mesh.addresses[q]]}
+    try:
+        with np.errstate(over='raise', invalid='raise', divide='raise'):
+            advanced = _adjoint(r)
+            source_delta = ds-(_adjoint(operator)-operator)
+            propagated = r@source_delta@advanced
+            primary_delta = dgreen-(r-advanced)
+            metrics = {}
+            _measure(metrics, 'raw_source_identity', ds, _adjoint(operator)-operator, (q, w))
+            _measure(metrics, 'primary_spectral_identity', dgreen, r-advanced, (q, w))
+            _measure(metrics, 'propagated_source_identity', propagated,
+                     np.zeros_like(propagated), (q, w))
+            _measure(metrics, 'identity_product_remainder', primary_delta, propagated, (q, w))
+            _measure(metrics, 'source_spectral_roundtrip', (cs+0.5*ds)-(cs-0.5*ds), ds, (q, w))
+            _measure(metrics, 'exported_spectral_roundtrip',
+                     (c+0.5*dgreen)-(c-0.5*dgreen), dgreen, (q, w))
+            greater_product = r@(cs+0.5*ds)@advanced
+            lesser_product = r@(cs-0.5*ds)@advanced
+            _measure(metrics, 'spectral_product_vs_contour_products', dgreen,
+                     greater_product-lesser_product, (q, w))
+            components = {}
+            _measure(components, 'harmonic', dynamical, _adjoint(dynamical), (q, w))
+            for name, contact in (('left', left), ('right', right)):
+                contact_r = contact.spectrum.retarded[q, w]
+                contact_d = contact.spectrum.greater[q, w]-contact.spectrum.lesser[q, w]
+                _measure(components, name, contact_d, contact_r-_adjoint(contact_r), (q, w))
+            if sigma_input is not None:
+                input_r = sigma_input.retarded[q, w]
+                _measure(components, 'interaction', sigma_input.spectral[q, w],
+                         input_r-_adjoint(input_r), (q, w))
+            else:
+                zero = np.zeros((1, 1), dtype=np.complex128)
+                _measure(components, 'interaction', zero, zero, (q, w))
+            denominator = max(np.linalg.norm(operator, ord=np.inf)
+                              *np.linalg.norm(r, ord=np.inf), 1.)
+            identity = np.eye(len(operator), dtype=np.complex128)
+            inverse = {name: float(np.linalg.norm(value, ord=np.inf)/denominator)
+                       for name, value in (('left', operator@r-identity),
+                                           ('right', r@operator-identity))}
+            ratios = {}
+            for name, statistical, spectral in (('source', cs, ds), ('green', c, dgreen)):
+                scale_d = float(np.abs(spectral).max())
+                ratios[name] = float(np.abs(statistical).max())/scale_d if scale_d else None
+            metrics = _finish(metrics, rtol, atol, 'Gamma/zero products', gate=False)
+            components = _finish(components, rtol, atol, 'Gamma/zero components', gate=False)
+            scalars = [*inverse.values(), *(v for v in ratios.values() if v is not None)]
+            scalars += [row[key] for rows in (metrics, components) for row in rows.values()
+                        for key in ('error', 'scale', 'allowance', 'ratio')]
+            if not all(np.isfinite(v) for v in scalars):
+                raise ValueError('Nonfinite Gamma/zero diagnostic scalar.')
+            return dict(metadata, available=True, metrics=metrics,
+                        source_component_metrics=components,
+                        inverse_backward_residuals=inverse,
+                        statistical_to_spectral_scale_ratios=ratios)
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        return dict(metadata, available=False, diagnostic_error=f'{type(exc).__name__}: {exc}')
 
 
 def evaluate_channel_born_map(
@@ -315,6 +394,7 @@ def evaluate_channel_born_map(
     supports = [np.ix_(np.asarray(c.device_indices),np.asarray(c.device_indices)) for c in (left,right)]
     arrays = [np.empty(shape,dtype=np.complex128) for _ in _COMPONENTS]
     full,full_exports,source_metrics,inverse_metrics = {},{},{},{}
+    zero_context = None
     currents = np.zeros(3)
     identity = np.eye(d,dtype=np.complex128)
     with threadpool_limits(limits=1,user_api='blas'):
@@ -350,6 +430,10 @@ def evaluate_channel_born_map(
                 for side,value in (('left',operator@r-identity),('right',r@operator-identity)):
                     residual = np.array([[np.linalg.norm(value,ord=np.inf)/denom]])
                     _measure(inverse_metrics,side+'_backward_residual',residual,np.zeros((1,1)),(q,w))
+                if w == grid.zero_index and not any(mesh.addresses[q]):
+                    zero_context = _zero_frequency_context(
+                        q, w, grid, mesh, operator, r, c, dgreen, cs, ds,
+                        raw[q], left, right, sigma_input, rtol, atol)
                 if omega > 0:
                     for index,(contact,support) in enumerate(zip((left,right),supports,strict=True)):
                         less,greater = contact.spectrum.lesser[q,w],contact.spectrum.greater[q,w]
@@ -358,10 +442,13 @@ def evaluate_channel_born_map(
                     if sigma_input is not None:
                         currents[2] += omega*channel_exchange(sigma_input.statistical[q,w],
                             sigma_input.spectral[q,w],c[active],dgreen[active])
-        checks['raw_source'] = _finish(source_metrics,rtol,atol,'raw source')
+        try:
+            checks['raw_source'] = _finish(source_metrics,rtol,atol,'raw source')
+            checks['full_green_local'] = _finish(full,rtol,atol,'full Green')
+        except ValueError as exc:
+            raise ValueError(f'{exc}; zero_frequency_context={zero_context}') from exc
         checks['inverse'] = _finish(inverse_metrics,rtol,atol,'inverse residuals',gate=False)
         checks['full_green_exports'] = _finish(full_exports,rtol,atol,'full Green exports',gate=False)
-        checks['full_green_local'] = _finish(full,rtol,atol,'full Green')
         green = ChannelSpectrum(*arrays)
         checks['active_green'],checks['active_green_exports'] = _field_checks(
             mesh,grid,green,rtol,atol,'active Green')
@@ -390,7 +477,7 @@ def evaluate_channel_born_map(
         for name in _COMPONENTS:
             getattr(spectrum,name).setflags(write=False)
     return ChannelBornMapEvaluation(green,mapped,TransverseCurrents(*values),
-        MappingProxyType(checks),plan,sigma_input is None,coupling)
+        MappingProxyType(checks),plan,sigma_input is None,coupling,zero_context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,18 +534,26 @@ class ChannelSCBAPlan:
     maximum_dyson_evaluations: int
 
 
-def plan_channel_scba(n_q,n_frequency,full_ndof,active_ndof,left_ndof,right_ndof,*,config=None):
-    """Includes last complete input/Green/image while the next map is running."""
+def plan_channel_scba(n_q,n_frequency,full_ndof,active_ndof,left_ndof,right_ndof,*,
+                      config=None,has_initial_sigma=False):
+    """Includes last complete input/Green/image while the next map is running.
+
+    A caller-supplied candidate is separate caller storage. Its detached copy
+    fits the existing candidate allowance; no historical Green/map is retained.
+    """
     config = ChannelSCBAConfig() if config is None else config
     if not isinstance(config,ChannelSCBAConfig):
         raise TypeError('config must be ChannelSCBAConfig.')
+    if type(has_initial_sigma) is not bool:
+        raise TypeError('has_initial_sigma must be bool.')
     plan = plan_channel_born_map(n_q,n_frequency,full_ndof,active_ndof,left_ndof,right_ndof,
         workers=config.workers,external_tile=config.external_tile,bin_tile=config.bin_tile)
     sigma = plan.mapped_sigma_bytes
     previous = 2*sigma+plan.retained_green_bytes
     scratch = 128*max(plan.active_ndof,1)**2
     return ChannelSCBAPlan(plan,sigma,previous,scratch,plan.peak_owned_bytes+sigma+previous+scratch,
-        plan.nominal_caller_bytes,config.max_evaluations*plan.contraction_work,
+        plan.nominal_caller_bytes+(sigma if has_initial_sigma else 0),
+        config.max_evaluations*plan.contraction_work,
         config.max_evaluations*plan.dyson_evaluations)
 
 
@@ -467,9 +562,9 @@ class ChannelSCBARecord:
     index: int
     map_seconds: float
     elapsed_seconds: float
-    sigma_residuals: dict[str, MaterialSigmaResidual]
+    sigma_residuals: dict[str, ChannelSigmaResidual]
     current_residuals: dict[str, MaterialCurrentResidual]
-    channel_residuals: dict[str, MaterialSigmaResidual]
+    channel_residuals: dict[str, ChannelSigmaResidual]
     sigma_passed: bool
     current_passed: bool
     converged: bool
@@ -527,6 +622,7 @@ def mix_channel_spectra(sigma_input,mapped_sigma,mixing) -> ChannelSpectrum:
 
 def _sigma_residual(mapped,supplied,config,component):
     error = scale = error_fro = mapped_fro = supplied_fro = 0.0
+    error_location = scale_location = ()
     for index in np.ndindex(mapped.retarded.shape[:2]):
         if component in _COMPONENTS:
             first = getattr(mapped,component)[index]
@@ -539,8 +635,17 @@ def _sigma_residual(mapped,supplied,config,component):
         if not first.size:
             continue
         difference = first-second
-        error = max(error,float(np.abs(difference).max()))
-        scale = max(scale,float(np.abs(first).max()),float(np.abs(second).max()))
+        absolute_difference = np.abs(difference)
+        entry = np.unravel_index(int(np.argmax(absolute_difference)), difference.shape)
+        block_error = float(absolute_difference[entry])
+        if not error_location or block_error > error:
+            error, error_location = block_error, tuple(int(v) for v in (*index, *entry))
+        first_scale, second_scale = float(np.abs(first).max()), float(np.abs(second).max())
+        block_scale = max(first_scale, second_scale)
+        if not scale_location or block_scale > scale:
+            scale_field = first if first_scale >= second_scale else second
+            entry = np.unravel_index(int(np.argmax(np.abs(scale_field))), scale_field.shape)
+            scale, scale_location = block_scale, tuple(int(v) for v in (*index, *entry))
         error_fro = hypot(error_fro,float(np.linalg.norm(difference)))
         mapped_fro = hypot(mapped_fro,float(np.linalg.norm(first)))
         supplied_fro = hypot(supplied_fro,float(np.linalg.norm(second)))
@@ -548,8 +653,9 @@ def _sigma_residual(mapped,supplied,config,component):
     scale_fro = max(mapped_fro,supplied_fro)
     if not np.isfinite((error,scale,allowance,error_fro,scale_fro)).all():
         raise ValueError('Nonfinite unmixed Sigma residual.')
-    return MaterialSigmaResidual(error,scale,allowance,_ratio(error,allowance),
-                                  error_fro,scale_fro,_ratio(error_fro,scale_fro))
+    return ChannelSigmaResidual(error,scale,allowance,_ratio(error,allowance),
+                                error_fro,scale_fro,_ratio(error_fro,scale_fro),
+                                error_location,scale_location)
 
 
 def _record(index,sigma,evaluation,map_seconds,elapsed,config):
@@ -573,11 +679,18 @@ def _record(index,sigma,evaluation,map_seconds,elapsed,config):
 
 
 def run_channel_scba(
-    grid,vertex,dynamical,left,right,*,scale=None,g=0.03,config=None,
+    grid,vertex,dynamical,left,right,*,sigma_initial=None,first_index=1,
+    scale=None,g=0.03,config=None,
     on_evaluation: Callable[[ChannelSCBAState],None] | None = None,
     on_start: Callable[[int,ChannelSpectrum | None],None] | None = None,
 ) -> ChannelSCBAResult:
-    """At most config.max_evaluations NEW states, starting from exact zero.
+    """At most config.max_evaluations NEW states with explicit trajectory labels.
+
+    Defaults start from exact zero at index1. Opt-in continuation supplies an
+    already mixed, unevaluated native R/C/D candidate and first_index>=2. That
+    candidate is copied, never mixed a second time before its first evaluation.
+    Indices run first_index through first_index+max_evaluations-1. No loaded
+    checkpoint or candidate is promoted to accepted restart/transport state.
 
     Fixed alpha mixes R/C/D independently. All three original unmixed contour
     residuals and three input-current balance screens gate convergence; the
@@ -596,17 +709,37 @@ def run_channel_scba(
         raise TypeError('Supply compact contacts.')
     if any(cb is not None and not callable(cb) for cb in (on_evaluation,on_start)):
         raise TypeError('Callbacks must be callable.')
+    first_index = _integer(first_index,'first_index')
+    if (sigma_initial is None) != (first_index == 1):
+        raise ValueError('Use exact-zero None only with first_index=1; continuation requires '
+                         'sigma_initial and first_index>=2.')
     plan = plan_channel_scba(vertex.mesh.n_qpoints,grid.n_points,vertex.full_ndof,vertex.ndof,
-                            len(left.device_indices),len(right.device_indices),config=config)
+                            len(left.device_indices),len(right.device_indices),config=config,
+                            has_initial_sigma=sigma_initial is not None)
     if plan.peak_owned_bytes > config.max_bytes:
         raise ValueError('Channel SCBA allocation plan exceeds max_bytes.')
     if plan.map_plan.contraction_work > config.max_contraction_work:
         raise ValueError('Channel SCBA map exceeds max_contraction_work.')
     if plan.map_plan.dyson_evaluations > config.max_dyson_evaluations:
         raise ValueError('Channel SCBA map exceeds max_dyson_evaluations.')
-    state,history,sigma = None,[],None
+    sigma = None
+    if sigma_initial is not None:
+        shape=(vertex.mesh.n_qpoints,grid.n_points,vertex.ndof,vertex.ndof)
+        _spectrum(sigma_initial,shape,'sigma_initial')
+        if any(getattr(sigma_initial,name).dtype != np.dtype('complex128')
+               for name in _COMPONENTS):
+            raise ValueError('sigma_initial fields must have native complex128 dtype.')
+        # Copy bytes without arithmetic: even multiplication by complex one
+        # can canonicalize signed zeros and invalidate the caller's raw hash.
+        initial_arrays = [np.array(getattr(sigma_initial,name),copy=True,order='C')
+                          for name in _COMPONENTS]
+        for array in initial_arrays:
+            array.setflags(write=False)
+        sigma = ChannelSpectrum(*initial_arrays)
+        del initial_arrays, array
+    state,history = None,[]
     estimate = config.initial_map_estimate_seconds
-    for index in range(1,config.max_evaluations+1):
+    for index in range(first_index,first_index+config.max_evaluations):
         remaining = config.max_seconds-(monotonic()-started)
         if remaining <= config.time_reserve_seconds+config.next_map_safety_factor*estimate:
             return ChannelSCBAResult(state,tuple(history),False,'max_seconds',None,plan)
@@ -646,6 +779,7 @@ __all__ = [
     'ChannelSCBARecord',
     'ChannelSCBAResult',
     'ChannelSCBAState',
+    'ChannelSigmaResidual',
     'ChannelSpectrum',
     'channel_exchange',
     'evaluate_channel_born_map',
