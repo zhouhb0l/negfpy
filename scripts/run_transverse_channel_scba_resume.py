@@ -1,4 +1,4 @@
-"""Six bounded native-channel evaluations continuing the closed state3 pilot."""
+"""Six bounded native-channel evaluations from an explicitly approved seed."""
 from __future__ import annotations
 
 import argparse
@@ -48,6 +48,15 @@ OLD_BINDING = {
     'representation': 'retarded-statistical-spectral-v1', 'initial_state': 'fresh-zero',
 }
 RESUME_MANIFEST = '57365e5448bbc8fd3570ef7175afa7257c80a003f7bd1039d669b9d254dc53be'
+STATE9_MANIFEST = 'cf591c69ea613f59e336cf66e6e8a909be6f0148bb5747103ee2b2c829b1ba5b'
+STATE9_BINDING = {
+    'source_commit': 'b014cc81ec1e7cfb1a7e2502feef3b67dd017de5',
+    'source_tree': '9099644af64e86179847eeacf26978276dbce9c9',
+    'profile_sha256': 'f2554a2e168c85db45247e861fb303751e0cc5c2e81d988fb686ad4b8710cd06',
+    'representation': 'retarded-statistical-spectral-v1', 'initial_state': 'fresh-zero',
+    'resume_parent_manifest_sha256': RESUME_MANIFEST, 'resume_parent_iteration': 3,
+}
+APPROVED_SEEDS = {3: (RESUME_MANIFEST, OLD_BINDING), 9: (STATE9_MANIFEST, STATE9_BINDING)}
 COMPONENTS = ('retarded', 'statistical', 'spectral')
 
 
@@ -93,9 +102,13 @@ def validate_profile(profile):
         raise ValueError('Wrong native channel continuation profile schema.')
     if any(profile['map'].get(k) != v for k, v in PHYSICS.items()):
         raise ValueError('The material physics must remain fixed.')
+    resume = profile['resume']
+    seed = resume.get('iteration')
+    if type(seed) is not int or seed not in APPROVED_SEEDS:
+        raise ValueError('Only the explicitly pinned native state3 or state9 seed is approved.')
     if (profile.get('initial_state') != 'native-channel-continuation'
-            or profile.get('first_index') != 4 or 'restart' in profile):
-        raise ValueError('This continuation starts with new native candidate4.')
+            or profile.get('first_index') != seed+1 or 'restart' in profile):
+        raise ValueError(f'This continuation starts with new native candidate{seed+1}.')
     config = ChannelSCBAConfig(**profile['scba'])
     pinned = {'max_evaluations': 6, 'mixing': .1, 'sigma_rtol': 1e-4, 'sigma_atol': 1e-10,
               'current_rtol': 1e-3, 'current_atol_w': 1e-14,
@@ -115,17 +128,16 @@ def validate_profile(profile):
         raise ValueError('At least 128 GiB of free checkpoint storage must be required.')
     for key in ('source_commit', 'source_tree'):
         _digest(profile[key], 40)
-    resume = profile['resume']
-    if (resume.get('iteration') != 3 or resume.get('manifest_sha256') != RESUME_MANIFEST
+    manifest_sha256, source_binding = APPROVED_SEEDS[seed]
+    if (resume.get('manifest_sha256') != manifest_sha256
             or not isinstance(resume.get('path'), str) or not resume['path']
             or type(resume.get('max_total_bytes')) is not int
             or resume['max_total_bytes'] < 6*(16*4*601*120**2+65536)):
-        raise ValueError('The exact complete native state3 checkpoint must be pinned.')
-    binding = resume['binding']
-    if (any(binding.get(k) != v for k, v in OLD_BINDING.items())
-            or binding.get('physics') != profile['map']
-            or binding.get('parent_result_sha256') != profile['parent']['result_sha256']
-            or binding.get('parent_profile_sha256') != profile['parent']['profile_sha256']):
+        raise ValueError(f'The exact complete native state{seed} checkpoint must be pinned.')
+    expected_binding = dict(source_binding, physics=profile['map'],
+                            parent_result_sha256=profile['parent']['result_sha256'],
+                            parent_profile_sha256=profile['parent']['profile_sha256'])
+    if resume['binding'] != expected_binding:
         raise ValueError('Original checkpoint source/profile, physics or parent binding differs.')
     return config
 
@@ -142,6 +154,9 @@ def _descriptor(path):
 def authenticate_resume(resume):
     """Record six descriptors around the loader's all-hashes-before-mapping gate."""
     root = Path(resume['path'])
+    seed = resume['iteration']
+    if type(seed) is not int or seed not in APPROVED_SEEDS:
+        raise ValueError('Native resume iteration is not an approved seed.')
     with ExitStack() as stack:
         manifest = _json_verified(stack, root, 'manifest.json', resume['manifest_sha256'])
         artifacts = manifest['artifacts']
@@ -158,9 +173,9 @@ def authenticate_resume(resume):
         checkpoint = load_channel_checkpoint(
             root, expected_manifest_sha256=resume['manifest_sha256'],
             expected_binding=resume['binding'], max_total_bytes=resume['max_total_bytes'])
-        if (checkpoint.manifest['iteration'] != 3 or checkpoint.record['index'] != 3
+        if (checkpoint.manifest['iteration'] != seed or checkpoint.record['index'] != seed
                 or checkpoint.record['converged'] is not False):
-            raise ValueError('Resume input must be the complete nonconverged native state3.')
+            raise ValueError(f'Resume input must be the complete nonconverged native state{seed}.')
         authenticated = {}
         for name, row in artifacts.items():
             after = _descriptor(paths[name])
@@ -170,7 +185,7 @@ def authenticate_resume(resume):
                                        stat_before=before[name], stat_after=after)
     return checkpoint, {
         'path': str(root), 'manifest_sha256': resume['manifest_sha256'],
-        'iteration': 3, 'binding': plain(checkpoint.binding),
+        'iteration': seed, 'binding': plain(checkpoint.binding),
         'artifacts_freshly_authenticated': 6, 'artifacts': authenticated,
         'accepted_restart': False,
     }
@@ -178,6 +193,9 @@ def authenticate_resume(resume):
 
 def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     config = validate_profile(profile)
+    seed = profile['resume']['iteration']
+    first_index = seed+1
+    last_index = first_index+config.max_evaluations-1
     storage = shutil.disk_usage(Path(checkpoint_directory).parent)
     if storage.free < profile['free_storage_min_bytes']:
         raise ValueError('Insufficient free storage for the bounded native continuation.')
@@ -185,7 +203,7 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     result.update(passed=False, converged=False, source_commit=profile['source_commit'],
                   source_tree=profile['source_tree'], profile_sha256=profile_sha256,
                   settings=profile['map'], scba_config=plain(config), checkpoints=[], attempts=[],
-                  evaluated_records=[], first_index=4,
+                  evaluated_records=[], first_index=first_index,
                   free_storage_before={'free_bytes': storage.free,
                                        'required_bytes': profile['free_storage_min_bytes']},
                   scope={'scba': True, 'fresh_green_evaluations': True,
@@ -216,8 +234,9 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     prepared = {'candidate': mix_channel_spectra(checkpoint.sigma_input, checkpoint.mapped_sigma, config.mixing)}
     candidate_hashes = spectrum_hashes(prepared['candidate'])
     result['initial_candidate'] = {
-        'index': 4, 'mixing': config.mixing, 'sigma_sha256': candidate_hashes,
-        'dyson_evaluated': False, 'construction': '.9*evaluated_input3+.1*unevaluated_image3',
+        'index': first_index, 'mixing': config.mixing, 'sigma_sha256': candidate_hashes,
+        'dyson_evaluated': False,
+        'construction': f'.9*evaluated_input{seed}+.1*unevaluated_image{seed}',
         'parent_manifest_sha256': profile['resume']['manifest_sha256'],
     }
     # The candidate owns new fields, so the six resume mmap references need not
@@ -229,16 +248,21 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
                'profile_sha256': profile_sha256, 'physics': profile['map'],
                'representation': 'retarded-statistical-spectral-v1', 'initial_state': 'fresh-zero',
                'resume_parent_manifest_sha256': profile['resume']['manifest_sha256'],
-               'resume_parent_iteration': 3}
+               'resume_parent_iteration': seed}
+    if seed == 9:
+        # Preserve state9's own parent3 provenance, rather than relabeling it
+        # with the new source/profile or discarding the inherited binding.
+        binding['resume_parent_binding'] = plain(profile['resume']['binding'])
     emit('channel_resume_start', dict(result['initial_candidate'], max_evaluations=6,
                                      native_checkpoint_imported=True))
 
     def on_start(index, sigma_input):
-        if index != 4+len(result['attempts']) or not 4 <= index <= 9 or sigma_input is None:
+        if (index != first_index+len(result['attempts'])
+                or not first_index <= index <= last_index or sigma_input is None):
             raise ValueError('Continuation attempted an unexpected or exact-zero candidate.')
         hashes = spectrum_hashes(sigma_input)
-        if index == 4 and hashes != candidate_hashes:
-            raise ValueError('Candidate4 differs from the prepared native mixed candidate.')
+        if index == first_index and hashes != candidate_hashes:
+            raise ValueError(f'Candidate{first_index} differs from the prepared native mixed candidate.')
         attempt = {'index': index, 'input_sigma_is_zero': False,
                    'sigma_sha256': hashes, 'dyson_evaluated': False}
         result['attempts'].append(attempt)
@@ -266,7 +290,7 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
 
     solved = run_channel_scba(
         fields.grid, fields.vertex, fields.dynamical, fields.left, fields.right,
-        sigma_initial=prepared.pop('candidate'), first_index=4,
+        sigma_initial=prepared.pop('candidate'), first_index=first_index,
         scale=SolverScale(omega0=OMEGA0_RAD_S, hbar=HBAR_J_S), g=profile['map']['g'],
         config=config, on_start=on_start, on_evaluation=on_evaluation)
     result.update(converged=solved.converged, stop_reason=solved.stop_reason,
