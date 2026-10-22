@@ -57,6 +57,13 @@ STATE9_BINDING = {
     'resume_parent_manifest_sha256': RESUME_MANIFEST, 'resume_parent_iteration': 3,
 }
 APPROVED_SEEDS = {3: (RESUME_MANIFEST, OLD_BINDING), 9: (STATE9_MANIFEST, STATE9_BINDING)}
+COMPARISON_BASELINE = {
+    'job_id': '25919346.pbs101',
+    'profile_sha256': 'a26557c1305786bb7e024ade98b634196812aeaba945aa483d0feb953c439ffb',
+    'result_sha256': 'f6bb9aca9192dc6908a86688bcc0052c08c3112732581306efe46e421ef87d9f',
+    'mixing': .1, 'resume_manifest_sha256': STATE9_MANIFEST, 'resume_iteration': 9,
+    'first_index': 10, 'max_evaluations': 6,
+}
 COMPONENTS = ('retarded', 'statistical', 'spectral')
 
 
@@ -110,7 +117,14 @@ def validate_profile(profile):
             or profile.get('first_index') != seed+1 or 'restart' in profile):
         raise ValueError(f'This continuation starts with new native candidate{seed+1}.')
     config = ChannelSCBAConfig(**profile['scba'])
-    pinned = {'max_evaluations': 6, 'mixing': .1, 'sigma_rtol': 1e-4, 'sigma_atol': 1e-10,
+    if config.mixing != .1 and not (seed == 9 and config.mixing == .05):
+        raise ValueError('Mixing .1 is approved for state3/9; .05 is approved only for state9.')
+    if config.mixing == .05:
+        baseline = profile.get('comparison_baseline')
+        if (not isinstance(baseline, Mapping)
+                or any(baseline.get(key) != value for key, value in COMPARISON_BASELINE.items())):
+            raise ValueError('The immutable same-seed .1 comparison baseline must be pinned.')
+    pinned = {'max_evaluations': 6, 'sigma_rtol': 1e-4, 'sigma_atol': 1e-10,
               'current_rtol': 1e-3, 'current_atol_w': 1e-14,
               'identity_rtol': 1e-8, 'identity_atol': 1e-11,
               'workers': 8, 'external_tile': 16, 'bin_tile': 1,
@@ -219,6 +233,9 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
                          'exact_conjugate_structure_enforced': False,
                          'primary_identity_uses_independent_spectral': True,
                          'exported_contour_checks_are_diagnostic': True})
+    if config.mixing == .05:
+        result['comparison_baseline'] = plain(profile['comparison_baseline'])
+        result['scope']['comparison_baseline_used_computationally'] = False
     emit('parent_authentication_start')
     fields = load_material_map_fields(
         parent['root'], expected_result_sha256=parent['result_sha256'],
@@ -236,7 +253,9 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     result['initial_candidate'] = {
         'index': first_index, 'mixing': config.mixing, 'sigma_sha256': candidate_hashes,
         'dyson_evaluated': False,
-        'construction': f'.9*evaluated_input{seed}+.1*unevaluated_image{seed}',
+        'construction': (f'.95*evaluated_input{seed}+.05*unevaluated_image{seed}'
+                         if config.mixing == .05 else
+                         f'.9*evaluated_input{seed}+.1*unevaluated_image{seed}'),
         'parent_manifest_sha256': profile['resume']['manifest_sha256'],
     }
     # The candidate owns new fields, so the six resume mmap references need not
