@@ -16,6 +16,10 @@ from threadpoolctl import threadpool_limits
 from .grid import SignedFrequencyGrid
 from .retarded import principal_value_cauchy_fft_scratch_bytes, retarded_from_keldysh
 from .transverse_compact_contacts import CompactTransverseContact
+from .transverse_green_diagnostics import (
+    FullGreenDiagnosticCollector,
+    green_diagnostic_workspace_bytes,
+)
 from .transverse_packed import (
     PackedTransverseCubicVertex,
     _array,
@@ -70,6 +74,18 @@ class PackedBornMapEvaluation:
     plan: MaterialMapPlan
     input_sigma_is_zero: bool
     g: float
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PackedGreenDiagnostic:
+    """Completed Dyson diagnostics; never a Born/SCBA/transport result."""
+
+    completed: bool
+    green_passed: bool
+    diagnostics: dict
+    plan: MaterialMapPlan
+    diagnostic_workspace_bytes: int
+    diagnostic_peak_owned_bytes: int
 
 
 def plan_material_born_map(
@@ -197,8 +213,8 @@ def evaluate_packed_born_map(
     grid, vertex, dynamical, left, right, *, sigma_input=None, scale=None, g=1.0,
     workers=8, external_tile=16, bin_tile=1, max_bytes=_DEFAULT_BYTES,
     max_contraction_work=100_000_000, max_dyson_evaluations=100_000,
-    identity_rtol=1e-8, identity_atol=1e-11,
-) -> PackedBornMapEvaluation:
+    identity_rtol=1e-8, identity_atol=1e-11, green_diagnostic_only=False,
+) -> PackedBornMapEvaluation | PackedGreenDiagnostic:
     """Evaluate exactly one Born image, with no iteration or accepted-state update.
 
     Vertex is in solver units before coupling g; g**2 multiplies the contour
@@ -206,7 +222,11 @@ def evaluate_packed_born_map(
     Contacts remain on explicit boundary supports; the harmonic inverse is full.
     Every resource gate precedes Dyson. The returned currents use sigma_input,
     not map_sigma. This function does not certify SCBA convergence.
+    green_diagnostic_only returns scalar context after the existing full Dyson
+    loop and Green checks, even when a Green identity check fails, before Born.
     """
+    if type(green_diagnostic_only) is not bool:
+        raise TypeError('green_diagnostic_only must be bool.')
     if not isinstance(grid, SignedFrequencyGrid) or not isinstance(vertex, PackedTransverseCubicVertex):
         raise TypeError('Supply a signed grid and packed transverse vertex.')
     if scale is None:
@@ -238,7 +258,8 @@ def evaluate_packed_born_map(
         has_input_sigma=sigma_input is not None, workers=workers,
         external_tile=external_tile, bin_tile=bin_tile,
     )
-    if plan.peak_owned_bytes > limit:
+    diagnostic_bytes = green_diagnostic_workspace_bytes(d) if green_diagnostic_only else 0
+    if plan.peak_owned_bytes + diagnostic_bytes > limit:
         raise ValueError('Material map allocation plan exceeds max_bytes.')
     if plan.contraction_work > work:
         raise ValueError('Material map exceeds max_contraction_work.')
@@ -279,6 +300,8 @@ def evaluate_packed_born_map(
     supports = [np.ix_(np.asarray(c.device_indices), np.asarray(c.device_indices)) for c in (left,right)]
     arrays = [np.empty(shape, dtype=complex) for _ in _COMPONENTS]
     full_metrics = {}
+    collector = (FullGreenDiagnosticCollector(n_q=nq, n_frequency=nw, rtol=rtol, atol=atol)
+                 if green_diagnostic_only else None)
     currents = np.zeros(3)
     identity = np.eye(d, dtype=complex)
     with threadpool_limits(limits=1, user_api='blas'):
@@ -308,6 +331,9 @@ def evaluate_packed_born_map(
                         raise ValueError('Nonfinite full-device Green function.')
                     target[q,w] = field[active]
                 _local_checks(full_metrics, retarded, lesser, greater)
+                if collector is not None:
+                    collector.observe(q, w, omega, mesh.addresses[q], operator, retarded,
+                                      sources[0], sources[1], lesser, greater)
                 if omega > 0:
                     for index,(contact,support) in enumerate(zip((left,right), supports, strict=True)):
                         currents[index] += omega * _exchange(
@@ -319,6 +345,24 @@ def evaluate_packed_born_map(
                             sigma_input.lesser[q,w], sigma_input.greater[q,w],
                             lesser[active], greater[active],
                         )
+        if collector is not None:
+            full_error = active_error = None
+            try:
+                checks['full_green_local'] = _finish_checks(full_metrics, rtol, atol, 'full Green')
+            except ValueError as exc:
+                full_error = str(exc)
+            green = PackedMapSpectrum(*arrays)
+            try:
+                checks['active_green'] = _field_checks(mesh, grid, green, rtol, atol, 'active Green')
+            except ValueError as exc:
+                active_error = str(exc)
+            diagnostics = collector.finish(
+                full_metrics, full_green_validation_error=full_error,
+                active_green_validation_error=active_error, validation_checks=checks,
+            )
+            return PackedGreenDiagnostic(True, full_error is None and active_error is None,
+                                         diagnostics, plan, diagnostic_bytes,
+                                         plan.peak_owned_bytes+diagnostic_bytes)
         checks['full_green_local'] = _finish_checks(full_metrics, rtol, atol, 'full Green')
         green = PackedMapSpectrum(*arrays)
         checks['active_green'] = _field_checks(mesh, grid, green, rtol, atol, 'active Green')
@@ -356,6 +400,7 @@ def evaluate_packed_born_map(
 __all__ = [
     'MaterialMapPlan',
     'PackedBornMapEvaluation',
+    'PackedGreenDiagnostic',
     'PackedMapSpectrum',
     'evaluate_packed_born_map',
     'plan_material_born_map',
