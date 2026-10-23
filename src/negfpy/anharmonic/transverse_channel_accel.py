@@ -7,12 +7,18 @@ evaluated state, and a rejected trial never replaces the selected anchor.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from math import fsum, sqrt
 from time import monotonic
 
 import numpy as np
 
+from .transverse_channel_feasibility import (
+    ChannelProposalFailure,
+    ChannelProposalFeasibility,
+    feasible_channel_proposal,
+)
 from .transverse_channel_feedback import (
     _COMPONENTS,
     ChannelSCBAConfig,
@@ -84,7 +90,7 @@ class ChannelAccelerationPlan:
 
 
 def plan_channel_accel(n_q, n_frequency, full_ndof, active_ndof, left_ndof, right_ndof,
-                       *, config=None, acceleration=None):
+                       *, config=None, acceleration=None, feasibility=None):
     """Conservative payload bound; no full residual/difference/QR stacks.
 
     Six extra spectrum payloads cover detached seed input/image, the extra
@@ -95,12 +101,20 @@ def plan_channel_accel(n_q, n_frequency, full_ndof, active_ndof, left_ndof, righ
     """
     config = ChannelSCBAConfig() if config is None else config
     acceleration = ChannelAccelerationConfig() if acceleration is None else acceleration
+    feasibility = ChannelProposalFeasibility() if feasibility is None else feasibility
     if not isinstance(acceleration, ChannelAccelerationConfig):
         raise TypeError('acceleration must be ChannelAccelerationConfig.')
+    if not isinstance(feasibility, ChannelProposalFeasibility):
+        raise TypeError('feasibility must be ChannelProposalFeasibility.')
     fixed = plan_channel_scba(n_q, n_frequency, full_ndof, active_ndof, left_ndof,
                              right_ndof, config=config, has_initial_sigma=True)
     extra = 6 * fixed.input_sigma_bytes
     scratch = 16 * 32 * max(fixed.map_plan.active_ndof, 1)**2
+    if feasibility.mode != 'disabled':
+        # Original proposal plus one damped spectrum may coexist. The PSD/
+        # symmetry screen only retains matrix-block scratch, never eigenvectors.
+        extra += fixed.input_sigma_bytes
+        scratch += 16 * 16 * max(fixed.map_plan.active_ndof, 1)**2
     return ChannelAccelerationPlan(
         fixed, extra, scratch, fixed.peak_owned_bytes + extra + scratch,
         fixed.nominal_caller_bytes + 2 * fixed.input_sigma_bytes,
@@ -117,6 +131,7 @@ class ChannelAccelerationResult:
     stop_reason: str
     failure_reason: str | None
     plan: ChannelAccelerationPlan
+    proposal_screens: tuple[dict, ...] = ()
 
 
 def _copy(value, shape, name):
@@ -249,8 +264,8 @@ def propose_channel_anderson1(previous_input, previous_image, state, raw, mixing
 
 def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_mapped,
                       sigma_initial=None, seed_index=15, scale=None, g=.03,
-                      config=None, acceleration=None, selection=None,
-                      on_start=None, on_evaluation=None):
+                      config=None, acceleration=None, selection=None, feasibility=None,
+                      on_start=None, on_evaluation=None, on_proposal=None):
     """Run a bounded number of fresh maps, including every rejected trial.
 
     The seed pair is historical evaluated input plus UNEVALUATED Born image,
@@ -264,6 +279,7 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
     config = ChannelSCBAConfig() if config is None else config
     acceleration = ChannelAccelerationConfig() if acceleration is None else acceleration
     selection = ChannelSelectionPolicy() if selection is None else selection
+    feasibility = ChannelProposalFeasibility() if feasibility is None else feasibility
     seed_index = _integer(seed_index, 'seed_index')
     if not isinstance(config, ChannelSCBAConfig):
         raise TypeError('config must be ChannelSCBAConfig.')
@@ -271,12 +287,14 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
         raise TypeError('acceleration must be ChannelAccelerationConfig.')
     if not isinstance(selection, ChannelSelectionPolicy):
         raise TypeError('selection must be ChannelSelectionPolicy.')
-    if any(cb is not None and not callable(cb) for cb in (on_start, on_evaluation)):
+    if not isinstance(feasibility, ChannelProposalFeasibility):
+        raise TypeError('feasibility must be ChannelProposalFeasibility.')
+    if any(cb is not None and not callable(cb) for cb in (on_start, on_evaluation, on_proposal)):
         raise TypeError('Callbacks must be callable.')
     shape = (vertex.mesh.n_qpoints, grid.n_points, vertex.ndof, vertex.ndof)
     plan = plan_channel_accel(vertex.mesh.n_qpoints, grid.n_points, vertex.full_ndof,
                               vertex.ndof, len(left.device_indices), len(right.device_indices),
-                              config=config, acceleration=acceleration)
+                              config=config, acceleration=acceleration, feasibility=feasibility)
     if plan.peak_owned_bytes > config.max_bytes:
         raise ValueError('Channel acceleration allocation plan exceeds max_bytes.')
     if plan.fixed_plan.map_plan.contraction_work > config.max_contraction_work:
@@ -289,18 +307,49 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
     proposal = {'kind': 'linear_warmup', 'anchor_index': seed_index,
                 'previous_index': None, 'reason': 'fresh_linear_warmup'}
     state = latest = None
-    history, decisions = [], []
+    history, decisions, proposal_screens = [], [], []
     estimate = config.initial_map_estimate_seconds
 
     def result(reason, failure=None, converged=False):
         return ChannelAccelerationResult(state, latest, tuple(history), tuple(decisions),
-                                         converged, reason, failure, plan)
+                                         converged, reason, failure, plan, tuple(proposal_screens))
+
+    def publish_screen(index, batch):
+        batch.update(index=index, anchor_index=proposal['anchor_index'])
+        proposal_screens.append(deepcopy(batch))
+        if on_proposal is not None:
+            on_proposal(index, deepcopy(batch))
 
     for offset in range(config.max_evaluations):
         if config.max_seconds - (monotonic() - started) <= (
                 config.time_reserve_seconds + config.next_map_safety_factor * estimate):
             return result('max_seconds')
         index = seed_index + 1 + offset
+        if feasibility.mode != 'disabled':
+            anchor = previous[0] if state is None else state.sigma_input
+            image = previous[1] if state is None else state.evaluation.map_sigma
+            try:
+                sigma, batch = feasible_channel_proposal(
+                    vertex.mesh, grid, anchor, image, sigma,
+                    original_kind=proposal['kind'], mixing=config.mixing,
+                    policy=feasibility, rtol=config.identity_rtol, atol=config.identity_atol,
+                    time_remaining=lambda: config.max_seconds - (monotonic() - started)
+                    - config.time_reserve_seconds)
+            except ChannelProposalFailure as exc:
+                publish_screen(index, exc.report)
+                return result('max_seconds' if exc.time_budget else 'proposal_error',
+                              None if exc.time_budget else f'{type(exc).__name__}: {exc}')
+            remaining = config.max_seconds - (monotonic() - started)
+            batch['map_admitted'] = remaining > (
+                config.time_reserve_seconds + config.next_map_safety_factor * estimate)
+            if not batch['map_admitted']:
+                batch['stop_reason'] = 'map_time_budget'
+            publish_screen(index, batch)
+            if not batch['map_admitted']:
+                return result('max_seconds')
+            proposal = dict(proposal, kind=batch['selected_kind'], feasibility=deepcopy(batch))
+            if batch['fallback_used']:
+                proposal['reason'] = 'psd_backtracking_linear_fallback'
         if on_start is not None:
             on_start(index, sigma, dict(proposal))
         try:
