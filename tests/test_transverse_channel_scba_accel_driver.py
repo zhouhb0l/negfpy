@@ -38,6 +38,9 @@ def profile(mode='anderson1'):
     return value
 
 
+POLICY = {'mode': 'bounded-tradeoff', 'component_growth_limit': 1.02, 'merit_ratio_limit': .99}
+
+
 def spectrum(factor=1.):
     return ChannelSpectrum(*(np.full((1, 3, 1, 1), factor*x, dtype=np.complex128)
                              for x in (1., -1e12j, 1e-12j)))
@@ -101,6 +104,38 @@ def test_both_modes_pin_seed15_with_exact_lineage_and_original_six_convergence_s
     assert pf['source_commit'] != pf['resume']['binding']['source_commit']
 
 
+def test_opt_in_policy_is_explicitly_bound_without_changing_proposals_physics_or_screens():
+    module, pf = driver(), profile()
+    original_config, original_acceleration = module.validate_profile(pf)
+    old_binding = module.checkpoint_binding(pf, 'a'*64)
+    assert 'selection_policy' not in old_binding
+    assert module.validate_selection_policy(pf).mode == 'component-nonincreasing'
+    pf['selection_policy'] = copy.deepcopy(POLICY)
+    assert module.validate_profile(pf) == (original_config, original_acceleration)
+    policy = module.validate_selection_policy(pf)
+    assert (policy.mode, policy.component_growth_limit, policy.merit_ratio_limit) == ('bounded-tradeoff', 1.02, .99)
+    binding = module.checkpoint_binding(pf, 'a'*64)
+    assert binding.pop('selection_policy') == POLICY and binding == old_binding
+
+
+@pytest.mark.parametrize('change', [
+    {'mode': 'always-accept'}, {'component_growth_limit': 1.03},
+    {'merit_ratio_limit': 1.}, {'mode': 'component-nonincreasing'},
+])
+def test_new_policy_profile_limits_are_pinned_before_field_loading(change):
+    module, pf = driver(), profile()
+    pf['selection_policy'] = dict(POLICY, **change)
+    with pytest.raises(ValueError):
+        module.validate_profile(pf)
+
+
+def test_bounded_policy_cannot_be_applied_to_linear_control():
+    module, pf = driver(), profile('linear-control')
+    pf['selection_policy'] = copy.deepcopy(POLICY)
+    with pytest.raises(ValueError):
+        module.validate_profile(pf)
+
+
 @pytest.mark.parametrize('defect', ['seed', 'manifest', 'lineage', 'alpha', 'tolerance',
                                   'mode', 'coefficient_bound', 'first_index'])
 def test_unapproved_experiment_rejected_before_static_or_resume_loading(
@@ -128,11 +163,15 @@ def test_unapproved_experiment_rejected_before_static_or_resume_loading(
         module.run(pf, {}, lambda *a: None, tmp_path/'checkpoints', profile_sha256='a'*64)
 
 
-@pytest.mark.parametrize('mode', ['linear-control', 'anderson1'])
+@pytest.mark.parametrize('mode,selection', [('linear-control', None), ('anderson1', None), ('anderson1', POLICY)])
 def test_candidate16_once_all_trials_saved_and_selected_anchor_distinct_from_last_trial(
-        tmp_path, monkeypatch, mode):
+        tmp_path, monkeypatch, mode, selection):
     module = driver()
     pf, supplied15, mapped15 = wiring(module, monkeypatch, mode)
+    if selection is not None:
+        pf['selection_policy'] = copy.deepcopy(selection)
+        pf['selection_experiment'] = {'comparison_baselines': {'metadata_only': True},
+                                      'baselines_used_computationally': False}
     original = {(label, name): getattr(value, name).tobytes()
                 for label, value in [('input', supplied15), ('map', mapped15)]
                 for name in module.COMPONENTS}
@@ -149,6 +188,7 @@ def test_candidate16_once_all_trials_saved_and_selected_anchor_distinct_from_las
         assert kwargs['seed_index'] == 15 and kwargs['config'].max_evaluations == 6
         assert kwargs['seed_input'] is supplied15 and kwargs['seed_mapped'] is mapped15
         assert kwargs['acceleration'].mode == mode and kwargs['g'] == .03
+        assert kwargs['selection'].mode == ('component-nonincreasing' if selection is None else 'bounded-tradeoff')
         supplied = kwargs['sigma_initial']
         history, decisions, states = [], [], []
         for index in range(16, 22):
@@ -175,6 +215,10 @@ def test_candidate16_once_all_trials_saved_and_selected_anchor_distinct_from_las
     assert result['attempts'][0]['sigma_sha256'] == result['evaluated_records'][0]['sigma_input_sha256'] == expected_hashes
     assert result['initial_candidate']['construction'] == '.95*evaluated_input15+.05*unevaluated_image15'
     assert result['passed'] and not result['converged'] and result['completed_evaluations'] == 6
+    if selection is not None:
+        assert result['selection_policy_config'] == selection
+        assert result['selection_experiment'] == pf['selection_experiment']
+    assert result['scope']['comparison_baselines_used_computationally'] is False
     selected = 21 if mode == 'linear-control' else 20
     assert result['selected_anchor_index'] == selected
     assert result['selected_anchor']['index'] == selected

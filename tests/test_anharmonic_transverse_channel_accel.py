@@ -70,6 +70,18 @@ def test_new_controls_reject_invalid_values(kwargs):
         accel.ChannelAccelerationConfig(**kwargs)
 
 
+@pytest.mark.parametrize('kwargs', [
+    {'mode': 'always-accept'}, {'component_growth_limit': .99},
+    {'component_growth_limit': float('inf')}, {'component_growth_limit': True},
+    {'merit_ratio_limit': 0.}, {'merit_ratio_limit': 1.01},
+    {'mode': 'component-nonincreasing', 'component_growth_limit': 1.02},
+    {'mode': 'component-nonincreasing', 'merit_ratio_limit': .99},
+])
+def test_explicit_selection_policy_rejects_invalid_or_ambiguous_limits(kwargs):
+    with pytest.raises((TypeError, ValueError)):
+        accel.ChannelSelectionPolicy(**kwargs)
+
+
 def test_streamed_proposal_matches_independent_dense_real_secant():
     rng = np.random.default_rng(590)
     fields = [spectrum(tuple(rng.normal(size=SHAPE) + 1j * rng.normal(size=SHAPE)
@@ -229,6 +241,72 @@ def test_original_retarded_frobenius_vetoes_better_aggregate_merit(monkeypatch):
     assert len(calls) == 2
 
 
+def _small_proposal(previous, old_image, current, image, mixing, **kwargs):
+    scales = accel.channel_scales(current, image, 1e-10)
+    return spectrum(0), {'scales': list(scales), 'reason': 'proposed',
+                         'reference_merit': accel.channel_merit(current, image, scales)}
+
+
+def _tradeoff_trial(monkeypatch, residuals, *, policy=None, bad_current=False):
+    def mapped(sigma, number):
+        difference = (2., 1., 0.) if number == 1 else residuals
+        return spectrum(tuple(getattr(sigma, key)+value
+                              for key, value in zip(KEYS, difference, strict=True)))
+
+    args, config, calls = fixture(monkeypatch, mapped)
+    if bad_current:
+        original = accel.evaluate_channel_born_map
+        def evaluated(*args, **kwargs):
+            value = original(*args, **kwargs)
+            if len(calls) == 2:
+                value.input_currents = TransverseCurrents(1., 1., 0.)
+            return value
+        monkeypatch.setattr(accel, 'evaluate_channel_born_map', evaluated)
+    monkeypatch.setattr(accel, 'propose_channel_anderson1', _small_proposal)
+    return accel.run_channel_accel(
+        *args, seed_input=spectrum(0), seed_mapped=spectrum(1), selection=policy,
+        config=replace(config, max_evaluations=2))
+
+
+def test_bounded_policy_can_retain_real_merit_improvement_with_small_component_tradeoff(monkeypatch):
+    policy = accel.ChannelSelectionPolicy('bounded-tradeoff', 1.02, .99)
+    strict = _tradeoff_trial(monkeypatch, (1., 1.01, 0.))
+    bounded = _tradeoff_trial(monkeypatch, (1., 1.01, 0.), policy=policy)
+    assert not strict.decisions[-1]['accepted_as_anchor'] and strict.state.index == 16
+    choice = bounded.decisions[-1]
+    assert choice['accepted_as_anchor'] and bounded.state.index == 17
+    assert choice['reason'] == 'merit_and_bounded_frobenius_passed'
+    assert choice['trial_merit'] < .99 * choice['reference_merit']
+    assert choice['unmixed_frobenius_growth_ratio']['lesser'] == pytest.approx(1.01)
+    assert not choice['unmixed_frobenius_nonincrease']['lesser']
+    assert all(choice['unmixed_frobenius_within_limit'].values())
+    assert not bounded.converged and not bounded.state.record.sigma_passed
+    assert len(bounded.history) == 2
+
+
+@pytest.mark.parametrize('residuals,bad_current,failed_check', [
+    ((1., 1.03, 0.), False, 'component'),
+    ((1.99, .995, 0.), False, 'merit'),
+    ((1., 1.01, 0.), True, 'current'),
+])
+def test_tradeoff_still_vetoes_component_growth_weak_merit_or_original_current_failure(
+        monkeypatch, residuals, bad_current, failed_check):
+    policy = accel.ChannelSelectionPolicy('bounded-tradeoff', 1.02, .99)
+    result = _tradeoff_trial(monkeypatch, residuals, policy=policy, bad_current=bad_current)
+    choice = result.decisions[-1]
+    assert not choice['accepted_as_anchor'] and choice['reason'] == 'trial_selection_rejected'
+    assert result.state.index == 16 and result.last_evaluated_state.index == 17
+    if failed_check == 'component':
+        assert choice['merit_within_limit'] and not choice['unmixed_frobenius_within_limit']['lesser']
+    elif failed_check == 'merit':
+        assert all(choice['unmixed_frobenius_nonincrease'].values())
+        assert choice['merit_ratio'] == pytest.approx(.995)
+        assert not choice['merit_within_limit']
+    else:
+        assert choice['merit_within_limit'] and all(choice['unmixed_frobenius_within_limit'].values())
+        assert not choice['current_passed']
+
+
 def test_hard_map_failure_stops_without_retry_or_replacing_anchor(monkeypatch):
     def mapped(sigma, number):
         if number == 2:
@@ -266,7 +344,8 @@ def test_time_admission_can_stop_before_any_fresh_map(monkeypatch):
     assert result.stop_reason == 'max_seconds' and not result.history
 
 
-def test_selection_merit_failure_preserves_last_published_trial_and_reason(monkeypatch):
+@pytest.mark.parametrize('selection', [None, accel.ChannelSelectionPolicy('bounded-tradeoff', 1.02, .99)])
+def test_selection_merit_failure_preserves_last_published_trial_and_reason(monkeypatch, selection):
     args, config, calls = fixture(monkeypatch)
 
     def broken_merit(*args):
@@ -276,6 +355,7 @@ def test_selection_merit_failure_preserves_last_published_trial_and_reason(monke
     completed = []
     result = accel.run_channel_accel(
         *args, seed_input=spectrum(0), seed_mapped=spectrum(1), config=config,
+        selection=selection,
         on_evaluation=lambda state, decision: completed.append(state.index))
     assert len(calls) == 2 and completed == [16]
     assert result.state.index == result.last_evaluated_state.index == 16
@@ -284,7 +364,34 @@ def test_selection_merit_failure_preserves_last_published_trial_and_reason(monke
     assert result.failure_reason == 'ValueError: selection arithmetic failure'
 
 
-def test_original_six_screen_convergence_bypasses_auxiliary_merit_failure(monkeypatch):
+def test_zero_merit_reference_keeps_finite_metadata_and_does_not_override_failed_currents(monkeypatch):
+    args, config, calls = fixture(monkeypatch, lambda supplied, number: supplied)
+    original = accel.evaluate_channel_born_map
+    def evaluate(*args, **kwargs):
+        value = original(*args, **kwargs)
+        value.input_currents = TransverseCurrents(1., 1., 0.)
+        return value
+    monkeypatch.setattr(accel, 'evaluate_channel_born_map', evaluate)
+    result = accel.run_channel_accel(
+        *args, seed_input=spectrum(0), seed_mapped=spectrum(1),
+        config=replace(config, max_evaluations=2),
+        selection=accel.ChannelSelectionPolicy('bounded-tradeoff', 1.02, .99))
+    choice = result.decisions[-1]
+    assert len(calls) == 2 and not result.converged and result.state.index == 16
+    assert choice['reference_merit'] == choice['trial_merit'] == choice['merit_limit'] == 0
+    assert choice['merit_ratio'] == 1 and choice['merit_within_limit']
+    assert set(choice['unmixed_frobenius_growth_ratio'].values()) == {1.0}
+    assert not choice['current_passed'] and not choice['accepted_as_anchor']
+
+
+def test_actual_merit_retains_finite_inner_product_hard_gate():
+    with (np.errstate(over='ignore', invalid='ignore'),
+          pytest.raises(ValueError, match='Nonfinite streamed channel inner product')):
+        accel.channel_merit(spectrum(-1e308), spectrum(1e308), (1., 1., 1.))
+
+
+@pytest.mark.parametrize('selection', [None, accel.ChannelSelectionPolicy('bounded-tradeoff', 1.02, .99)])
+def test_original_six_screen_convergence_bypasses_auxiliary_merit_failure(monkeypatch, selection):
     def mapped(sigma, number):
         if number == 1:
             return spectrum((sigma.retarded, sigma.statistical + 1, sigma.spectral))
@@ -297,7 +404,7 @@ def test_original_six_screen_convergence_bypasses_auxiliary_merit_failure(monkey
 
     monkeypatch.setattr(accel, 'channel_merit', broken_merit)
     result = accel.run_channel_accel(*args, seed_input=spectrum(0), seed_mapped=spectrum(1),
-                                     config=config)
+                                     config=config, selection=selection)
     decision = result.decisions[-1]
     assert len(calls) == 2 and result.state.index == result.last_evaluated_state.index == 17
     assert result.converged and result.stop_reason == 'fixed_point' and result.failure_reason is None
@@ -305,3 +412,5 @@ def test_original_six_screen_convergence_bypasses_auxiliary_merit_failure(monkey
     assert not decision['unmixed_frobenius_nonincrease']['retarded']
     assert decision['reason'] == 'fully_converged_trial' and decision['trial_merit'] is None
     assert not decision['merit_evaluated']
+    assert decision['unmixed_frobenius_growth_ratio']['retarded'] is None
+    assert decision['merit_limit'] is decision['merit_ratio'] is decision['merit_within_limit'] is None

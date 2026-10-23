@@ -20,6 +20,7 @@ import numpy as np
 from negfpy.anharmonic._material_nq1_campaign import HBAR_J_S, OMEGA0_RAD_S
 from negfpy.anharmonic.transverse_channel_accel import (
     ChannelAccelerationConfig,
+    ChannelSelectionPolicy,
     run_channel_accel,
 )
 from negfpy.anharmonic.transverse_channel_feedback import (
@@ -118,7 +119,7 @@ def seed_binding(profile):
 
 def checkpoint_binding(profile, profile_sha256):
     """Bind every evaluated trial, including rejected ones, to this strategy."""
-    return {'parent_result_sha256': profile['parent']['result_sha256'],
+    binding = {'parent_result_sha256': profile['parent']['result_sha256'],
             'parent_profile_sha256': profile['parent']['profile_sha256'],
             'source_commit': profile['source_commit'], 'source_tree': profile['source_tree'],
             'profile_sha256': profile_sha256, 'physics': plain(profile['map']),
@@ -127,6 +128,20 @@ def checkpoint_binding(profile, profile_sha256):
             'resume_parent_iteration': 15,
             'resume_parent_binding': plain(profile['resume']['binding']),
             'acceleration': plain(profile['acceleration'])}
+    if 'selection_policy' in profile:
+        binding['selection_policy'] = plain(profile['selection_policy'])
+    return binding
+
+
+def validate_selection_policy(profile):
+    """An explicit opt-in ranking study; old profiles retain their strict veto."""
+    policy = ChannelSelectionPolicy(**profile.get('selection_policy', {}))
+    if 'selection_policy' in profile and (
+            policy.mode != 'bounded-tradeoff' or policy.component_growth_limit != 1.02
+            or policy.merit_ratio_limit != .99
+            or profile['acceleration']['mode'] != 'anderson1'):
+        raise ValueError('The explicit bounded selection-policy study differs.')
+    return policy
 
 
 def validate_profile(profile):
@@ -151,6 +166,7 @@ def validate_profile(profile):
             or acceleration.coefficient_limit != 5.0 or acceleration.trust_radius != .25
             or acceleration.rank_rtol != 1e-10):
         raise ValueError('The explicit bounded acceleration strategy differs.')
+    validate_selection_policy(profile)
     if config.max_seconds+config.time_reserve_seconds >= profile['driver_timeout_seconds']:
         raise ValueError('SCBA must reserve time for driver closure.')
     if profile['checkpoint_max_bytes'] < 6*(16*4*601*120**2+65536):
@@ -225,6 +241,7 @@ def authenticate_resume(resume):
 
 def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     config, acceleration = validate_profile(profile)
+    selection = validate_selection_policy(profile)
     first_index, last_index = 16, 21
     storage = shutil.disk_usage(Path(checkpoint_directory).parent)
     if storage.free < profile['free_storage_min_bytes']:
@@ -234,6 +251,7 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
                   source_tree=profile['source_tree'], profile_sha256=profile_sha256,
                   settings=plain(profile['map']), scba_config=plain(config),
                   acceleration_config=plain(acceleration), mode=acceleration.mode,
+                  selection_policy_config=plain(selection),
                   checkpoints=[], attempts=[], evaluated_records=[], decisions=[], first_index=first_index,
                   selected_anchor_index=None, selected_anchor=None, last_evaluated_trial=None,
                   free_storage_before={'free_bytes': storage.free,
@@ -253,7 +271,10 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
                          'exported_contour_checks_are_diagnostic': True,
                          'all_completed_trials_checkpointed': True,
                          'algorithmic_anchor_is_not_accepted_restart': True,
-                         'seed_image_used_only_for_candidate_and_controller_history': True})
+                         'seed_image_used_only_for_candidate_and_controller_history': True,
+                         'comparison_baselines_used_computationally': False})
+    if 'selection_experiment' in profile:
+        result['selection_experiment'] = plain(profile['selection_experiment'])
     emit('parent_authentication_start')
     fields = load_material_map_fields(
         parent['root'], expected_result_sha256=parent['result_sha256'],
@@ -276,7 +297,8 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
     }
     binding = checkpoint_binding(profile, profile_sha256)
     emit('channel_accel_start', dict(result['initial_candidate'], max_evaluations=6,
-                                    acceleration=plain(acceleration), native_checkpoint_imported=True))
+                                    acceleration=plain(acceleration), selection_policy=plain(selection),
+                                    native_checkpoint_imported=True))
 
     def on_start(index, sigma_input, proposal):
         if (index != first_index+len(result['attempts'])
@@ -324,7 +346,8 @@ def run(profile, result, emit, checkpoint_directory, *, profile_sha256):
         seed_input=checkpoint.sigma_input, seed_mapped=checkpoint.mapped_sigma,
         sigma_initial=prepared, seed_index=15,
         scale=SolverScale(omega0=OMEGA0_RAD_S, hbar=HBAR_J_S), g=profile['map']['g'],
-        config=config, acceleration=acceleration, on_start=on_start, on_evaluation=on_evaluation)
+        config=config, acceleration=acceleration, selection=selection,
+        on_start=on_start, on_evaluation=on_evaluation)
     if plain(solved.decisions) != result['decisions']:
         raise ValueError('Solver decisions differ from completed callback/checkpoint decisions.')
     result.update(converged=solved.converged, stop_reason=solved.stop_reason,

@@ -48,6 +48,31 @@ class ChannelAccelerationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelSelectionPolicy:
+    """Rank evaluated proposals without changing the physical/convergence gates.
+
+    The default reproduces the original componentwise veto.  The opt-in policy
+    permits a bounded tradeoff against the current anchor only when the actual
+    frozen-scale merit improves by its specified factor.  It adds no cumulative
+    envelope; the caller's fresh-map budget remains the bound on this experiment.
+    """
+    mode: str = 'component-nonincreasing'
+    component_growth_limit: float = 1.0
+    merit_ratio_limit: float = 1.0
+
+    def __post_init__(self):
+        if self.mode not in ('component-nonincreasing', 'bounded-tradeoff'):
+            raise ValueError('Unknown evaluated-trial selection policy.')
+        if _real(self.component_growth_limit, 'component_growth_limit') < 1:
+            raise ValueError('component_growth_limit must be at least one.')
+        if not 0 < _real(self.merit_ratio_limit, 'merit_ratio_limit') <= 1:
+            raise ValueError('merit_ratio_limit must lie in (0,1].')
+        if self.mode == 'component-nonincreasing' and (
+                self.component_growth_limit != 1 or self.merit_ratio_limit != 1):
+            raise ValueError('The original selection policy requires unit limits.')
+
+
+@dataclass(frozen=True, slots=True)
 class ChannelAccelerationPlan:
     fixed_plan: ChannelSCBAPlan
     additional_retained_bytes: int
@@ -141,6 +166,14 @@ def channel_merit(state, raw, scales):
     return sqrt(max(0., _dot_blocks(residual, residual, scales, state.retarded.shape)))
 
 
+def _diagnostic_ratio(value, reference):
+    """JSON-safe scalar ratio; None denotes an unbounded/overflowed ratio."""
+    if reference == 0:
+        return 1.0 if value == 0 else None
+    ratio = value / reference
+    return ratio if np.isfinite(ratio) else None
+
+
 def propose_channel_anderson1(previous_input, previous_image, state, raw, mixing,
                               *, acceleration=None, absolute_floor=1e-10):
     """Return a read-only UNEVALUATED proposal, or an explicit cheap rejection.
@@ -216,23 +249,28 @@ def propose_channel_anderson1(previous_input, previous_image, state, raw, mixing
 
 def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_mapped,
                       sigma_initial=None, seed_index=15, scale=None, g=.03,
-                      config=None, acceleration=None, on_start=None, on_evaluation=None):
+                      config=None, acceleration=None, selection=None,
+                      on_start=None, on_evaluation=None):
     """Run a bounded number of fresh maps, including every rejected trial.
 
     The seed pair is historical evaluated input plus UNEVALUATED Born image,
     never an accepted restart.  A plain mixed warm-up is evaluated first.
-    Only acceleration trials need merit and original R/L/G Frobenius
-    nonincrease against a frozen selected anchor; linear steps remain the
-    explicit fallback.  Hard numerical map errors stop without retry.
+    Only accelerated trials use the explicit selection policy against a frozen
+    selected anchor; linear steps remain the explicit fallback.  The original
+    six scientific screens alone determine convergence.  Hard numerical map
+    errors stop without retry.
     """
     started = monotonic()
     config = ChannelSCBAConfig() if config is None else config
     acceleration = ChannelAccelerationConfig() if acceleration is None else acceleration
+    selection = ChannelSelectionPolicy() if selection is None else selection
     seed_index = _integer(seed_index, 'seed_index')
     if not isinstance(config, ChannelSCBAConfig):
         raise TypeError('config must be ChannelSCBAConfig.')
     if not isinstance(acceleration, ChannelAccelerationConfig):
         raise TypeError('acceleration must be ChannelAccelerationConfig.')
+    if not isinstance(selection, ChannelSelectionPolicy):
+        raise TypeError('selection must be ChannelSelectionPolicy.')
     if any(cb is not None and not callable(cb) for cb in (on_start, on_evaluation)):
         raise TypeError('Callbacks must be callable.')
     shape = (vertex.mesh.n_qpoints, grid.n_points, vertex.ndof, vertex.ndof)
@@ -279,23 +317,36 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
             trial = ChannelSCBAState(index, sigma, evaluation, record)
             reference = state
             nonincrease, reference_merit, trial_merit, scales = {}, None, None, None
+            reference_fro, trial_fro, growth_ratio, within_limit = {}, {}, {}, {}
+            merit_limit = merit_ratio = merit_within_limit = None
             selected, reason = True, 'linear_evaluation_selected'
             if proposal['kind'] == 'anderson1':
                 scales = tuple(proposal['scales'])
                 reference_merit = proposal['reference_merit']
-                nonincrease = {key: record.sigma_residuals[key].error_frobenius
-                                <= reference.record.sigma_residuals[key].error_frobenius
-                               for key in ('retarded', 'lesser', 'greater')}
+                reference_fro = {key: reference.record.sigma_residuals[key].error_frobenius
+                                 for key in ('retarded', 'lesser', 'greater')}
+                trial_fro = {key: record.sigma_residuals[key].error_frobenius
+                             for key in reference_fro}
+                nonincrease = {key: trial_fro[key] <= reference_fro[key] for key in reference_fro}
+                growth_ratio = {key: _diagnostic_ratio(trial_fro[key], reference_fro[key])
+                                for key in reference_fro}
+                within_limit = {key: trial_fro[key] <= selection.component_growth_limit * reference_fro[key]
+                                for key in reference_fro}
                 if record.converged:
                     # The original six convergence screens take priority.
                     # An auxiliary merit failure must not veto a true pass.
                     selected, reason = True, 'fully_converged_trial'
                 else:
                     trial_merit = channel_merit(sigma, evaluation.map_sigma, scales)
-                    selected = bool(trial_merit <= reference_merit
-                                    and all(nonincrease.values()) and record.current_passed)
-                    reason = ('merit_and_unmixed_frobenius_passed' if selected else
-                              'trial_selection_rejected')
+                    merit_limit = selection.merit_ratio_limit * reference_merit
+                    merit_ratio = _diagnostic_ratio(trial_merit, reference_merit)
+                    merit_within_limit = trial_merit <= merit_limit
+                    selected = bool(merit_within_limit and all(within_limit.values())
+                                    and record.current_passed)
+                    passed_reason = ('merit_and_unmixed_frobenius_passed'
+                                     if selection.mode == 'component-nonincreasing' else
+                                     'merit_and_bounded_frobenius_passed')
+                    reason = passed_reason if selected else 'trial_selection_rejected'
             if selected:
                 if state is not None:
                     previous = (state.sigma_input, state.evaluation.map_sigma)
@@ -307,6 +358,15 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
                             'merit_scales': list(scales) if scales is not None else None,
                             'merit_evaluated': trial_merit is not None,
                             'unmixed_frobenius_nonincrease': nonincrease,
+                            'selection_policy': selection.mode,
+                            'component_growth_limit': selection.component_growth_limit,
+                            'merit_ratio_limit': selection.merit_ratio_limit,
+                            'unmixed_frobenius_reference': reference_fro,
+                            'unmixed_frobenius_trial': trial_fro,
+                            'unmixed_frobenius_growth_ratio': growth_ratio,
+                            'unmixed_frobenius_within_limit': within_limit,
+                            'merit_limit': merit_limit, 'merit_ratio': merit_ratio,
+                            'merit_within_limit': merit_within_limit,
                             'current_passed': record.current_passed,
                             'fully_converged': record.converged}
         except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
@@ -348,6 +408,7 @@ def run_channel_accel(grid, vertex, dynamical, left, right, *, seed_input, seed_
     return result('max_evaluations')
 
 
-__all__ = ['ChannelAccelerationConfig', 'ChannelAccelerationPlan', 'ChannelAccelerationResult',
+__all__ = ['ChannelAccelerationConfig', 'ChannelAccelerationPlan',
+           'ChannelAccelerationResult', 'ChannelSelectionPolicy',
            'channel_merit', 'channel_scales', 'plan_channel_accel',
            'propose_channel_anderson1', 'run_channel_accel']
