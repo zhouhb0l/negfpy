@@ -2,6 +2,9 @@
 
 ## Unreleased — 2.0.0.dev0 preparation
 
+- Allow explicitly requested contact allocation budgets up to 4 GiB for finer
+  q/frequency grids, retaining the 64 MiB default and all contact equations and
+  physical checks.
 - Expose the existing fitted complete-energy, native R/C/D SCBA, bounded
   Anderson, proposal-feasibility and checkpoint implementations through
   `negfpy.anharmonic.complete_energy`.

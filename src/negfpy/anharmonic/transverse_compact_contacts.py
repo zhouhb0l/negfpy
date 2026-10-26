@@ -28,6 +28,7 @@ from .transverse_solver import TransverseSpectrum
 from .types import HarmonicReservoir
 
 _MAX_BYTES = 64 * 1024**2
+_MAX_REQUEST_BYTES = 4 * 1024**3
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -87,6 +88,9 @@ def build_compact_transverse_contact(
     The unchanged contact builder supplies every physical validation, signed
     spectrum and continuous fixed-eta zero limit. Each callback is called once
     and its arrays are detached before another q is requested.
+
+    Default allocation admission remains 64 MiB; an explicit budget may be
+    increased up to 4 GiB for a refined mesh without changing the mathematics.
     """
     kpoints = _kpoints(mesh)
     if not isinstance(grid, SignedFrequencyGrid) or not callable(reservoirs):
@@ -96,7 +100,9 @@ def build_compact_transverse_contact(
     if eta <= 0 or side not in ("left", "right"):
         raise ValueError("Positive eta_lead and side='left' or 'right' are required.")
     samples = _validate_q_samples(q_samples)
-    limit = min(_integer(max_bytes, "max_bytes", minimum=1), _MAX_BYTES)
+    limit = _integer(max_bytes, "max_bytes", minimum=1)
+    if limit > _MAX_REQUEST_BYTES:
+        raise ValueError("Explicit contact max_bytes exceeds the 4 GiB request ceiling.")
     work = _integer(max_base_evaluations, "max_base_evaluations", minimum=1)
     if not isinstance(surface_gf_method, str):
         raise TypeError("surface_gf_method must be a string.")

@@ -31,6 +31,7 @@ from .transverse_solver import TransverseSpectrum, validate_transverse_spectrum
 from .types import HarmonicReservoir, KeldyshSpectrum
 
 _MAX_BYTES = 64 * 1024**2
+_MAX_REQUEST_BYTES = 4 * 1024**3
 _COMPONENTS = ("retarded", "lesser", "greater")
 ReservoirBuilder = Callable[[tuple[float, float]], HarmonicReservoir]
 
@@ -100,6 +101,10 @@ def build_transverse_contact(
     At omega=0, lesser=greater=-i*T*L_eta, with L_eta=Gamma'(0), in every
     stable sector. L_eta may be complex Hermitian. Its reality/reflection
     relation is checked jointly at opposite transverse q, not within one q.
+
+    The default payload budget stays 64 MiB. Callers refining the q/frequency
+    mesh may explicitly admit up to 4 GiB; this changes allocation admission
+    only and does not change the contact equations or their physical checks.
     """
     kpoints = _kpoints(mesh)
     if not isinstance(grid, SignedFrequencyGrid) or not callable(reservoirs):
@@ -109,7 +114,9 @@ def build_transverse_contact(
     if eta <= 0 or side not in ("left", "right"):
         raise ValueError("Positive eta_lead and side='left' or 'right' are required.")
     samples = _validate_q_samples(q_samples)
-    limit = min(_integer(max_bytes, "max_bytes", minimum=1), _MAX_BYTES)
+    limit = _integer(max_bytes, "max_bytes", minimum=1)
+    if limit > _MAX_REQUEST_BYTES:
+        raise ValueError("Explicit contact max_bytes exceeds the 4 GiB request ceiling.")
     work = _integer(max_base_evaluations, "max_base_evaluations", minimum=1)
     nq = mesh.n_qpoints
     if (3 * grid.n_points + 1) * nq * dimension**2 * 16 > limit:
