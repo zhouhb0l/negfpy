@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "negfpy"
 version = "2.0.0.dev0"
-description = "Validated phonon transport with anharmonic NEGF under development"
+description = "Phonon transport and research anharmonic NEGF workflows"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "h5py>=3,<4",
   "numpy>=2,<3",
@@ -38,6 +38,7 @@ where = ["src"]
 negfpy = ["_build_provenance.json"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
   "nightly: bounded validation cases that are too costly for pull-request CI",
 ]

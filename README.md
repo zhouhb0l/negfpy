@@ -1,76 +1,90 @@
-# NEGFPy 1.0
+# NEGFPy
 
-NEGFPy 1.0 is the validated bulk-phonon and harmonic-NEGF release line. It
-provides two deliberately separate workflows:
+NEGFPy provides harmonic open-device phonon NEGF, periodic-crystal phonons and
+intrinsic three-phonon SMRTA transport, and research cubic anharmonic NEGF.
+The current version is **2.0.0.dev0**, being prepared for a future release.
 
-- open-system harmonic phonon transport with the established NEGF API; and
-- periodic-crystal phonons plus intrinsic three-phonon thermal conductivity
-  in the single-mode relaxation-time approximation (SMRTA).
-
-The bulk API includes audited phono3py FC2/FC3 ingestion, phonon band
-structures, total and projected DOS, analytical group velocities, on-shell
-three-phonon rates, population lifetimes, mean free paths, mode-resolved and
-tensor thermal conductivity, cumulative conductivity, and checked HDF5
-archives. Raw IFCs are not silently corrected, symmetrized, truncated, or
-remapped.
+The source checkout contains reusable library code, tests, documentation and
+portable examples. Material files, run outputs and historical experiments live
+outside the package. Raw IFCs are not silently corrected or replaced.
 
 ## Installation
+
+Python 3.11 or newer is required. Local preparation checks use Python 3.12.
 
 ```bash
 python -m pip install .
 ```
 
-The pinned silicon validation environment uses phono3py 4.4.0:
+The optional historical silicon oracle environment pins phono3py 4.4.0:
 
 ```bash
 python -m pip install '.[material-oracle]'
 ```
 
-## Safe starting point
+## Workflows
 
-FC2-only observables do not require cubic force constants:
+- **Harmonic open-device NEGF:** device and contact Green functions,
+  transmission and heat currents through the established modeling/workflow APIs.
+- **Periodic bulk phonons and SMRTA:** FC2 bands, DOS and group velocities;
+  explicit FC3 rates, lifetimes and intrinsic three-phonon conductivity through
+  `negfpy.bulk`. See the [bulk guide](docs/bulk_rta.md) and
+  [silicon example](examples/bulk_rta_silicon.py).
+- **Research anharmonic device NEGF:** independent native retarded,
+  statistical and spectral channels, four-term Born maps, bounded SCBA and
+  checkpoint continuation. The fitted complete-energy path has a consolidated
+  [Python API](src/negfpy/anharmonic/complete_energy.py),
+  [portable example](examples/complete_energy_scba.py) and
+  [usage guide](docs/complete_energy_scba.md).
+
+A safe FC2-only bulk starting point is:
 
 ```python
 import negfpy.bulk as bulk
 
 problem = bulk.BulkHarmonicProblem.from_phono3py(
-    "phono3py_disp.yaml",
-    "fc2.hdf5",
+    "phono3py_disp.yaml", "fc2.hdf5",
 )
 spectrum = problem.compute_uniform_mesh_phonons((11, 11, 11))
 dos = bulk.compute_phonon_dos(spectrum, sigma_thz=0.1)
 ```
 
-The full example computes bands, DOS, and group velocities by default. FC3 is
-unreachable unless both heavy-work flags are supplied:
+Heavy FC3 operations and full SCBA require explicit inputs and resource bounds;
+importing the library or portable example does not launch a calculation.
+
+## Model and result scope
+
+FC3 already defines a cubic Taylor energy; SCBA does not require fitting.
+The complete-center-energy fit is an explicit compact boundary-model choice
+for the available bulk IFCs. Selecting whole energies before differentiation
+retains their required endpoint derivatives. It does not uniquely reconstruct
+an interface from bulk IFCs.
+
+The preserved fitted-model study reached the original six SCBA convergence
+screens on its 4-q/601-frequency grid with unchanged physical guards. Its bulk
+IFC fit error is about **2.14147%** in the reported Cartesian Frobenius metric.
+This is evidence for that model and grid, not validated physical-interface,
+production-IFC, transport or mesh accuracy. Actual IFC reference calculations
+and fitted-model results remain distinct. See the guide for definitions.
+
+Bulk SMRTA and open-device interacting transport remain separate methods.
+Bulk lifetimes are not substituted for a conserving open-device self-energy.
+
+## Development and release preparation
 
 ```bash
-python examples/bulk_rta_silicon.py \
-  --crystal phono3py_disp.yaml --fc2 fc2.hdf5
+python -m pip install '.[test]'
+python -m pytest
 ```
 
-See [the bulk SMRTA guide](docs/bulk_rta.md) for the cubic workflow, linewidth
-and lifetime conventions, archive formats, and convergence requirements.
+The test suite includes expensive optional cases; read their resource markers
+before selecting broad scientific runs. Maintainer utilities remain in
+`scripts/`; dated multi-q HPC launchers were removed from the active tree and
+are preserved in Git history and workspace recovery archives. The installed
+package does not depend on those launchers.
 
-## Scientific boundary
-
-The 1.0 conductivity is intrinsic three-phonon SMRTA. It is not iterative
-LBTE, and it excludes isotope, boundary, four-phonon, Wigner/interband, and
-electron--phonon scattering unless a separately named model is added later.
-Coarse-mesh silicon values in validation records establish implementation
-agreement; they are not presented as converged material predictions.
-
-Real-material anharmonic device NEGF is the planned 2.0 line. Bulk relaxation
-times are an independent oracle and screening observable, not a substitute for
-a conserving open-device phonon--phonon self-energy.
-
-## Validation status
-
-The repository preserves the earlier dense-SCBA toy release and silicon bulk
-three-phonon oracle. A 1.0 tag is created only after the exact clean wheel
-passes the strict remote band/DOS/group-velocity/rate/SMRTA gate and its
-machine-readable artifacts and PDF report are retrieved and verified.
-
-Project structure and historical boundaries are summarized in
-[PROJECT_NOTES.md](PROJECT_NOTES.md). Release contents and exclusions are
-listed in [CHANGELOG.md](CHANGELOG.md).
+The [platform guide](PROJECT_NOTES.md),
+[workspace layout](docs/development/workspace_layout.md),
+[release preparation note](docs/development/release_preparation.md) and
+[changelog](CHANGELOG.md) describe the boundaries and remaining release work.
+No new software release is published by this consolidation.

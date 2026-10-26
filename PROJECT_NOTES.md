@@ -1,5 +1,11 @@
 # NEGFPy platform guide
 
+The active development version is **2.0.0.dev0**. The canonical checkout is
+`negfpy/` in the workspace. See the [current README](README.md) and
+[complete-energy guide](docs/complete_energy_scba.md) for the research SCBA
+entry point. Historical qualification and planning statements below describe
+their named release lines; they do not certify the current development tree.
+
 This repository contains the reusable NEGFPy implementation. Material inputs,
 generated calculations, validation artifacts, external programs, and compiled
 reports live in the sibling workspace directories described in the
@@ -40,7 +46,7 @@ the user-facing periodic-crystal harmonic and intrinsic three-phonon SMRTA
 workflow. Its safe entry point is `BulkHarmonicProblem`; FC3 contraction is an
 explicit heavy operation through `BulkTransportProblem`.
 
-The planned 2.0 line is real-material anharmonic NEGF. Sparse and
+The 2.0 development line includes real-material anharmonic NEGF research. Sparse and
 transverse-momentum material-device SCBA remain gated on the independently
 validated toy and bulk-oracle foundations. Bulk SMRTA lifetimes are a useful
 oracle but are not inserted into harmonic transmission as a substitute for a

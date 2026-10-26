@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — 2.0.0.dev0 preparation
+
+- Expose the existing fitted complete-energy, native R/C/D SCBA, bounded
+  Anderson, proposal-feasibility and checkpoint implementations through
+  `negfpy.anharmonic.complete_energy`.
+- Add a portable caller-input example and document model, boundary and
+  convergence assumptions. The fitted model remains a research surrogate.
+- Remove 23 dated experimental launch scripts and their 24 driver-only tests
+  from the active checkout. Their exact sources remain in Git history and
+  external recovery snapshots. Reusable solver and model modules are retained.
+- Align the Python minimum with the checkpoint code's Python 3.11
+  `hashlib.file_digest` API. Default test discovery is limited to `tests/`;
+  historical report checks can still be invoked explicitly.
+
+This is source consolidation for a future release. It changes no solver
+physics, physical guards or convergence thresholds, and does not publish or
+certify a new software release or physical transport result.
+
 ## 1.0.0 — 2026-08-02
 
 This release establishes two validated, explicitly separated workflows:
