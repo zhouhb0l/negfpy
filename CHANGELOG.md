@@ -2,6 +2,8 @@
 
 ## Unreleased — 2.0.0.dev0 preparation
 
+- Propagate explicit contact allocation budgets through the spectrum constructor,
+  fixing refined-grid admission while keeping the default and physical checks.
 - Allow explicitly requested contact allocation budgets up to 4 GiB for finer
   q/frequency grids, retaining the 64 MiB default and all contact equations and
   physical checks.

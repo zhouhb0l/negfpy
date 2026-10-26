@@ -26,6 +26,7 @@ from .transverse_q import TransverseCubicVertex, cubic_born_self_energy_q
 from .types import SolverScale
 
 _MAX_BYTES = 64 * 1024**2
+_MAX_REQUEST_BYTES = 4 * 1024**3
 _COMPONENTS = ("retarded", "lesser", "greater")
 
 
@@ -64,18 +65,28 @@ def _ratio(a: np.ndarray, b: np.ndarray, atol: float, rtol: float) -> float:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class TransverseSpectrum:
-    """Immutable full-grid ``r,<,>`` fields of shape ``(Nq,Nw,D,D)``."""
+    """Immutable full-grid ``r,<,>`` fields of shape ``(Nq,Nw,D,D)``.
+
+    The three detached complex128 payloads share an explicit allocation
+    budget, defaulting to 64 MiB and bounded above by 4 GiB. This admission
+    limit does not estimate process RSS or change spectrum validation.
+    """
 
     retarded: np.ndarray = field(repr=False)
     lesser: np.ndarray = field(repr=False)
     greater: np.ndarray = field(repr=False)
+    max_bytes: int = field(default=_MAX_BYTES, kw_only=True, repr=False)
 
     def __post_init__(self) -> None:
+        _positive_integer(self.max_bytes, "max_bytes")
+        if self.max_bytes > _MAX_REQUEST_BYTES:
+            raise ValueError("Explicit spectrum max_bytes exceeds the 4 GiB request ceiling.")
         shape = np.shape(self.retarded)
         if len(shape) != 4 or min(shape) < 1 or shape[-1] != shape[-2]:
             raise ValueError("Spectrum must have shape (Nq,Nw,D,D), with D >= 1.")
-        if 3 * np.prod(shape, dtype=object) * 16 > _MAX_BYTES:
-            raise ValueError("Spectrum payload exceeds the 64 MiB prototype limit.")
+        if 3 * np.prod(shape, dtype=object) * 16 > self.max_bytes:
+            raise ValueError("Spectrum payload exceeds max_bytes (64 MiB by default).")
+        object.__setattr__(self, "max_bytes", int(self.max_bytes))
         for name in _COMPONENTS:
             value = getattr(self, name)
             if np.shape(value) != shape:

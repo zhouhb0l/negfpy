@@ -201,7 +201,7 @@ def build_transverse_contact(
             "limit_minimum_eigenvalue": descriptor.passivity_minimum_eigenvalue,
             "zero_convention": "continuous-fixed-eta-bose-broadening",
         })
-    spectrum = TransverseSpectrum(**{
+    spectrum = TransverseSpectrum(max_bytes=limit, **{
         name: np.stack([getattr(field, name) for field in fields]) for name in _COMPONENTS
     })
     zero_limits = np.stack(limits)
