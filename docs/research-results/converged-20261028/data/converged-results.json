@@ -1,0 +1,532 @@
+{
+  "schema": "negfpy.curated-converged-scalars.v1",
+  "curated_date": "2026-10-28",
+  "model": {
+    "kind": "preserved fitted complete-center-energy research surrogate",
+    "reported_bulk_fc3_relative_frobenius_fit_error": 0.021414695219655902,
+    "reported_bulk_fc3_relative_frobenius_fit_error_percent": 2.14146952196559,
+    "same_saved_coefficients_without_refit": true,
+    "actual_ifc_files_modified": false,
+    "scba_vertex_role": "Declared fitted energy-model vertex; distinct from a direct raw-FC3 reference calculation."
+  },
+  "common_physics": {
+    "g": 0.03,
+    "eta_lead": 0.0015625,
+    "eta_device": 0,
+    "temperatures_k": [
+      305,
+      295
+    ],
+    "full_green_dof": 216,
+    "active_vertex_dof": 132,
+    "device_layers": 9,
+    "interaction_layers": [
+      2,
+      6
+    ],
+    "frequency_range_solver_units": [
+      -7.5,
+      7.5
+    ],
+    "original_guards_and_thresholds_unchanged": true,
+    "sigma_rtol": 0.0001,
+    "sigma_atol": 1e-10,
+    "current_rtol": 0.001,
+    "current_atol_w": 1e-14
+  },
+  "interpretation": {
+    "included": "Only exit-zero, passed, fixed-point converged jobs with original three Sigma and three current screens passing.",
+    "ratio_definition": "Recorded original screen error divided by that screen's original allowance; pass is ratio <= 1.",
+    "convergence_scope": "Numerical SCBA convergence for each declared fitted model and sampled grid.",
+    "open_questions": [
+      "full two-dimensional q-mesh convergence",
+      "unique physical-interface model",
+      "production transport accuracy"
+    ],
+    "frequency_comparison": "601/901/1201 comparisons keep the 4x1 transverse grid and frequency range fixed; the 1201 result is a continuation from native17.",
+    "q_comparison": "1x2 is a coarse second-direction sample, not a refinement of 4x1. Its current differs by about 4.20%; q-mesh convergence is not established.",
+    "diagnostic_current_target": {
+      "rtol": 0.02,
+      "atol_w": 1e-14,
+      "is_scba_gate": false
+    },
+    "trace_scope": "Original successful continuation only, native3..13 (11 new maps from seed native2). Other full traces are not reconstructed from logs.",
+    "no_numerical_replay": true
+  },
+  "records": [
+    {
+      "id": "original",
+      "label": "Original continuation",
+      "job_id": "25994421.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-site-energy-convergence-20261026/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        4,
+        1
+      ],
+      "q_points": 4,
+      "frequency_nodes": 601,
+      "continuation_seed_native_index": 2,
+      "completed_maps_this_job": 11,
+      "selected_maps_this_job": 11,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 13,
+      "latest_native_state_index": 13,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.08371846605934073,
+        "lesser": 0.08231284387609285,
+        "greater": 0.08231284390131025
+      },
+      "current_screen_ratios": {
+        "collision_power": 4.968296943431727e-09,
+        "contact_balance": 4.978589441635324e-09,
+        "full_balance": 1.0292498203597047e-11
+      },
+      "currents_w": {
+        "left": 3.865724715832432e-09,
+        "right": -3.865724715851727e-09
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-site-energy-reproduction-retry-20261027/completion-summary.json",
+        "json_field": "result.current_comparison.contacts.{left,right}.reference_w",
+        "note": "Recorded prior-current context from the successful reproduction; original completion summary omits currents."
+      },
+      "left_current_difference_from_4x1_601_w": 0.0,
+      "left_current_signed_difference_from_4x1_601_percent": 0.0,
+      "within_2_percent_diagnostic_target": true
+    },
+    {
+      "id": "reproduction",
+      "label": "Fresh-zero reproduction",
+      "job_id": "26010982.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-site-energy-reproduction-retry-20261027/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        4,
+        1
+      ],
+      "q_points": 4,
+      "frequency_nodes": 601,
+      "continuation_seed_native_index": null,
+      "completed_maps_this_job": 13,
+      "selected_maps_this_job": 13,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 13,
+      "latest_native_state_index": 13,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.08371846605934073,
+        "lesser": 0.08231284387609285,
+        "greater": 0.08231284390131025
+      },
+      "current_screen_ratios": {
+        "collision_power": 4.968296943431727e-09,
+        "contact_balance": 4.978589441635324e-09,
+        "full_balance": 1.0292498203597047e-11
+      },
+      "currents_w": {
+        "left": 3.865724715832432e-09,
+        "right": -3.865724715851727e-09,
+        "collision_power": 1.9255751259348936e-20
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-site-energy-reproduction-retry-20261027/completion-summary.json",
+        "json_field": "result.selected_anchor.currents"
+      },
+      "left_current_difference_from_4x1_601_w": 0.0,
+      "left_current_signed_difference_from_4x1_601_percent": 0.0,
+      "within_2_percent_diagnostic_target": true
+    },
+    {
+      "id": "f901",
+      "label": "Frequency 901",
+      "job_id": "26010987.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-site-energy-mesh-study-retry-20261027/f901/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        4,
+        1
+      ],
+      "q_points": 4,
+      "frequency_nodes": 901,
+      "continuation_seed_native_index": null,
+      "completed_maps_this_job": 10,
+      "selected_maps_this_job": 10,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 10,
+      "latest_native_state_index": 10,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.07502166287429332,
+        "lesser": 0.07390130505832285,
+        "greater": 0.0739013051353338
+      },
+      "current_screen_ratios": {
+        "collision_power": 1.2071679515241515e-10,
+        "contact_balance": 1.3138571441092592e-10,
+        "full_balance": 1.0668919258510765e-11
+      },
+      "currents_w": {
+        "left": 3.861928382784723e-09,
+        "right": -3.861928382784215e-09,
+        "collision_power": -4.674067854294456e-22
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-site-energy-mesh-study-retry-20261027/f901/completion-summary.json",
+        "json_field": "result.selected_anchor.currents"
+      },
+      "left_current_difference_from_4x1_601_w": -3.796333047708416e-12,
+      "left_current_signed_difference_from_4x1_601_percent": -0.09820495060499741,
+      "within_2_percent_diagnostic_target": true
+    },
+    {
+      "id": "f1201",
+      "label": "Frequency 1201 continuation",
+      "job_id": "26030319.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-site-energy-f1201-continuation-20261027/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        4,
+        1
+      ],
+      "q_points": 4,
+      "frequency_nodes": 1201,
+      "continuation_seed_native_index": 17,
+      "completed_maps_this_job": 3,
+      "selected_maps_this_job": 3,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 20,
+      "latest_native_state_index": 20,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.027956205300874025,
+        "lesser": 0.028583813624875273,
+        "greater": 0.028583813659171144
+      },
+      "current_screen_ratios": {
+        "collision_power": 2.5159987910778997e-09,
+        "contact_balance": 2.483629072395055e-09,
+        "full_balance": 3.236971868284505e-11
+      },
+      "currents_w": {
+        "left": 3.888387717211064e-09,
+        "right": -3.8883877172013815e-09,
+        "collision_power": -9.80833878365597e-21
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-site-energy-f1201-continuation-20261027/completion-summary.json",
+        "json_field": "result.selected_anchor.currents"
+      },
+      "left_current_difference_from_4x1_601_w": 2.2663001378631866e-11,
+      "left_current_signed_difference_from_4x1_601_percent": 0.586254920993558,
+      "within_2_percent_diagnostic_target": true
+    },
+    {
+      "id": "q12",
+      "label": "Second-axis 1 x 2",
+      "job_id": "26033250.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-q-direction-study-20261028/q12/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        1,
+        2
+      ],
+      "q_points": 2,
+      "frequency_nodes": 601,
+      "continuation_seed_native_index": null,
+      "completed_maps_this_job": 16,
+      "selected_maps_this_job": 16,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 16,
+      "latest_native_state_index": 16,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.3543651477681259,
+        "lesser": 0.3547199731545865,
+        "greater": 0.35471997252071497
+      },
+      "current_screen_ratios": {
+        "collision_power": 2.8623437881995335e-08,
+        "contact_balance": 2.8630338596689135e-08,
+        "full_balance": 6.9007146938000736e-12
+      },
+      "currents_w": {
+        "left": 4.028026680652696e-09,
+        "right": -4.028026680768306e-09,
+        "collision_power": 1.1558220586281143e-19
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-q-direction-study-20261028/q12/completion-summary.json",
+        "json_field": "result.selected_anchor.currents"
+      },
+      "left_current_difference_from_4x1_601_w": 1.6230196482026452e-10,
+      "left_current_signed_difference_from_4x1_601_percent": 4.198487392429727,
+      "within_2_percent_diagnostic_target": false
+    }
+  ],
+  "original_continuation_trace": [
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 3,
+      "completed_map_in_this_job": 1,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 9016.803696659294,
+      "sigma_lesser_ratio": 9019.635613029533,
+      "sigma_greater_ratio": 9019.635613029497,
+      "sigma_retarded_error": 0.0014503611754262226,
+      "sigma_lesser_error": 0.0029340810302702046,
+      "sigma_greater_error": 0.0029340810302700276,
+      "sigma_retarded_error_frobenius": 0.06735456661918239,
+      "sigma_lesser_error_frobenius": 0.08344933556453576,
+      "sigma_greater_error_frobenius": 0.083449335564533,
+      "current_collision_power_ratio": 8.91799865780413e-08,
+      "current_contact_balance_ratio": 8.91665436824662e-08,
+      "current_full_balance_ratio": 1.3442895575097865e-11,
+      "gamma_zero_mapped_C_frobenius_central": 0.018118859925826777,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002590709597352193
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 4,
+      "completed_map_in_this_job": 2,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 6485.101585987674,
+      "sigma_lesser_ratio": 6487.1098609239125,
+      "sigma_greater_ratio": 6487.109860924117,
+      "sigma_retarded_error": 0.001033266146278712,
+      "sigma_lesser_error": 0.002090253853037771,
+      "sigma_greater_error": 0.002090253853037789,
+      "sigma_retarded_error_frobenius": 0.04800083920181676,
+      "sigma_lesser_error_frobenius": 0.059440189174102306,
+      "sigma_greater_error_frobenius": 0.05944018917410168,
+      "current_collision_power_ratio": 1.1786326436645428e-06,
+      "current_contact_balance_ratio": 1.1786189704542534e-06,
+      "current_full_balance_ratio": 1.3673210289537768e-11,
+      "gamma_zero_mapped_C_frobenius_central": 0.017920877938590846,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002559518636891457
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 5,
+      "completed_map_in_this_job": 3,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 3927.023971409765,
+      "sigma_lesser_ratio": 3928.1196775255307,
+      "sigma_greater_ratio": 3928.1196775256035,
+      "sigma_retarded_error": 0.0006195469834227379,
+      "sigma_lesser_error": 0.0012532573040939957,
+      "sigma_greater_error": 0.0012532573040939792,
+      "sigma_retarded_error_frobenius": 0.028814232553446725,
+      "sigma_lesser_error_frobenius": 0.03563935377815292,
+      "sigma_greater_error_frobenius": 0.0356393537781533,
+      "current_collision_power_ratio": 3.643663278327829e-06,
+      "current_contact_balance_ratio": 3.6436608815668834e-06,
+      "current_full_balance_ratio": 2.396760945942618e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.017719480799308525,
+      "gamma_zero_mapped_C_frobenius_outer": 0.00025284217136412154
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 6,
+      "completed_map_in_this_job": 4,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 1340.4526105325372,
+      "sigma_lesser_ratio": 1340.5278374141676,
+      "sigma_greater_ratio": 1340.5278374143147,
+      "sigma_retarded_error": 0.0002093289069556051,
+      "sigma_lesser_error": 0.0004233412311321185,
+      "sigma_greater_error": 0.00042334123113214927,
+      "sigma_retarded_error_frobenius": 0.00982371380814924,
+      "sigma_lesser_error_frobenius": 0.012082050270997185,
+      "sigma_greater_error_frobenius": 0.012082050270998835,
+      "current_collision_power_ratio": 7.349400720202257e-06,
+      "current_contact_balance_ratio": 7.349404466254403e-06,
+      "current_full_balance_ratio": 3.74605214659259e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.01751509660582707,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002497432752234924
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 7,
+      "completed_map_in_this_job": 5,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 89.93499158587387,
+      "sigma_lesser_ratio": 90.02613429618309,
+      "sigma_greater_ratio": 90.0261342966573,
+      "sigma_retarded_error": 1.3972609591763157e-05,
+      "sigma_lesser_error": 2.8285843381778245e-05,
+      "sigma_greater_error": 2.8285843381925733e-05,
+      "sigma_retarded_error_frobenius": 0.0010118758708960972,
+      "sigma_lesser_error_frobenius": 0.0012051623676745473,
+      "sigma_greater_error_frobenius": 0.0012051623676752458,
+      "current_collision_power_ratio": 9.388011851861473e-06,
+      "current_contact_balance_ratio": 9.388007570757905e-06,
+      "current_full_balance_ratio": 4.2811035690328015e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.017408294826474865,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002481422892921485
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 8,
+      "completed_map_in_this_job": 6,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 85.56374110360079,
+      "sigma_lesser_ratio": 85.65066632272307,
+      "sigma_greater_ratio": 85.65066632269492,
+      "sigma_retarded_error": 1.3292595635904456e-05,
+      "sigma_lesser_error": 2.6909246491449603e-05,
+      "sigma_greater_error": 2.690924649143935e-05,
+      "sigma_retarded_error_frobenius": 0.0009624966141980064,
+      "sigma_lesser_error_frobenius": 0.0011462522418540558,
+      "sigma_greater_error_frobenius": 0.0011462522418533867,
+      "current_collision_power_ratio": 8.930905252531635e-06,
+      "current_contact_balance_ratio": 8.930901936375793e-06,
+      "current_full_balance_ratio": 3.3161558413751076e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.01740750229464096,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002481273300489808
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 9,
+      "completed_map_in_this_job": 7,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 60.71323507416501,
+      "sigma_lesser_ratio": 60.7758834081563,
+      "sigma_greater_ratio": 60.77588340803656,
+      "sigma_retarded_error": 9.428815258704058e-06,
+      "sigma_lesser_error": 1.90875594903309e-05,
+      "sigma_greater_error": 1.9087559490292378e-05,
+      "sigma_retarded_error_frobenius": 0.0006805823026733598,
+      "sigma_lesser_error_frobenius": 0.0008102138921077289,
+      "sigma_greater_error_frobenius": 0.0008102138921071011,
+      "current_collision_power_ratio": 6.323070948904181e-06,
+      "current_contact_balance_ratio": 6.323061483714343e-06,
+      "current_full_balance_ratio": 9.465189837696286e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.01740294009196728,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002480414312775102
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 10,
+      "completed_map_in_this_job": 8,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 1.7958331809919397,
+      "sigma_lesser_ratio": 1.7976083839439043,
+      "sigma_greater_ratio": 1.797608383751199,
+      "sigma_retarded_error": 2.78711616167438e-07,
+      "sigma_lesser_error": 5.641783393426324e-07,
+      "sigma_greater_error": 5.641783392821339e-07,
+      "sigma_retarded_error_frobenius": 1.133853327209934e-05,
+      "sigma_lesser_error_frobenius": 1.394110820237087e-05,
+      "sigma_greater_error_frobenius": 1.3941108201457374e-05,
+      "current_collision_power_ratio": 3.673235784814086e-08,
+      "current_contact_balance_ratio": 3.674300062083358e-08,
+      "current_full_balance_ratio": 1.0642772692724707e-11,
+      "gamma_zero_mapped_C_frobenius_central": 0.01739189468739919,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002478339985065023
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 11,
+      "completed_map_in_this_job": 9,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 1.7078116004507973,
+      "sigma_lesser_ratio": 1.709507893943048,
+      "sigma_greater_ratio": 1.709507894110923,
+      "sigma_retarded_error": 2.650506499255538e-07,
+      "sigma_lesser_error": 5.365278494375361e-07,
+      "sigma_greater_error": 5.365278494902283e-07,
+      "sigma_retarded_error_frobenius": 1.0759417457237528e-05,
+      "sigma_lesser_error_frobenius": 1.323378834235329e-05,
+      "sigma_greater_error_frobenius": 1.3233788343282376e-05,
+      "current_collision_power_ratio": 3.45047340230684e-08,
+      "current_contact_balance_ratio": 3.450096009840898e-08,
+      "current_full_balance_ratio": 3.7739246594147565e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.01739188938172241,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002478339509682156
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 12,
+      "completed_map_in_this_job": 10,
+      "selected_as_anchor": true,
+      "sigma_passed": false,
+      "current_passed": true,
+      "sigma_retarded_ratio": 1.2033520032533502,
+      "sigma_lesser_ratio": 1.2045866515700403,
+      "sigma_greater_ratio": 1.20458665198664,
+      "sigma_retarded_error": 1.8675863297850075e-07,
+      "sigma_lesser_error": 3.7805787651097253e-07,
+      "sigma_greater_error": 3.780578766417273e-07,
+      "sigma_retarded_error_frobenius": 7.470083720545328e-06,
+      "sigma_lesser_error_frobenius": 9.21090582511528e-06,
+      "sigma_greater_error_frobenius": 9.210905825564808e-06,
+      "current_collision_power_ratio": 2.23024897894246e-08,
+      "current_contact_balance_ratio": 2.230857074555805e-08,
+      "current_full_balance_ratio": 6.080956133449015e-12,
+      "gamma_zero_mapped_C_frobenius_central": 0.017391860112885384,
+      "gamma_zero_mapped_C_frobenius_outer": 0.00024783369809858695
+    },
+    {
+      "job_id": "25994421.pbs101",
+      "native_state_index": 13,
+      "completed_map_in_this_job": 11,
+      "selected_as_anchor": true,
+      "sigma_passed": true,
+      "current_passed": true,
+      "sigma_retarded_ratio": 0.08371846605934073,
+      "sigma_lesser_ratio": 0.08231284387609285,
+      "sigma_greater_ratio": 0.08231284390131025,
+      "sigma_retarded_error": 1.2992962748956675e-08,
+      "sigma_lesser_error": 2.583370903850614e-08,
+      "sigma_greater_error": 2.5833709046420815e-08,
+      "sigma_retarded_error_frobenius": 8.394745002934004e-07,
+      "sigma_lesser_error_frobenius": 1.0037245685726953e-06,
+      "sigma_greater_error_frobenius": 1.003724568077018e-06,
+      "current_collision_power_ratio": 4.968296943431727e-09,
+      "current_contact_balance_ratio": 4.978589441635324e-09,
+      "current_full_balance_ratio": 1.0292498203597047e-11,
+      "gamma_zero_mapped_C_frobenius_central": 0.01739179481168299,
+      "gamma_zero_mapped_C_frobenius_outer": 0.0002478331419845194
+    }
+  ]
+}

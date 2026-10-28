@@ -72,10 +72,34 @@ Thumbs.db
 # Large data
 # =========================
 data/
+!/docs/research-results/converged-20261028/data/
+!/docs/research-results/converged-20261028/data/*.csv
+!/docs/research-results/converged-20261028/data/*.json
 results/
 cache/
 outputs/
 validation-artifacts
+
+# Workspace experiments and runtime payloads stay outside the code repository.
+/tmp/
+/reports/
+/archives/
+/datasets/
+/synchronization/
+/studies/
+/external/
+checkpoints/
+runtime-env/
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.tar.gz
+*.tar.zst
+*.tgz
+*.bundle
 
 # Report artifacts are regenerated from checksum-anchored validation data.
 docs/validation/toy-model-report/release_config.tex

@@ -70,6 +70,16 @@ and fitted-model results remain distinct. See the guide for definitions.
 Bulk SMRTA and open-device interacting transport remain separate methods.
 Bulk lifetimes are not substituted for a conserving open-device self-energy.
 
+## Converged results for presentations
+
+The [converged SCBA result bundle](docs/research-results/converged-20261028/README.md)
+provides small PNG/SVG figures, CSV tables and precise scalar provenance for
+the successful fitted-model calculation, fresh-zero reproduction, frequency
+studies and 1×2 directional sample. It includes the original six-screen
+convergence outcomes and keeps model/grid convergence separate from physical
+interface and full q-mesh accuracy. Large run data and environments stay
+outside the repository.
+
 ## Development and release preparation
 
 ```bash
