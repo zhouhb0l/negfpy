@@ -1,6 +1,6 @@
 # Converged fitted-energy SCBA results
 
-This small presentation bundle contains recorded scalar results from five
+This small presentation bundle contains recorded scalar results from six
 successful jobs. Every included job finished with exit status 0, reported a
 fixed point, and passed the original three unmixed Sigma and three current
 screens. The figures and tables can be used directly in slides.
@@ -19,13 +19,19 @@ interface accuracy and full two-dimensional q-mesh convergence remain open.
 | Frequency study, 26010987 | 4×1 | 901 | 10 | 10 | 3.861928383 |
 | Frequency continuation, 26030319 | 4×1 | 1201 | 3, from state 17 | 20 | 3.888387717 |
 | Second-direction sample, 26033250 | 1×2 | 601 | 16 | 16 | 4.028026681 |
+| Equal-size axis control, 26033251 | 1×4 | 601 | 13 | 13 | 3.865724716 |
 
 The original and fresh-zero reproduction have exactly the same recorded
 current. At fixed 4×1 q sampling, the 1201-node current is **0.5863%** above
 601 and **0.6851%** above 901. The 1×2 current is **4.1985%** above the 4×1/601
 reference. The 1×2 grid samples another direction and is not a refinement of
-4×1. The 2% comparison target is diagnostic; it does not replace the six
-SCBA convergence screens.
+4×1. The converged 1×4 result has the same number of q points as 4×1 and
+matches its left current to **1.39×10⁻¹⁴ relative** (absolute difference
+**5.38×10⁻²³ W** in the recorded scalars). The fresh-zero 4×1 reproduction and
+1×4 axis control both converge in 13 maps, with no rejected trials. This supports transverse-axis
+agreement for this model and sampling; full two-dimensional q-mesh convergence
+remains open. The 2% comparison target is diagnostic; it does not replace the
+six SCBA convergence screens.
 
 ## Figures and editable data
 
@@ -33,6 +39,7 @@ SCBA convergence screens.
 | --- | --- | --- |
 | Successful currents and reproducibility | [PNG](figures/successful-currents.png) | [SVG](figures/successful-currents.svg) |
 | Frequency sensitivity at fixed q sampling | [PNG](figures/frequency-sensitivity.png) | [SVG](figures/frequency-sensitivity.svg) |
+| Converged transverse-axis comparison | [PNG](figures/q-direction-comparison.png) | [SVG](figures/q-direction-comparison.svg) |
 | Original successful convergence trajectory | [PNG](figures/original-convergence-trace.png) | [SVG](figures/original-convergence-trace.svg) |
 
 ![Recorded successful heat currents](figures/successful-currents.png)

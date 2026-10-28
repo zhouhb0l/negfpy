@@ -44,7 +44,7 @@
       "production transport accuracy"
     ],
     "frequency_comparison": "601/901/1201 comparisons keep the 4x1 transverse grid and frequency range fixed; the 1201 result is a continuation from native17.",
-    "q_comparison": "1x2 is a coarse second-direction sample, not a refinement of 4x1. Its current differs by about 4.20%; q-mesh convergence is not established.",
+    "q_comparison": "Equal-Nq 1x4 and 4x1 axes agree in recorded left current to about 1.39e-14 relative. The 1x2 coarse second-direction sample differs by about 4.20%; neither is a two-dimensional q-mesh refinement, and full q-mesh convergence remains open.",
     "diagnostic_current_target": {
       "rtol": 0.02,
       "atol_w": 1e-14,
@@ -97,6 +97,7 @@
         "note": "Recorded prior-current context from the successful reproduction; original completion summary omits currents."
       },
       "left_current_difference_from_4x1_601_w": 0.0,
+      "left_current_relative_difference_from_4x1_601": 0.0,
       "left_current_signed_difference_from_4x1_601_percent": 0.0,
       "within_2_percent_diagnostic_target": true
     },
@@ -143,6 +144,7 @@
         "json_field": "result.selected_anchor.currents"
       },
       "left_current_difference_from_4x1_601_w": 0.0,
+      "left_current_relative_difference_from_4x1_601": 0.0,
       "left_current_signed_difference_from_4x1_601_percent": 0.0,
       "within_2_percent_diagnostic_target": true
     },
@@ -189,6 +191,7 @@
         "json_field": "result.selected_anchor.currents"
       },
       "left_current_difference_from_4x1_601_w": -3.796333047708416e-12,
+      "left_current_relative_difference_from_4x1_601": -0.000982049506049974,
       "left_current_signed_difference_from_4x1_601_percent": -0.09820495060499741,
       "within_2_percent_diagnostic_target": true
     },
@@ -235,6 +238,7 @@
         "json_field": "result.selected_anchor.currents"
       },
       "left_current_difference_from_4x1_601_w": 2.2663001378631866e-11,
+      "left_current_relative_difference_from_4x1_601": 0.00586254920993558,
       "left_current_signed_difference_from_4x1_601_percent": 0.586254920993558,
       "within_2_percent_diagnostic_target": true
     },
@@ -281,8 +285,81 @@
         "json_field": "result.selected_anchor.currents"
       },
       "left_current_difference_from_4x1_601_w": 1.6230196482026452e-10,
+      "left_current_relative_difference_from_4x1_601": 0.04198487392429727,
       "left_current_signed_difference_from_4x1_601_percent": 4.198487392429727,
       "within_2_percent_diagnostic_target": false
+    },
+    {
+      "id": "q14",
+      "label": "Equal-size axis control 1 x 4",
+      "job_id": "26033251.pbs101",
+      "source_completion_summary": "reports/phonon-phonon-interaction/multiq-q-direction-study-20261028/q14/completion-summary.json",
+      "actual_exit_status": 0,
+      "passed": true,
+      "converged": true,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "q_grid_transverse": [
+        1,
+        4
+      ],
+      "q_points": 4,
+      "frequency_nodes": 601,
+      "continuation_seed_native_index": null,
+      "completed_maps_this_job": 13,
+      "selected_maps_this_job": 13,
+      "rejected_maps_this_job": 0,
+      "selected_native_state_index": 13,
+      "latest_native_state_index": 13,
+      "original_six_scba_screens_passed": true,
+      "sigma_screen_ratios": {
+        "retarded": 0.08371846618222575,
+        "lesser": 0.08231284403437225,
+        "greater": 0.08231284399741275
+      },
+      "current_screen_ratios": {
+        "collision_power": 4.983656376062426e-09,
+        "contact_balance": 4.990541300371201e-09,
+        "full_balance": 6.8849243087743504e-12
+      },
+      "currents_w": {
+        "left": 3.865724715832378e-09,
+        "right": -3.86572471585172e-09,
+        "collision_power": 1.931528019201716e-20
+      },
+      "current_provenance": {
+        "summary": "reports/phonon-phonon-interaction/multiq-q-direction-study-20261028/q14/completion-summary.json",
+        "json_field": "result.selected_anchor.currents"
+      },
+      "left_current_difference_from_4x1_601_w": -5.37667398159468e-23,
+      "left_current_relative_difference_from_4x1_601": -1.3908579572606442e-14,
+      "left_current_signed_difference_from_4x1_601_percent": -1.390857957260644e-12,
+      "within_2_percent_diagnostic_target": true,
+      "q_sample_role": "Equal-Nq axis control against 4x1; not a two-dimensional mesh refinement.",
+      "recorded_current_comparison": {
+        "source_completion_summary": "reports/phonon-phonon-interaction/multiq-q-direction-study-20261028/q14/completion-summary.json",
+        "json_field": "result.current_comparison.contacts",
+        "diagnostic_comparison_only": true,
+        "scba_gate_unchanged": true,
+        "rtol": 0.02,
+        "atol_w": 1e-14,
+        "contacts": {
+          "left": {
+            "actual_w": 3.865724715832378e-09,
+            "reference_w": 3.865724715832432e-09,
+            "difference_w": -5.37667398159468e-23,
+            "relative_difference": -1.3908579572606442e-14,
+            "matches": true
+          },
+          "right": {
+            "actual_w": -3.86572471585172e-09,
+            "reference_w": -3.865724715851727e-09,
+            "difference_w": 7.444625512977249e-24,
+            "relative_difference": 1.9258033254282024e-15,
+            "matches": true
+          }
+        }
+      }
     }
   ],
   "original_continuation_trace": [
