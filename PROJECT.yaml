@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "entity_id": "sw-negfpy",
+  "kind": "software",
+  "program": "NEGF",
+  "repository_name": "negfpy",
+  "workspace_relative": "NEGF/1. software_negfpy",
+  "entrypoints": {
+    "readme": "README.md",
+    "guidance": "AGENTS.md",
+    "home": "WORKSPACE_HOME.md",
+    "workspace": "WORKSPACE.md",
+    "external_storage": "EXTERNAL_STORAGE.md",
+    "path_example": "local-paths.example.json"
+  },
+  "local_configuration": "Host-specific locations, inherited instructions and compatibility mappings belong in the private workspace registry.",
+  "scope": "Reusable software source, tests, portable examples and documentation; surrounding campaigns and storage remain separate.",
+  "release_policy": "Existing scientific and release rules continue to govern. Organization metadata adds no release or validation claim."
+}

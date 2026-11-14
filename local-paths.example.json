@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "purpose": "Portable placeholders for private host configuration; this example introduces no runtime configuration loader.",
+  "data_root": null,
+  "artifacts_root": null,
+  "environment_root": null,
+  "recovery_root": null,
+  "runtime_behavior_changed": false
+}
