@@ -1,0 +1,6 @@
+{
+  "external_data_root": null,
+  "preserved_source_root": null,
+  "inherited_instructions": null,
+  "note": "Optional host-local configuration. Ensure local-paths.json is ignored before use; do not commit actual machine paths or secrets."
+}
