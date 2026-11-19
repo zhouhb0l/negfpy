@@ -38,7 +38,7 @@ jobs:
       - name: Test clean source
         run: python -m pytest -q
       - name: Build packages
-        run: python -m build --no-isolation
+        run: python -m build --no-isolation --sdist --wheel
       - name: Check installed wheel
         run: |
           python -m pip install --no-deps dist/*.whl
