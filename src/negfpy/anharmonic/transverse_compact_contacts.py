@@ -80,6 +80,7 @@ def build_compact_transverse_contact(
     q_samples: int = 257,
     max_bytes: int = _MAX_BYTES,
     max_base_evaluations: int = 100_000,
+    _contact_builder=None,
 ) -> CompactTransverseContact:
     """Build boundary fields with the original full-device contact embedding.
 
@@ -147,7 +148,10 @@ def build_compact_transverse_contact(
 
     # A valid transverse mesh always contains Gamma and hence one source.
     assert embedding is not None
-    contact = build_transverse_contact(
+    builder = build_transverse_contact if _contact_builder is None else _contact_builder
+    if not callable(builder):
+        raise TypeError("Internal contact builder must be callable")
+    contact = builder(
         mesh, grid, sources.__getitem__, len(embedding), eta, side=side,
         surface_gf_method=surface_gf_method, q_samples=samples, max_bytes=limit,
         max_base_evaluations=work,

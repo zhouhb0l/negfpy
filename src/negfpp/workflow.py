@@ -79,6 +79,9 @@ def scalar_state(state):
 def prepare(config, deadline):
     """Parameterize the existing silicon input construction without refitting."""
     doc, files = config.document, config.files
+    if doc["model"]["type"] == "saved_complete_energy":
+        from .nep import prepare_nep
+        return prepare_nep(config, deadline)
     resource, cfg = doc["resources"], doc["scba"]
     def admit():
         if monotonic()>=deadline:
@@ -235,6 +238,10 @@ def run(config):
             grid,mesh,dynamical,contacts,supported,scale,info=prepare(config,deadline)
             report["model"]=info
             report["preparation_seconds"]=monotonic()-started
+            checkpoint_binding = None
+            if "checkpoint" in doc:
+                from .checkpoint import make_binding
+                checkpoint_binding = make_binding(config, info)
             def on_start(index,sigma,proposal):
                 report["counts"]["attempted"]+=1
                 print(f"Map {index} started",flush=True)
@@ -250,6 +257,18 @@ def run(config):
                 latest=row
                 if accepted:
                     anchor=row
+                if checkpoint_binding is not None:
+                    from .checkpoint import write_latest
+                    receipt = write_latest(output/doc["checkpoint"]["file"], state, decision,
+                        binding=checkpoint_binding, source_input_bytes=source_bytes,
+                        grid=grid, mesh=mesh, vertex=supported.vertex, scale=scale,
+                        completed_ordinal=report["counts"]["completed"],
+                        selected_anchor_index=None if anchor is None else anchor["index"],
+                        max_bytes=cfg.max_bytes)
+                    report["checkpoint"] = receipt
+                    report["outputs"]["checkpoint"] = doc["checkpoint"]["file"]
+                report["selected_anchor"], report["last_evaluated"] = anchor, latest
+                write_json(output/"report.json", report)
                 with (output/"iterations.jsonl").open("a",encoding="utf-8") as stream:
                     stream.write(json.dumps(plain(row),allow_nan=False)+"\n")
                 print(f"Map {state.index}: Sigma max {max(v.ratio for v in state.record.sigma_residuals.values()):.6g}; current max {max(v.ratio for v in state.record.current_residuals.values()):.6g}; selected {bool(accepted)}",flush=True)

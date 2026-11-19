@@ -92,13 +92,27 @@ def load_input(path):
     if doc.get("schema") == "negfpp.local-fd.v1":
         from .local_fd_input import load_local_fd_input
         return load_local_fd_input(source, doc)
-    _object({key:value for key,value in doc.items() if key not in {"reference", "initial_self_energy"}}, set(_SECTIONS) | {"schema", "inputs_sha256"}, "input")
+    _object({key:value for key,value in doc.items() if key not in {"reference", "initial_self_energy", "checkpoint"}}, set(_SECTIONS) | {"schema", "inputs_sha256"}, "input")
     if doc["schema"] != "negfpp.run.v1":
         raise ValueError("schema must be negfpp.run.v1")
+    model_type = doc.get("model", {}).get("type") if isinstance(doc.get("model"), dict) else None
+    if model_type not in {"saved_site_energy", "saved_complete_energy"}:
+        raise ValueError("model.type must be saved_site_energy or saved_complete_energy")
     for name, keys in _SECTIONS.items():
+        if model_type == "saved_complete_energy":
+            if name == "model":
+                keys = {"type", "archive", "metadata"}
+                if "source_archive" in doc[name]:
+                    keys = keys | {"source_archive"}
+            elif name == "harmonic":
+                keys = {"ifc2"}
         _object(doc[name], keys, name)
-    if doc["model"]["type"] != "saved_site_energy":
-        raise ValueError("version 1.0 supports model.type=saved_site_energy")
+    if "checkpoint" in doc:
+        _object(doc["checkpoint"], {"file"}, "checkpoint")
+        filename = doc["checkpoint"]["file"]
+        if (not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.h5", filename)
+                or filename in {"fields.h5"}):
+            raise ValueError("checkpoint.file must be a distinct simple .h5 filename in the output directory")
     for section in ("grid", "reservoirs", "scale", "resources"):
         for key, value in doc[section].items():
             if key == "mesh":
@@ -157,10 +171,16 @@ def load_input(path):
     expected = doc["inputs_sha256"]
     if not isinstance(expected, dict):
         raise ValueError("inputs_sha256 must map input filenames to SHA-256 values")
-    references = {"fc2":doc["harmonic"]["fc2"], "crystal":doc["harmonic"]["crystal"],
-                  "coefficients":doc["model"]["coefficients"], "metadata":doc["model"]["metadata"]}
+    if model_type == "saved_site_energy":
+        references = {"fc2":doc["harmonic"]["fc2"], "crystal":doc["harmonic"]["crystal"],
+                      "coefficients":doc["model"]["coefficients"], "metadata":doc["model"]["metadata"]}
+    else:
+        references = {"ifc2":doc["harmonic"]["ifc2"], "archive":doc["model"]["archive"],
+                      "metadata":doc["model"]["metadata"]}
+        if "source_archive" in doc["model"]:
+            references["source_archive"] = doc["model"]["source_archive"]
     if any(not isinstance(value,str) or not value for value in references.values()) or set(expected) != set(references.values()):
-        raise ValueError("inputs_sha256 must cover exactly the four referenced input files")
+        raise ValueError("inputs_sha256 must cover exactly the referenced material input files")
     for key, value in references.items():
         if not isinstance(expected[value],str) or not re.fullmatch(r"[0-9a-f]{64}", expected[value]):
             raise ValueError(f"invalid SHA-256 for {value}")

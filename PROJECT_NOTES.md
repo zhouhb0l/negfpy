@@ -1,3 +1,13 @@
+# Version 1.2.0 additions
+
+The public one-JSON installed command accepts saved, qualified complete-energy
+IFC2/IFC3 data, rolling evaluated-input checkpoints and explicit authenticated
+historical initial guesses. Rebuild every target with unchanged complete support,
+physical guards and all six convergence screens. A q/temperature migrated state
+is a guess, never an accepted result. Rolling checkpoints contain only evaluated
+INPUT channels; rejected latest trials and selected anchors remain distinct.
+Original numerical source selection, qualifications and prior releases survive.
+
 # Package contract
 
 Version 1.1.0 adds an optional authenticated external evaluated self-energy

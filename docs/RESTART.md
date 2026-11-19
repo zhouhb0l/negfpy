@@ -60,3 +60,8 @@ and loading also consume the new run's time budget.
 
 This option applies to SCBA. Method 1 retains its separate `frozen_source`
 interface and frozen-kernel/local-FD approximation.
+
+Version 1.2.0 retains this exact-result contract and also provides separate
+[rolling checkpoint and authenticated historical-guess inputs](CHECKPOINTS.md).
+The explicitly selected historical format permits q/temperature initial-guess
+transfer under its additional provenance and same-model checks.

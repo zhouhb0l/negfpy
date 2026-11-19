@@ -43,6 +43,20 @@ def _authenticate(path, expected):
 
 def resolve_restart(source_path, spec):
     """Authenticate three files, optionally with the original legacy checksum file."""
+    if isinstance(spec, dict) and set(spec) in ({"checkpoint", "checkpoint_sha256"}, {"manifest", "manifest_sha256", "mode"}):
+        role = "checkpoint" if "checkpoint" in spec else "manifest"
+        if role == "manifest" and spec["mode"] != "same_model_closest_q_temperature_guess":
+            raise ValueError("Historical initial guess requires explicit same-model q/temperature migration mode")
+        value, digest = spec[role], spec[role+"_sha256"]
+        if (not isinstance(value, str) or not value.strip() or Path(value).is_absolute() or "\\" in value
+                or not isinstance(digest, str) or not _SHA.fullmatch(digest)):
+            raise ValueError("Initial self-energy requires a relative filename and lowercase SHA256")
+        path = (Path(source_path).resolve().parent/value).resolve(strict=True)
+        _authenticate(path, digest)
+        result = {role:path, role+"_sha256":digest}
+        if role == "manifest":
+            result["mode"] = spec["mode"]
+        return result
     if not isinstance(spec, dict) or set(spec) not in (_KEYS, _KEYS | _CHECKSUM_KEYS):
         raise ValueError("initial_self_energy requires fields/input/report hashes and optionally both checksums keys")
     result = {}
@@ -175,14 +189,20 @@ def _qualify(report, source_input, config, vertex, info):
     for name in ("geometry", "grid", "reservoirs", "scale"):
         if source_input[name] != target[name]:
             raise ValueError("Restart source " + name + " differs from target")
-    if (source_input["model"].get("type") != "saved_site_energy"
-            or target["model"].get("type") != "saved_site_energy"
+    if (source_input["model"].get("type") not in {"saved_site_energy", "saved_complete_energy"}
+            or target["model"].get("type") != source_input["model"].get("type")
             or source_input["scba"]["g"] != target["scba"]["g"]):
         raise ValueError("Restart source cubic model type or coupling differs")
-    roles = {"fc2": source_input["harmonic"]["fc2"], "crystal": source_input["harmonic"]["crystal"],
-             "coefficients": source_input["model"]["coefficients"], "metadata": source_input["model"]["metadata"]}
+    if source_input["model"]["type"] == "saved_site_energy":
+        roles = {"fc2": source_input["harmonic"]["fc2"], "crystal": source_input["harmonic"]["crystal"],
+                 "coefficients": source_input["model"]["coefficients"], "metadata": source_input["model"]["metadata"]}
+    else:
+        roles = {"ifc2":source_input["harmonic"]["ifc2"], "archive":source_input["model"]["archive"],
+                 "metadata":source_input["model"]["metadata"]}
+        if "source_archive" in source_input["model"]:
+            roles["source_archive"] = source_input["model"]["source_archive"]
     if set(report["inputs"]) != set(roles) or set(source_input["inputs_sha256"]) != set(roles.values()):
-        raise ValueError("Restart source requires exactly four bound material input roles")
+        raise ValueError("Restart source requires exactly its bound material input roles")
     for role, filename in roles.items():
         saved, current = report["inputs"][role], config.hashes[role]
         if (saved["file"] != filename or source_input["inputs_sha256"][filename] != saved["sha256"]
@@ -254,6 +274,14 @@ def load_self_energy(config, grid, mesh, vertex, scale, info):
     restart = config.restart
     if restart is None:
         raise ValueError("No initial_self_energy descriptor was provided")
+    if "checkpoint" in restart:
+        from .checkpoint import load_checkpoint, make_binding
+        return load_checkpoint(restart["checkpoint"], restart["checkpoint_sha256"],
+            binding=make_binding(config, info), grid=grid, mesh=mesh, vertex=vertex, scale=scale,
+            max_bytes=config.document["scba"]["max_bytes"])
+    if "manifest" in restart:
+        from .historical_seed import load_initial_guess
+        return load_initial_guess(restart, config=config, grid=grid, mesh=mesh, vertex=vertex, scale=scale, info=info)
     roles = _ROLES + (("checksums",) if "checksums" in restart else ())
     before = {role: _authenticate(restart[role], restart[role + "_sha256"]) for role in roles}
     try:

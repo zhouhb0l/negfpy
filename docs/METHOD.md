@@ -48,3 +48,27 @@ reference/increment and tangent arithmetic; library scratch and caller-owned
 storage remain outside some estimates.
 
 Version 1.0 contains finite-device cubic interactions and harmonic leads. Version 1.0.2 additionally packages the existing [Method 1 frozen-retarded/local-FD long-device approximation](METHOD1.md). Neither interface includes quartic/four-phonon diagrams, anharmonic leads, implicit device eta baths, extended interaction range or multi-node job orchestration.
+
+## Saved complete-energy data and rolling checkpoints (1.2.0)
+
+Saved qualified complete-site derivatives are read as their original independent
+site-energy derivatives, retaining all outer endpoints and original units. No
+potential evaluation, fitting, acoustic projection or kernel repair is performed.
+Range-two harmonic lead grouping and the selected historical extended/decimal
+interval contact arithmetic retain the fixed-eta equations and original
+passivity, reality, acoustic, optical and integrated-flux checks. The interval
+derivative certificate replaces the binary64-only derivative screen, whose
+original result remains separately reported and may fail.
+
+An optional rolling checkpoint stores the evaluated input R/C/D after every
+completed physical map. A rejected latest trial does not replace the selected
+anchor used for final transport. Restarting any checkpoint resets all history
+and requires a fresh evaluation. Tangent actions and interrupted maps do not
+produce completed-map checkpoints.
+
+An explicitly requested historical guess may transfer q nodes by convex periodic
+linear interpolation within exactly the same material/device/endpoint basis.
+There is no temperature or bias amplitude rescaling. The source temperature and
+mesh remain recorded, target contacts are freshly built, and all physical and
+six convergence screens are evaluated again. This does not establish mesh,
+frequency, model or physical accuracy.

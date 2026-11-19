@@ -49,3 +49,13 @@ described above.
 The field arrays use the existing dimensionless solver normalization. For a field `X`, statistical `C=(X^>+X^<)/2` and spectral `D=X^>-X^<`, hence `X^<=C-D/2` and `X^>=C+D/2`. An `exact_zero` input group has no stored arrays and denotes exact zero. The Born image must not be reported as an evaluated solution.
 
 A preparation failure can produce only the input/report/checksums. A bounded run can have no evaluated state. If acceleration stops before its first new evaluation, warm-up scalar records remain available even when no final field payload exists. Missing fields do not imply convergence. Every output directory is exclusive to one invocation.
+
+## Rolling evaluated-input self-energy (1.2.0)
+
+When requested, the simple HDF5 filename in `checkpoint.file` is replaced after
+each completed physical map. It records the latest evaluated input, which may
+be a rejected or nonconverged trial; the selected anchor remains separate.
+It contains no mapped image, Green functions or controller history. The scalar
+report records a checkpoint receipt with a digest and byte count. A failed or
+bounded invocation retains its completed-map checkpoint without accepting its
+transport. See [checkpoint semantics](CHECKPOINTS.md).

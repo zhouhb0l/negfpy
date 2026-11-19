@@ -8,7 +8,7 @@ Use `examples/silicon24/input.json` as the complete template. All fields in that
 | --- | --- |
 | `schema` | `negfpp.run.v1` |
 | `run` | Filename-safe `name` and new `output_dir` |
-| `inputs_sha256` | Whole-file SHA-256 values for exactly the four referenced files |
+| `inputs_sha256` | Whole-file SHA-256 values for every referenced material file (four fitted; three or four saved-complete-energy) |
 | `harmonic` | Full FC2 HDF5 and phono3py crystal YAML, including primitive/supercell mappings and masses |
 | `model` | `type: saved_site_energy`, coefficient NPY and model-metadata JSON |
 | `geometry` | Integer transport-supercell matrix, harmonic device layers and zero-based cubic center-layer indices |
@@ -35,9 +35,9 @@ The existing restoration and geometry builders verify these identities. Coeffici
 
 ## Solver controls
 
-`method: anderson1` uses two fixed-mixing maps from zero, then the existing bounded depth-one Anderson solver. Strict component/merit selection and PSD proposal backtracking remain in force. `method: linear` uses fixed mixing throughout.
+`method: anderson1` uses two fixed-mixing maps from the default zero input or optional authenticated guess, then the existing bounded depth-one Anderson solver. Strict component/merit selection and PSD proposal backtracking remain in force. `method: linear` uses fixed mixing throughout.
 
-`method: reference-seeded` selects the existing exact reference/increment SCBA controller. The first map is fresh zero. Later maps reuse a selected evaluated reference from this same calculation; this option does not import a saved external state. It retains exact resolvent/product increments and every quadratic Born term. The existing two warm-up maps, strict Anderson/analytic selection and PSD proposal backtracking remain in place. Nonlinear attempts are capped at 18, including rejected and failed trials. Analytic tangents have a separate cap of six and do not count as converged physical states.
+`method: reference-seeded` selects the existing exact reference/increment SCBA controller. The first fresh evaluation starts at exact zero by default, or at the optional authenticated initial guess. Later maps reuse a selected evaluated reference created within this invocation; no saved Green function or controller history is imported. It retains exact resolvent/product increments and every quadratic Born term. The existing two warm-up maps, strict Anderson/analytic selection and PSD proposal backtracking remain in place. Nonlinear attempts are capped at 18, including rejected and failed trials. Analytic tangents have a separate cap of six and do not count as converged physical states.
 
 The five-layer example supplies the optional controls:
 
@@ -59,3 +59,12 @@ Convergence uses `sigma_atol + sigma_rtol * scale` for the original unmixed reta
 `max_seconds` includes input construction and controls admission of the next map. `time_reserve_seconds`, `initial_map_estimate_seconds` and `next_map_safety_factor` determine that admission. An in-progress map is not interrupted. Byte/work limits are allocation/work estimates; Python objects, caller arrays and library scratch are outside some estimates. Choose an external scheduler wall limit for production work.
 
 Update the explicit SHA-256 entries when deliberately replacing an input file; `sha256sum FILE` prints its whole-file hash. `negfpp --check-input INPUT.json` checks JSON/native solver settings and file hashes without constructing contacts or evaluating SCBA. Geometry and physical consistency are checked during preparation.
+
+## Version 1.2.0 optional inputs
+
+`checkpoint: {"file": "self-energy-latest.h5"}` saves one atomic rolling evaluated
+self-energy after each completed physical map. See [checkpoint inputs](CHECKPOINTS.md).
+
+`model.type: "saved_complete_energy"` selects the conditional three-file model
+and harmonic sections documented in [saved complete-energy inputs](SAVED_COMPLETE_ENERGY.md).
+All original saved-site-energy inputs remain valid.

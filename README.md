@@ -1,4 +1,4 @@
-# negfpp 1.1.0
+# negfpp 1.2.0
 
 `negfpp` calculates heat flow through a finite harmonic device with cubic phonon–phonon interactions and harmonic reservoirs. One JSON file specifies the model, geometry, frequency/q grids, temperatures, SCBA controls and outputs. Run the installed command directly:
 
@@ -19,7 +19,7 @@ negfpp --check-input examples/silicon24/input.json
 negfpp examples/silicon24/input.json
 ```
 
-A release wheel can be installed with `python -m pip install dist/1.1.0/negfpp-1.1.0-py3-none-any.whl`. The source archive includes all three silicon examples and the compact frozen reference. `python -m negfpp INPUT.json` and `negfpp --input INPUT.json` are equivalent entry points.
+A release wheel can be installed with `python -m pip install dist/1.2.0/negfpp-1.2.0-py3-none-any.whl`. The source archive includes all three silicon examples and the compact frozen reference. `python -m negfpp INPUT.json` and `negfpp --input INPUT.json` are equivalent entry points.
 
 ## Start from a saved self-energy
 
@@ -30,6 +30,21 @@ then performs a fresh evaluation using the original physical and convergence
 guards. The model, geometry, grids, coupling and reservoirs must match; solver
 history is reset. Omitting the option preserves the original zero start.
 See [saved self-energy inputs](docs/RESTART.md) for the JSON fields and checks.
+
+## Rolling self-energy checkpoints and saved complete-energy models
+
+Set `"checkpoint": {"file": "self-energy-latest.h5"}` to atomically replace one
+self-energy file after every completed physical map, including a rejected trial.
+It records the evaluated input R/C/D, its map ordinal and the separate selected
+anchor index. It contains no Green functions, mapped image or solver history.
+A bounded or rejected state remains an initial guess and is never accepted
+transport. See [checkpoint and initial-guess inputs](docs/CHECKPOINTS.md).
+
+Version 1.2.0 also reads authenticated, previously qualified complete site-energy
+IFC2/IFC3 archives through `model.type: "saved_complete_energy"`. This supports
+saved NEP-derived inputs without running a potential evaluator or fitting.
+The command rebuilds the complete device support and paired contacts with the
+original physical guards. See [saved complete-energy inputs](docs/SAVED_COMPLETE_ENERGY.md).
 
 The numerical engine retains its existing internal `negfpy` namespace. Install this product in a separate environment from `negfpy-harmonic` or the full NEGFPy package.
 
@@ -55,7 +70,7 @@ The bundled example has 24 silicon atoms, three harmonic layers, eight cubic ene
 negfpp examples/silicon5layer/input.json
 ```
 
-Select `scba.method: "reference-seeded"`. This reuses the existing reference/increment method: an exact-zero first map establishes a fresh reference for the same device, grid and contacts; subsequent maps use selected reference states, exact Green increments and all quadratic Born terms. Two warm-up maps precede strict Anderson updates and at most six analytic tangent attempts. Every nonlinear trial, including rejection, counts toward the 18-map limit. References are created within this run; no three-layer fields are padded or reused in the five-layer device.
+Select `scba.method: "reference-seeded"`. This reuses the existing reference/increment method: the first fresh evaluation starts from exact zero by default, or from the authenticated optional guess, and establishes a new reference for the same device, grid and contacts; subsequent maps use selected reference states, exact Green increments and all quadratic Born terms. Two warm-up maps precede strict Anderson updates and at most six analytic tangent attempts. Every nonlinear trial, including rejection, counts toward the 18-map limit. References are created within this run; no three-layer fields are padded or reused in the five-layer device.
 
 The new example has **five full device layers, 40 Si atoms and three interacting center layers**. It retains the coarse Gamma/101-frequency grid, original saved model, `g=0.10` and 300.5/299.5 K contacts. The JSON sets a 900-second time-admission budget and four CPU workers. This is a bounded calculation check. Older version-1.0.0 JSON files continue to use their original methods and settings.
 

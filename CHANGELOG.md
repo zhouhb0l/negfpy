@@ -1,5 +1,18 @@
 # Changes
 
+## 1.2.0 — 2026-11-20
+
+- Save an authenticated rolling evaluated-input self-energy checkpoint after each
+  completed physical map, atomically replacing the previous checkpoint. Keep
+  rejected trials and selected anchors distinct; never import solver history.
+- Add saved, qualified complete-site IFC2/IFC3 model inputs for NEP-derived
+  finite-device SCBA using the selected complete endpoint and contact algorithms.
+- Import authenticated historical evaluated INPUT fields with explicit same-model
+  q/temperature initial-guess migration. Preserve geometry, ordered endpoint basis,
+  frequencies, units and coupling, and require fresh physical and six-screen checks.
+- Preserve all earlier JSON methods, exact-result restart and frozen releases.
+  Fix clean-source installation in the version-tag publication workflow.
+
 ## 1.1.0 — 2026-11-20
 
 - Add optional `initial_self_energy` to SCBA JSON inputs. Authenticate the prior

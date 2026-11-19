@@ -1,7 +1,7 @@
 {
   "schema": "negfpp.source-provenance.v1",
   "entity_id": "sw-negfpp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "operation": "selective software promotion; retained original histories and native work",
   "source_repository": {
     "candidate_commit": "5cf7ea7619c11120064162650dac7ef1ab7bbb72",
@@ -21,7 +21,7 @@
     }
   ],
   "numerical_engine": {
-    "modules": 55,
+    "modules": 64,
     "byte_identical_modules": 47,
     "files": [
       {
@@ -44,6 +44,14 @@
         "sha256": "bd4e5462a03f2c103f3ab717503d7052d875d8e233c52a326b193b9da099dd3d",
         "original_sha256": "bd4e5462a03f2c103f3ab717503d7052d875d8e233c52a326b193b9da099dd3d",
         "byte_identical_to_original": true
+      },
+      {
+        "path": "src/negfpy/anharmonic/_contact_metric.py",
+        "bytes": 967,
+        "sha256": "d37616faad43a145cb9981db51f578654c5b0246e5f5d57e9823689dee44b316",
+        "original_sha256": "a89d0f68733c6e316a4a35d8bea6cfb0816bc1bc199eeda7af5670221f257586",
+        "byte_identical_to_original": false,
+        "selected_origin": "materialTest/shared/refined_contact.py"
       },
       {
         "path": "src/negfpy/anharmonic/_harmonic.py",
@@ -88,6 +96,46 @@
         "byte_identical_to_original": true
       },
       {
+        "path": "src/negfpy/anharmonic/complete_site_vertex.py",
+        "bytes": 24242,
+        "sha256": "cdf21fda6dedc3b4921e78ced72ce06de6cddf86412f4f13ac0580a08098353d",
+        "original_sha256": "0ae930f27359e6523697c50b1433e3900c2085a259d773daf75d3988bbd5dd03",
+        "byte_identical_to_original": false,
+        "selected_origin": "materialTest/shared/vertex.py"
+      },
+      {
+        "path": "src/negfpy/anharmonic/contact_extended_refinement.py",
+        "bytes": 10308,
+        "sha256": "ad3776db2c6bccd27cb33fcde996040d48e7e253314f2ae5c0f4080ff3142302",
+        "original_sha256": "e3891093240e02658a8f340243e7d4268d2e6e544c706558b7f6c2b6bd53693c",
+        "byte_identical_to_original": false,
+        "selected_origin": "materialTest/shared/refined_contact_extended_iterate.py"
+      },
+      {
+        "path": "src/negfpy/anharmonic/contact_machine_residual_certificate.py",
+        "bytes": 7935,
+        "sha256": "3e99106055fa8f1d2783e14bfc7d69982be4c3fb9b2974d603369b944c33e5bf",
+        "original_sha256": "3e99106055fa8f1d2783e14bfc7d69982be4c3fb9b2974d603369b944c33e5bf",
+        "byte_identical_to_original": true,
+        "selected_origin": "materialTest/shared/contact_machine_residual_certificate.py"
+      },
+      {
+        "path": "src/negfpy/anharmonic/contact_precision.py",
+        "bytes": 18433,
+        "sha256": "3697bad05118477b3f1c18d9086cbda82b70f33a616841f520011247235e4c1a",
+        "original_sha256": "81d6b4b8bff86959ee911495880dece6b967a6f61e4ce7e6c3728d71e2f4fb75",
+        "byte_identical_to_original": false,
+        "selected_origin": "materialTest/shared/refined_contact_precise.py"
+      },
+      {
+        "path": "src/negfpy/anharmonic/contact_residual_certificate.py",
+        "bytes": 13709,
+        "sha256": "e663d48faec0ea740248ab3eb623a5c39af81b66085f2c9d6c741f84c770a762",
+        "original_sha256": "e663d48faec0ea740248ab3eb623a5c39af81b66085f2c9d6c741f84c770a762",
+        "byte_identical_to_original": true,
+        "selected_origin": "materialTest/shared/contact_residual_certificate.py"
+      },
+      {
         "path": "src/negfpy/anharmonic/contacts.py",
         "bytes": 12227,
         "sha256": "a42715e3f424bdb3b5a6691ce8b22cf0a0ed2b8f56c51c80a8f900b7b598a9eb",
@@ -130,6 +178,14 @@
         "byte_identical_to_original": true
       },
       {
+        "path": "src/negfpy/anharmonic/image_harmonic.py",
+        "bytes": 18628,
+        "sha256": "af8e927809f41316365a1baead8942057a4e97661c5169a93b2ff8189e14452e",
+        "original_sha256": "750b4052f4ae9d239508b162b3dbf71dc1025f3da01b2607689ad8d6377f8d5c",
+        "byte_identical_to_original": false,
+        "selected_origin": "materialTest/shared/harmonic.py"
+      },
+      {
         "path": "src/negfpy/anharmonic/io/__init__.py",
         "bytes": 228,
         "sha256": "fd49e2cbd19a20605ab2b7d29d6093708f1804c94c36d284530d8774bf4587f3",
@@ -142,6 +198,13 @@
         "sha256": "7cf840722154a64b0775c11b267d505c9c35198a3d05635444ea49f6c2585b4c",
         "original_sha256": "7cf840722154a64b0775c11b267d505c9c35198a3d05635444ea49f6c2585b4c",
         "byte_identical_to_original": true
+      },
+      {
+        "path": "src/negfpy/anharmonic/io/_saved_hdf.py",
+        "bytes": 1000,
+        "sha256": "95b5ffc7863dd9fa7fc5a239b68efa5990f6326a55abdacdc6d619eb5671cda5",
+        "original_sha256": null,
+        "byte_identical_to_original": false
       },
       {
         "path": "src/negfpy/anharmonic/io/phono3py_crystal.py",
@@ -221,6 +284,13 @@
         "byte_identical_to_original": true
       },
       {
+        "path": "src/negfpy/anharmonic/site_hessian_export.py",
+        "bytes": 10765,
+        "sha256": "f5804c978c3beefa4398fe194be0b8891472d47a1f1c063bd52dff342fc4e21c",
+        "original_sha256": null,
+        "byte_identical_to_original": false
+      },
+      {
         "path": "src/negfpy/anharmonic/sparse_cubic.py",
         "bytes": 29590,
         "sha256": "be220ffe5d83b53025bc5ab513db8f8b54514fe9b6cb6af044792f19b9874bba",
@@ -278,17 +348,17 @@
       },
       {
         "path": "src/negfpy/anharmonic/transverse_compact_contacts.py",
-        "bytes": 6749,
-        "sha256": "6521b2e31211dfbeb1717c758c12ec9dee8bfa9d09b810711683a996eaacfb8b",
+        "bytes": 6947,
+        "sha256": "5c3c8e77b311cf7548a88db869d1e6fdaf8c7c360828274917b886031cb7e877",
         "original_sha256": "6521b2e31211dfbeb1717c758c12ec9dee8bfa9d09b810711683a996eaacfb8b",
-        "byte_identical_to_original": true
+        "byte_identical_to_original": false
       },
       {
         "path": "src/negfpy/anharmonic/transverse_contacts.py",
-        "bytes": 10169,
-        "sha256": "ed6abe7b8d7c7d02c643cfc49bcfc7737e88a78696a3084e407e9f3a59874c73",
+        "bytes": 10750,
+        "sha256": "af4804b29ac9e7a6fd3d8e5d31d47b22b12532f89c5c323363279eb5c7deee0f",
         "original_sha256": "ed6abe7b8d7c7d02c643cfc49bcfc7737e88a78696a3084e407e9f3a59874c73",
-        "byte_identical_to_original": true
+        "byte_identical_to_original": false
       },
       {
         "path": "src/negfpy/anharmonic/transverse_fft.py",
@@ -415,7 +485,7 @@
     {
       "path": "src/negfpp/__init__.py",
       "bytes": 101,
-      "sha256": "8962ba88a01d1ef6b9a9051e5e3bc26e67dfab0f9e2eaaf64ae074b55972fc82"
+      "sha256": "4180953ccbee3e2da3e9257b07eb6c3bd46aa1595b4b2b1d464d3895ad311b99"
     },
     {
       "path": "src/negfpp/__main__.py",
@@ -423,14 +493,24 @@
       "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
     },
     {
+      "path": "src/negfpp/checkpoint.py",
+      "bytes": 24778,
+      "sha256": "35a1445e9c9a5833afd2d0d54fb50c70e96bbc4b993d675b5abbd32ef3de5b17"
+    },
+    {
       "path": "src/negfpp/cli.py",
       "bytes": 2118,
       "sha256": "06472f7cba9f16336386ef76777f8e461906bc571faf2ec55dbdb1b6dfe82797"
     },
     {
+      "path": "src/negfpp/historical_seed.py",
+      "bytes": 35130,
+      "sha256": "0bde79651f228caa372e050d096fabe3e1c5f81210c074ecaa476f86b8eb3da4"
+    },
+    {
       "path": "src/negfpp/input.py",
-      "bytes": 9300,
-      "sha256": "0c81abe95b8e537dc8811d4c3a549ce9e55a4568a98bd307f21e1d0dd20c5e0c"
+      "bytes": 10488,
+      "sha256": "061e26d7e15baf1199b5e7f7e2e12e4fdb08ce50464384b7fba229ae0f53db4b"
     },
     {
       "path": "src/negfpp/local_fd/__init__.py",
@@ -518,6 +598,11 @@
       "sha256": "244aaa9c4226ee3514cd915397b107e34122d4dc48bed655170139288f86413f"
     },
     {
+      "path": "src/negfpp/nep.py",
+      "bytes": 25520,
+      "sha256": "c745bb39a20b84e4d3db76e44c5f5338024b4e45cb39c36c4712252ee4bfd3fd"
+    },
+    {
       "path": "src/negfpp/reference/__init__.py",
       "bytes": 206,
       "sha256": "7fe654478a0100854fb6f36b187725acd23572c1012021d45892afdef7e0ffc4"
@@ -544,8 +629,8 @@
     },
     {
       "path": "src/negfpp/restart.py",
-      "bytes": 18912,
-      "sha256": "36431dba73147f62d6e7cdeffe656abd3b7485d63d8df7c63db66fea57fc2a56"
+      "bytes": 20881,
+      "sha256": "8f78d699c7d427c5c8f78c26b2539dd32c026d3ca7a935bdc878404ab4787c98"
     },
     {
       "path": "src/negfpp/solver.py",
@@ -554,16 +639,16 @@
     },
     {
       "path": "src/negfpp/workflow.py",
-      "bytes": 19219,
-      "sha256": "387e6726404e78b60327dba677ce146361afb0ab64b8738a48d512ec0e9a4866"
+      "bytes": 20405,
+      "sha256": "405aad1f4ad8a12458e45f9fe09942857018ba0a90b05c4e832e61a4ed29d6d3"
     }
   ],
   "adaptations": {
     "initializers": "Expose only selected package modules; no full research workflow imports.",
     "temperature": "Relocate exact constants/conversion from _material_nq1_campaign.py to _temperature.py; change restart import only.",
-    "provenance": "Identify distribution negfpp1.0.0; preserve existing numerical payload hash domain/schema.",
+    "provenance": "Identify negfpp1.2.0 and retain original framed numerical payload identity domain.",
     "build": "Clean only authenticated owned staging trees for both namespaces; embed numerical engine identity.",
-    "scientific_solver": "No changes to selected numerical solver/contraction/contact/geometry modules or original tolerances.",
+    "scientific_solver": "Existing SCBA contractions/controllers and original physical/six-screen tolerances unchanged. Select qualified complete-site/image/contact numerical implementation into ordinary package modules; explicit contact callbacks retain original defaults.",
     "rigid_translation_guard": "Parameterize original equal-Si translation vectors with mass weights already used by the existing layered harmonic model.",
     "reference_engine": "Select four existing reference/increment and bounded analytic-feedback modules, adapting package imports/docstrings and one validation-message wording only; add JSON dispatch and scalar diagnostics. Version1.1.0 additionally copies an optional R/C/D guess and offsets new state IDs/warm-up eligibility; the reference/increment and tangent map formulas are unchanged.",
     "method1": "Select eleven existing Method 1 numerical modules; normal package imports and configurable startup temperatures; distribute exact disjoint q/frequency tiles across CPU workers; add strict portable evaluated-donor reader and single-JSON execution/exports.",
@@ -571,7 +656,7 @@
   },
   "identity_domains": {
     "embedded_wheel_metadata": "Internal negfpy numerical package payload; existing framed negfpy.package-payload.v1 domain.",
-    "interface_files": "Recursive whole-file SHA-256 values include reference and Method 1 numerical modules under negfpp. Each run records them independently of the unchanged base negfpy payload.",
+    "interface_files": "Recursive whole-file SHA-256 values cover JSON, restart/checkpoint, saved-complete-energy, reference and Method1 modules. Each run records these independently of the full numerical namespace payload.",
     "release_artifacts": "Whole wheel/source-archive file hashes in release SHA256SUMS."
   },
   "example_provenance": [
@@ -587,14 +672,19 @@
     "reference_seeded_scba": true,
     "method1_long_device_local_fd": true,
     "external_self_energy_initial_guess": true,
-    "publication_scope": "Selected portable software and examples only; raw campaigns, private locators, environments and independent historical validation adapters are excluded."
+    "publication_scope": "Selected portable software and examples only; raw campaigns, private locators, environments and independent historical validation adapters are excluded.",
+    "saved_complete_site_energy_cli": true,
+    "rolling_evaluated_input_checkpoint": true,
+    "explicit_historical_q_temperature_initial_guess": true,
+    "scientific_transport_certification": false
   },
   "preservation": "Original source, campaigns, validated releases and harmonic product retained. Private source-to-deliverable locator is held in the workspace family release receipt; no machine paths are included here.",
   "predecessor": {
-    "version": "1.0.2",
-    "commit": "2bf7422da4805e50a037fa164df42c70aa607b2b",
-    "tag": "negfpp-v1.0.2",
-    "base_engine_files_changed": false,
+    "version": "1.1.0",
+    "commit": "6bd75ca83ef06b1b54fdf153a55590d842f2aca4",
+    "tag": "negfpp-v1.1.0",
+    "base_engine_files_changed": true,
+    "existing_engine_adaptation": "Explicit private contact-construction callbacks; unchanged defaults and physical equations. Additional selected complete-site/image/contact modules.",
     "old_inputs_remain_compatible": true,
     "prior_artifacts_preserved": true
   },
@@ -753,5 +843,127 @@
     },
     "resources": "Reuse original dimension-based cache/transient formulas with explicit target dimensions, numeric cap and process/runtime reserves. No grid pruning.",
     "scope": "Qualified short evaluated retarded kernel; complete overlapping support; one integrated Bose temperature per translated star; zero new SCBA/Born maps; no full long-device SCBA claim."
+  },
+  "saved_complete_energy_engine": {
+    "source_modules": [
+      {
+        "source_relative": "materialTest/shared/harmonic.py",
+        "source_sha256": "750b4052f4ae9d239508b162b3dbf71dc1025f3da01b2607689ad8d6377f8d5c",
+        "target_relative": "src/negfpy/anharmonic/image_harmonic.py",
+        "selected_sha256": "af8e927809f41316365a1baead8942057a4e97661c5169a93b2ff8189e14452e",
+        "byte_identical": false,
+        "selected_bytes": 18632,
+        "adaptation": "Select complete image harmonic storage/readers; reject external/virtual storage; omit coherent-transmission CLI helpers; preserve default material-test arithmetic and add independently tested original native-diagonal-mass conversion association."
+      },
+      {
+        "source_relative": "materialTest/shared/vertex.py",
+        "source_sha256": "0ae930f27359e6523697c50b1433e3900c2085a259d773daf75d3988bbd5dd03",
+        "target_relative": "src/negfpy/anharmonic/complete_site_vertex.py",
+        "selected_sha256": "cdf21fda6dedc3b4921e78ced72ce06de6cddf86412f4f13ac0580a08098353d",
+        "byte_identical": false,
+        "selected_bytes": 24242
+      },
+      {
+        "source_relative": "materialTest/shared/contact_residual_certificate.py",
+        "source_sha256": "e663d48faec0ea740248ab3eb623a5c39af81b66085f2c9d6c741f84c770a762",
+        "target_relative": "src/negfpy/anharmonic/contact_residual_certificate.py",
+        "selected_sha256": "e663d48faec0ea740248ab3eb623a5c39af81b66085f2c9d6c741f84c770a762",
+        "byte_identical": true,
+        "selected_bytes": 13709
+      },
+      {
+        "source_relative": "materialTest/shared/contact_machine_residual_certificate.py",
+        "source_sha256": "3e99106055fa8f1d2783e14bfc7d69982be4c3fb9b2974d603369b944c33e5bf",
+        "target_relative": "src/negfpy/anharmonic/contact_machine_residual_certificate.py",
+        "selected_sha256": "3e99106055fa8f1d2783e14bfc7d69982be4c3fb9b2974d603369b944c33e5bf",
+        "byte_identical": true,
+        "selected_bytes": 7935
+      },
+      {
+        "source_relative": "materialTest/shared/refined_contact.py",
+        "source_sha256": "a89d0f68733c6e316a4a35d8bea6cfb0816bc1bc199eeda7af5670221f257586",
+        "target_relative": "src/negfpy/anharmonic/_contact_metric.py",
+        "selection": "only unchanged _equation_metrics function and required numerical imports",
+        "selected_sha256": "d37616faad43a145cb9981db51f578654c5b0246e5f5d57e9823689dee44b316",
+        "byte_identical": false,
+        "selected_bytes": 967
+      },
+      {
+        "source_relative": "materialTest/shared/refined_contact_extended_iterate.py",
+        "source_sha256": "e3891093240e02658a8f340243e7d4268d2e6e544c706558b7f6c2b6bd53693c",
+        "target_relative": "src/negfpy/anharmonic/contact_extended_refinement.py",
+        "selected_sha256": "ad3776db2c6bccd27cb33fcde996040d48e7e253314f2ae5c0f4080ff3142302",
+        "byte_identical": false,
+        "selected_bytes": 10308
+      },
+      {
+        "source_relative": "materialTest/shared/refined_contact_precise.py",
+        "source_sha256": "81d6b4b8bff86959ee911495880dece6b967a6f61e4ce7e6c3728d71e2f4fb75",
+        "target_relative": "src/negfpy/anharmonic/contact_precision.py",
+        "selected_sha256": "3697bad05118477b3f1c18d9086cbda82b70f33a616841f520011247235e4c1a",
+        "byte_identical": false,
+        "selected_bytes": 18433
+      }
+    ],
+    "source_pin_scope": "Selected original working-file bytes; no claim that every selected file belongs to the historical source Git commit.",
+    "parity_checks": {
+      "schema": "negfpp.nep-selected-engine-parity.v1",
+      "checks": {
+        "complete_site_vertex.plan_vertex_AST_identical": true,
+        "complete_site_vertex.build_vertex_AST_identical": true,
+        "complete_site_vertex._embedded_stars_AST_identical": true,
+        "complete_site_vertex._validate_metadata_AST_identical": true,
+        "image_harmonic.at_q_AST_identical": true,
+        "image_harmonic.stability_audit_AST_identical": true,
+        "image_harmonic.bulk_dynamical_AST_identical": true,
+        "extended_refinement._metric_AST_identical": true,
+        "extended_refinement._extended_error_AST_identical": true,
+        "extended_refinement.planned_numeric_bytes_AST_identical": true,
+        "original_binary64_metric_AST_identical": true,
+        "precise_descriptor_AST_identical_after_import_alias_only": true,
+        "extended_refine_AST_identical_except_relocated_source_pin_checks": true,
+        "contact_residual_certificate.py_byte_identical": true,
+        "contact_machine_residual_certificate.py_byte_identical": true
+      },
+      "all_passed": true,
+      "physical_contact_algebra": "historically qualified extended X + machine Decimal60 interval residual + final Gamma128 cast + independent finite-frequency limit + original contact physical audits, unchanged",
+      "difference_from_public_1_1_0": "NEP chooses historical qualified interval derivative arithmetic explicitly; original binary64-only screen remains separately reported and is not claimed passed",
+      "runtime_namespace_rebinding": false,
+      "frozen_campaign_or_release_files_changed": false,
+      "image_harmonic_adaptation": {
+        "default_material_test_conversion": "unchanged arithmetic, selected pre-existing9image tests pass",
+        "native_diagonal_mass_conversion": "explicit original operation association and sorted Fourier image order",
+        "native_unit_and_interface_parity_receipt": {
+          "logical_receipt": "negfpp-native-harmonic-conversion-review.json",
+          "sha256": "8a0c5532f662afa1d7fb1c71678dd623730e5f9c4952c06ed6f72da8353ccb46"
+        },
+        "native_parity": "bitwise original engine equality on generated image/full device/alllead/coupling blocks for3/9cells atGammaandcomplexoppositeq",
+        "no_claim_constructor_AST_identical_after_new_mode": true
+      },
+      "lossless_source_payload_parity": {
+        "source_archive_sha256": "341bf3ed07651a859ba11701659d9cfbe35678107716b8fc061bead34154b98c",
+        "raw_harmonic_image_payload": "all63imageblocks array_equal original producer pure data assembly",
+        "receipt": {
+          "logical_receipt": "negfpp-native72-independent-export-audit.json",
+          "sha256": "8ee3984dc4ae984698d668670753aa1ac34f52ab1717d1a7ef3ea0f9bc92cf7d"
+        },
+        "mapped_cubic_payload": "exact array_equal original all-axis coordinate permutation; runtime rechecked beforeuse",
+        "source_potential_derived_recalculated": false
+      }
+    },
+    "existing_engine_changes": [
+      "src/negfpy/anharmonic/transverse_contacts.py: explicit internal construction callbacks, unchanged defaults",
+      "src/negfpy/anharmonic/transverse_compact_contacts.py: explicit internal contact-builder callback, unchanged default"
+    ],
+    "scope": "Saved qualified site derivatives, complete endpoint mapping and harmonic contacts; no potential evaluation, refitting or force computation.",
+    "private_campaign_imports": false,
+    "runtime_namespace_rebinding": false
+  },
+  "checkpoint_contract": {
+    "role": "latest completed physical map evaluated INPUT R/C/D only",
+    "selected_anchor_separate": true,
+    "atomic_single_file_overwrite": true,
+    "green_mapped_image_or_history_loaded": false,
+    "bounded_nonconvergence_is_accepted_transport": false
   }
 }

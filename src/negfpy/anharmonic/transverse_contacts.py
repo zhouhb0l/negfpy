@@ -90,6 +90,9 @@ def build_transverse_contact(
     q_samples: int = 257,
     max_bytes: int = _MAX_BYTES,
     max_base_evaluations: int = 100_000,
+    _descriptor_builder=None,
+    _spectrum_classifier=None,
+    _retarded_builder=None,
 ) -> TransverseContact:
     """Build signed thermal spectra for one physical, transverse-periodic lead.
 
@@ -106,6 +109,14 @@ def build_transverse_contact(
     mesh may explicitly admit up to 4 GiB; this changes allocation admission
     only and does not change the contact equations or their physical checks.
     """
+    descriptor_builder = (_build_fixed_eta_contact_descriptor
+        if _descriptor_builder is None else _descriptor_builder)
+    spectrum_classifier = (_classify_lead_spectrum
+        if _spectrum_classifier is None else _spectrum_classifier)
+    retarded_builder = (retarded_contact_self_energy
+        if _retarded_builder is None else _retarded_builder)
+    if not all(callable(v) for v in (descriptor_builder,spectrum_classifier,retarded_builder)):
+        raise TypeError("Internal contact builders must be callable")
     kpoints = _kpoints(mesh)
     if not isinstance(grid, SignedFrequencyGrid) or not callable(reservoirs):
         raise TypeError("Supply a SignedFrequencyGrid and reservoir callback.")
@@ -165,13 +176,13 @@ def build_transverse_contact(
 
     fields, limits, reports = [], [], []
     for q, source in enumerate(sources):
-        classification = _classify_lead_spectrum(source.lead, q_samples=samples)
+        classification = spectrum_classifier(source.lead, q_samples=samples)
         if not classification.passed or classification.classification not in {"acoustic", "gapped"}:
             raise ValueError(
                 f"Lead sector q={q} is {classification.classification}: "
                 f"{classification.failure_reasons}"
             )
-        descriptor = _build_fixed_eta_contact_descriptor(
+        descriptor = descriptor_builder(
             source, side=side, ndof=dimension, eta_lead=eta,
             surface_gf_method=surface_gf_method, spectral_classification=classification,
         )
@@ -179,7 +190,7 @@ def build_transverse_contact(
         # signed node is evaluated directly, without a same-q real reflection.
         retarded = np.stack([
             descriptor.embedded_zero_retarded if index == grid.zero_index else
-            retarded_contact_self_energy(
+            retarded_builder(
                 omega, source, dimension, eta, side=side,
                 surface_gf_method=surface_gf_method,
             )
