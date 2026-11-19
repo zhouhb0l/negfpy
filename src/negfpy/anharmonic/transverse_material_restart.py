@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 import numpy as np
 
-from ._material_nq1_campaign import kelvin_to_solver_temperature
+from ._temperature import kelvin_to_solver_temperature
 from .grid import SignedFrequencyGrid
 from .momentum import UniformBZMesh
 from .transverse_compact_contacts import CompactTransverseContact

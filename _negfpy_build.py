@@ -296,7 +296,7 @@ def build_provenance_record(
         "git_revision": revision,
         "package_source_sha256": build_hash,
         "package_version": package_version,
-        "project": "negfpy",
+        "project": "negfpp",
         "schema": _SCHEMA,
     }
 
@@ -308,7 +308,7 @@ def _build_root_marker_document(
 ) -> dict[str, str]:
     return {
         "build_root": str(build_root),
-        "project": "negfpy",
+        "project": "negfpp",
         "project_root": str(project_root),
         "schema": _BUILD_ROOT_SCHEMA,
     }
@@ -470,35 +470,43 @@ def _fresh_package_root(
     build_lib: str | Path,
     *,
     project_root: Path,
+    package_name: str = "negfpy",
 ) -> Path:
     """Prepare only a package tree owned by this exact project build root."""
 
+    if package_name not in {"negfpy", "negfpp"}:
+        raise RuntimeError(f"unexpected product package name: {package_name}")
     project = project_root.resolve()
-    source_root = (project / "src" / "negfpy").resolve()
+    source_parent = (project / "src").resolve()
+    source_roots = tuple((source_parent / name).resolve() for name in ("negfpy", "negfpp"))
     requested_build_root = Path(build_lib)
     if requested_build_root.is_symlink():
         raise RuntimeError(
             f"refusing symlinked build root: {requested_build_root}"
         )
     build_root = requested_build_root.resolve()
-    target = build_root / "negfpy"
+    target = build_root / package_name
     marker = _build_root_marker_path(build_root)
     legacy_marker = build_root / _BUILD_ROOT_MARKER
     unsafe_root = (
         build_root == project
-        or build_root in source_root.parents
-        or build_root.is_relative_to(source_root)
+        or build_root in source_parent.parents
+        or build_root == source_parent
+        or build_root.is_relative_to(source_parent)
     )
     overlaps_source = (
-        target == source_root
-        or target.is_relative_to(source_root)
-        or source_root.is_relative_to(target)
+        any(
+            target == source_root
+            or target.is_relative_to(source_root)
+            or source_root.is_relative_to(target)
+            for source_root in source_roots
+        )
     )
     if (
         unsafe_root
         or overlaps_source
         or target.parent != build_root
-        or target.name != "negfpy"
+        or target.name != package_name
     ):
         raise RuntimeError(f"unsafe build package target: {target}")
     if target.is_symlink():
@@ -538,20 +546,42 @@ def _fresh_package_root(
     return target
 
 
+def _fresh_product_package_roots(
+    build_lib: str | Path,
+    *,
+    project_root: Path,
+) -> dict[str, Path]:
+    """Clean both namespaces without claiming an existing unowned target."""
+
+    requested_root = Path(build_lib)
+    names = sorted(
+        ("negfpy", "negfpp"),
+        key=lambda name: not _path_entry_exists(requested_root / name),
+    )
+    return {
+        name: _fresh_package_root(
+            build_lib, project_root=project_root, package_name=name,
+        )
+        for name in names
+    }
+
+
 class ProvenanceBuildPy(_build_py):
     """Write build identity after a fresh setuptools package copy."""
 
     def run(self) -> None:
         project_root = Path(__file__).resolve().parent
-        package_root = _fresh_package_root(
+        package_roots = _fresh_product_package_roots(
             self.build_lib,
             project_root=project_root,
         )
         super().run()
-        if package_root.is_symlink() or not package_root.is_dir():
-            raise RuntimeError(
-                f"setuptools did not create the expected package: {package_root}"
-            )
+        for package_root in package_roots.values():
+            if package_root.is_symlink() or not package_root.is_dir():
+                raise RuntimeError(
+                    f"setuptools did not create the expected package: {package_root}"
+                )
+        package_root = package_roots["negfpy"]
         record = build_provenance_record(
             project_root=project_root,
             package_root=package_root,

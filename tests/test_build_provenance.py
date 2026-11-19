@@ -35,7 +35,7 @@ def _init_repository(root: Path) -> str:
     (root / ".gitignore").write_text("build/\n", encoding="ascii")
     (root / "tracked.txt").write_text("exact source\n", encoding="ascii")
     (root / "pyproject.toml").write_text(
-        "[project]\nname = \"negfpy\"\nversion = \"0.1.0rc1\"\n",
+        "[project]\nname = \"negfpp\"\nversion = \"0.1.0rc1\"\n",
         encoding="ascii",
     )
     source = root / "src" / "negfpy"
@@ -102,7 +102,7 @@ def _record(source_hash: str, **updates: object) -> dict[str, object]:
         "git_revision": "a" * 40,
         "package_source_sha256": source_hash,
         "package_version": "0.1.0rc1",
-        "project": "negfpy",
+        "project": "negfpp",
         "schema": "negfpy.build_provenance.v1",
     }
     record.update(updates)
@@ -134,7 +134,7 @@ def test_build_record_uses_exact_clean_repository_and_copied_source(
         "git_revision": revision,
         "package_source_sha256": _source_hash(package),
         "package_version": "0.1.0rc1",
-        "project": "negfpy",
+        "project": "negfpp",
         "schema": "negfpy.build_provenance.v1",
     }
 
@@ -342,7 +342,7 @@ def _build_wheel(source: Path, destination: Path, *, epoch: str) -> Path:
         capture_output=True,
         text=True,
     )
-    wheels = tuple(destination.glob("negfpy-*.whl"))
+    wheels = tuple(destination.glob("negfpp-*.whl"))
     assert len(wheels) == 1
     return wheels[0]
 
@@ -393,9 +393,9 @@ def test_pep517_clean_wheel_contains_bound_record_and_record_entry(
         assert "negfpy/stale_ignored.py" not in names
         assert all(".negfpy-build-root" not in name for name in names)
         top_levels = {name.split("/", 1)[0] for name in names}
-        assert "negfpy" in top_levels
-        assert len(top_levels) == 2
-        assert next(name for name in top_levels if name != "negfpy").endswith(
+        assert {"negfpy", "negfpp"} <= top_levels
+        assert len(top_levels) == 3
+        assert next(name for name in top_levels if name not in {"negfpy", "negfpp"}).endswith(
             ".dist-info"
         )
         forbidden_paths = (
@@ -518,7 +518,7 @@ def test_pep517_dirty_and_no_git_builds_are_noncertifying(
         capture_output=True,
         text=True,
     )
-    sdists = tuple(sdist_dir.glob("negfpy-*.tar.gz"))
+    sdists = tuple(sdist_dir.glob("negfpp-*.tar.gz"))
     assert len(sdists) == 1
     archive_wheel = _build_wheel(
         sdists[0], tmp_path / "archive-wheel", epoch=epoch
@@ -810,7 +810,7 @@ def test_build_record_binds_pyproject_bytes_and_head_version(
     package_version = "9.9.9" if changes_version else "0.1.0rc1"
     project_file.write_text(
         "[project]\n"
-        "name = \"negfpy\"\n"
+        "name = \"negfpp\"\n"
         f"version = \"{package_version}\"\n"
         "# hidden pyproject mutation\n",
         encoding="ascii",
@@ -942,7 +942,7 @@ def test_live_source_binds_pyproject_bytes_and_head_version(
     package_version = "9.9.9" if changes_version else "0.1.0rc1"
     project_file.write_text(
         "[project]\n"
-        "name = \"negfpy\"\n"
+        "name = \"negfpp\"\n"
         f"version = \"{package_version}\"\n"
         "# hidden runtime pyproject mutation\n",
         encoding="ascii",

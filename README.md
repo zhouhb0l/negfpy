@@ -1,100 +1,92 @@
-# NEGFPy
+# negfpp 1.1.0
 
-NEGFPy provides harmonic open-device phonon NEGF, periodic-crystal phonons and
-intrinsic three-phonon SMRTA transport, and research cubic anharmonic NEGF.
-The current version is **2.0.0.dev0**, being prepared for a future release.
-
-The source checkout contains reusable library code, tests, documentation and
-portable examples. Material files, run outputs and historical experiments live
-outside the package. Raw IFCs are not silently corrected or replaced.
-
-## Installation
-
-Python 3.11 or newer is required. Local preparation checks use Python 3.12.
+`negfpp` calculates heat flow through a finite harmonic device with cubic phonon–phonon interactions and harmonic reservoirs. One JSON file specifies the model, geometry, frequency/q grids, temperatures, SCBA controls and outputs. Run the installed command directly:
 
 ```bash
+negfpp examples/silicon24/input.json
+```
+
+## Install
+
+Use Python 3.11 or newer in a dedicated environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install .
+negfpp --version
+negfpp --check-input examples/silicon24/input.json
+negfpp examples/silicon24/input.json
 ```
 
-The optional historical silicon oracle environment pins phono3py 4.4.0:
+A release wheel can be installed with `python -m pip install dist/1.1.0/negfpp-1.1.0-py3-none-any.whl`. The source archive includes all three silicon examples and the compact frozen reference. `python -m negfpp INPUT.json` and `negfpp --input INPUT.json` are equivalent entry points.
+
+## Start from a saved self-energy
+
+Add optional `initial_self_energy` to the SCBA input to use a previous converged
+run's evaluated self-energy as the initial guess. Specify its `fields.h5`,
+`input.json` and `report.json`, with each file's SHA-256. The same direct command
+then performs a fresh evaluation using the original physical and convergence
+guards. The model, geometry, grids, coupling and reservoirs must match; solver
+history is reset. Omitting the option preserves the original zero start.
+See [saved self-energy inputs](docs/RESTART.md) for the JSON fields and checks.
+
+The numerical engine retains its existing internal `negfpy` namespace. Install this product in a separate environment from `negfpy-harmonic` or the full NEGFPy package.
+
+## Capabilities
+
+- Finite layered harmonic devices with exact complete-center cubic endpoint support.
+- Self-consistent cubic Born approximation (SCBA), using the existing statistical/spectral channel solver and full nonlocal interaction blocks.
+- Fixed mixing, strict depth-one Anderson acceleration, or reference-seeded SCBA using exact same-run reference/increment maps and bounded analytic feedback. Physical guards and all six convergence screens remain unchanged.
+- Uniform transverse momentum meshes, paired-q thermal contacts and signed angular-frequency grids.
+- Explicit CPU worker, memory, contraction-work, map-count and time-admission budgets.
+- HDF5 harmonic FC2 and crystal mappings read through the existing phono3py readers; cubic energy models restored from saved coefficients and their authenticated geometry/fit report.
+- Method 1 long-device extension: a qualified short-device retarded kernel, complete overlapping endpoint support, and integrated local fluctuation–dissipation/Bose probe closure. Exact recursive current actions use bounded CPU workers and fixed-size blocks.
+
+Version 1.0 uses **saved finite-range site-energy models**. Its silicon coefficients are a fitted representation of bulk FC3, with a recorded 2.14147% Cartesian FC3 residual. They are not raw FC3 or a uniquely determined interface potential. The command restores them exactly without fitting. Arbitrary raw-FC3-to-device construction and extensions of the interaction range are outside this interface.
+
+## Silicon check
+
+The bundled example has 24 silicon atoms, three harmonic layers, eight cubic energy centers and 12 active endpoint atoms. It uses a coarse Gamma-only, 101-frequency grid, 300.5/299.5 K reservoirs and cubic coupling `g=0.10`. It starts from zero scattering self-energy. The example is intended as a short installation and calculation check; it does not establish frequency/q/eta convergence or interface accuracy.
+
+## Reference-seeded SCBA and five-layer silicon
 
 ```bash
-python -m pip install '.[material-oracle]'
+negfpp examples/silicon5layer/input.json
 ```
 
-## Workflows
+Select `scba.method: "reference-seeded"`. This reuses the existing reference/increment method: an exact-zero first map establishes a fresh reference for the same device, grid and contacts; subsequent maps use selected reference states, exact Green increments and all quadratic Born terms. Two warm-up maps precede strict Anderson updates and at most six analytic tangent attempts. Every nonlinear trial, including rejection, counts toward the 18-map limit. References are created within this run; no three-layer fields are padded or reused in the five-layer device.
 
-- **Harmonic open-device NEGF:** device and contact Green functions,
-  transmission and heat currents through the established modeling/workflow APIs.
-- **Periodic bulk phonons and SMRTA:** FC2 bands, DOS and group velocities;
-  explicit FC3 rates, lifetimes and intrinsic three-phonon conductivity through
-  `negfpy.bulk`. See the [bulk guide](docs/bulk_rta.md) and
-  [silicon example](examples/bulk_rta_silicon.py).
-- **Research anharmonic device NEGF:** independent native retarded,
-  statistical and spectral channels, four-term Born maps, bounded SCBA and
-  checkpoint continuation. The fitted complete-energy path has a consolidated
-  [Python API](src/negfpy/anharmonic/complete_energy.py),
-  [portable example](examples/complete_energy_scba.py) and
-  [usage guide](docs/complete_energy_scba.md).
+The new example has **five full device layers, 40 Si atoms and three interacting center layers**. It retains the coarse Gamma/101-frequency grid, original saved model, `g=0.10` and 300.5/299.5 K contacts. The JSON sets a 900-second time-admission budget and four CPU workers. This is a bounded calculation check. Older version-1.0.0 JSON files continue to use their original methods and settings.
 
-A safe FC2-only bulk starting point is:
-
-```python
-import negfpy.bulk as bulk
-
-problem = bulk.BulkHarmonicProblem.from_phono3py(
-    "phono3py_disp.yaml", "fc2.hdf5",
-)
-spectrum = problem.compute_uniform_mesh_phonons((11, 11, 11))
-dos = bulk.compute_phonon_dos(spectrum, sigma_thz=0.1)
-```
-
-Heavy FC3 operations and full SCBA require explicit inputs and resource bounds;
-importing the library or portable example does not launch a calculation.
-
-## Model and result scope
-
-FC3 already defines a cubic Taylor energy; SCBA does not require fitting.
-The complete-center-energy fit is an explicit compact boundary-model choice
-for the available bulk IFCs. Selecting whole energies before differentiation
-retains their required endpoint derivatives. It does not uniquely reconstruct
-an interface from bulk IFCs.
-
-The preserved fitted-model study reached the original six SCBA convergence
-screens on its 4-q/601-frequency grid with unchanged physical guards. Its bulk
-IFC fit error is about **2.14147%** in the reported Cartesian Frobenius metric.
-This is evidence for that model and grid, not validated physical-interface,
-production-IFC, transport or mesh accuracy. Actual IFC reference calculations
-and fitted-model results remain distinct. See the guide for definitions.
-
-Bulk SMRTA and open-device interacting transport remain separate methods.
-Bulk lifetimes are not substituted for a conserving open-device self-energy.
-
-## Converged results for presentations
-
-The [converged SCBA result bundle](docs/research-results/converged-20261028/README.md)
-provides small PNG/SVG figures, CSV tables and precise scalar provenance for
-the successful fitted-model calculation, fresh-zero reproduction, frequency
-studies and converged 1×2/1×4 directional controls. It includes the original
-six-screen convergence outcomes and keeps model/grid convergence separate from physical
-interface and full q-mesh accuracy. Large run data and environments stay
-outside the repository.
-
-## Development and release preparation
+## Method 1 with local FD: silicon 1 µm
 
 ```bash
-python -m pip install '.[test]'
-python -m pytest
+negfpp --check-input examples/silicon1um/input.json
+negfpp examples/silicon1um/input.json
 ```
 
-The test suite includes expensive optional cases; read their resource markers
-before selecting broad scientific runs. Maintainer utilities remain in
-`scripts/`; dated multi-q HPC launchers were removed from the active tree and
-are preserved in Git history and workspace recovery archives. The installed
-package does not depend on those launchers.
+Local FD means **local fluctuation–dissipation**, using a Bose temperature for each complete translated scattering star. The supplied example extends the accepted 24-atom reference to 1,840 probe layers: **999.775 nm of center slab, 14,736 full-device atoms**. Its portable compact reference contains only the previously evaluated retarded self-energy, with the original report, input, actual successful-exit qualification and explicit hashes. The command rebuilds the same FC2/contacts, preserves the full overlapping 36-coordinate support, and solves one integrated zero-flux condition per probe. It performs no new Born contractions or SCBA maps.
 
-The [platform guide](PROJECT_NOTES.md),
-[workspace layout](docs/development/workspace_layout.md),
-[release preparation note](docs/development/release_preparation.md) and
-[changelog](CHANGELOG.md) describe the boundaries and remaining release work.
-No new software release is published by this consolidation.
+The example uses four CPU workers, the reference's coarse Gamma/101-frequency grid, `g=0.10`, and 300.5/299.5 K reservoirs. It checks both nonlinear probe closure and zero-bias linear response with the original strict flux, optical, passivity and conservation guards. The 2,400-second admission budget includes preparation and a 60-second exit reserve. Numeric-array and process-memory admission is explicit in the JSON. No wrapper, private campaign directory or scheduler is required.
+
+Method 1 is a **frozen short-device approximation**. It omits cross-center Born vertex pairs and does not establish full long-device SCBA self-consistency. This coarse installation check does not establish converged silicon conductivity. See [Method 1 inputs, approximation and outputs](docs/METHOD1.md).
+
+## Results
+
+The bundled input writes to `generated/silicon24` in the source directory (`../../generated/silicon24` relative to its JSON file). The command creates a new directory and refuses to overwrite an existing run. Change `run.output_dir` for a later calculation.
+
+| File | Contents |
+| --- | --- |
+| `report.json` | Status, currents in W per transverse cell, six convergence screens, physical checks, model identity, versions, hashes and resource accounting |
+| `input.json` | Exact run settings |
+| `iterations.jsonl` | Each completed map, including rejected trials and selection decisions |
+| `convergence.csv` | Three unmixed self-energy and three current-balance ratios for every completed map |
+| `currents.csv` | Evaluated-state contact currents, collision power and balances |
+| `fields.h5` | Selected evaluated Green/self-energy fields and the distinct unevaluated Born image, with frequency/q coordinates |
+| `reference.json` | Reference-map arithmetic, tangent attempts, selected/rejected trials and proposal screens for reference-seeded SCBA |
+| `SHA256SUMS` | Checksums of the saved outputs |
+
+For finite-device SCBA, exit status is zero only after all six original screens pass with no physical/numerical failure. For Method 1, zero requires a qualified donor and successful nonlinear and linear-response probe gates. Bounded or failed runs return nonzero and preserve available diagnostics. A current from a partial run is not accepted interacting transport. Both contact currents are positive **into** the device; a conserving state has `J_left + J_right ≈ 0`.
+
+See [input and model formats](docs/INPUT.md), [numerical conventions](docs/METHOD.md), [output definitions](docs/OUTPUTS.md) and [source provenance](SOURCE_PROVENANCE.json).

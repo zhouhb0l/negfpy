@@ -1,0 +1,119 @@
+{
+  "schema": "negfpp.example-input-provenance.v1",
+  "example": "silicon24",
+  "sources_preserved": true,
+  "force_constants_changed": false,
+  "coefficients_refitted": false,
+  "historical_fields_or_checkpoints_loaded": false,
+  "inputs": [
+    {
+      "path": "fc2.full.hdf5",
+      "bytes": 86059,
+      "sha256": "6b26d489e6a7fffe61530e77b0c2a907eb4e4f13d5b352abb29d9c0c2c6c74f7",
+      "origin": "retained-silicon-pbesol-302ad205/derived/si-oracle-005/fc2.full.hdf5",
+      "transformation": "none; byte-identical copy"
+    },
+    {
+      "path": "phono3py_disp.yaml",
+      "bytes": 32796,
+      "sha256": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7",
+      "origin": "retained-silicon-pbesol-302ad205/source/phono3py_disp.yaml",
+      "transformation": "none; byte-identical copy"
+    },
+    {
+      "path": "coefficients.npy",
+      "bytes": 5952,
+      "sha256": "92358d713fc2b622e94e9c977154124b6575f01b057fe2645a20fb85ccd6fad9",
+      "origin": "retained-minimal-center-1k-20261030/inputs/coefficients.npy",
+      "transformation": "none; byte-identical copy"
+    },
+    {
+      "path": "model.json",
+      "bytes": 87040,
+      "sha256": "cd3c0e014a2d9bac2f46bafc3a233192c479d3195d32200dc954d1bf3ea00e87",
+      "origin": "retained-site-energy-convergence-20261026/seed-state2-metadata.json",
+      "origin_file_bytes": 141472,
+      "origin_file_sha256": "a0522e60757d4e30bf5afcbbe355e2d9295b8bf3d559fd469a4fa1e1cca8d2b7",
+      "transformation": {
+        "retained_unchanged_keys": [
+          "fit_report",
+          "fit_geometry",
+          "material"
+        ],
+        "model_parameters_removed_locator_keys": [
+          "descriptor_relative_path",
+          "relative_path"
+        ],
+        "omitted_top_level_keys": [
+          "pins",
+          "manifest",
+          "support_model",
+          "result_status",
+          "checkpoint_receipt"
+        ],
+        "added_schema": "negfpp.saved-site-energy-model.v1",
+        "scientific_fields_changed": false
+      }
+    }
+  ],
+  "model_kind": "Saved periodic nearest-neighbor site-star cubic-energy surrogate with all selected center-energy derivatives retained.",
+  "bulk_fc3_relative_frobenius_fit_residual": 0.021414695219655902,
+  "dimensions": {
+    "full_atoms": 24,
+    "full_dofs": 72,
+    "energy_centers": 8,
+    "active_endpoint_atoms": 12,
+    "active_dofs": 36,
+    "device_layers": 3
+  },
+  "coarse_grid": {
+    "mesh": [
+      1,
+      1,
+      1
+    ],
+    "signed_frequency_nodes": 101,
+    "signed_step": 0.15,
+    "signed_range": [
+      -7.5,
+      7.5
+    ]
+  },
+  "historical_reference": {
+    "origin": "retained-minimal-center-1k-20261030/rapid-gamma/summary.json",
+    "origin_file_sha256": "6167d7468b8aa214fa04d81e7281a19ad536786a9ce83ef7e63ab8e7c651d8f5",
+    "arm": {
+      "arm": "g0.10",
+      "converged": true,
+      "attempted": 12,
+      "completed": 12,
+      "selected": 12,
+      "rejected": 0,
+      "stop_reason": "fixed_point",
+      "failure_reason": null,
+      "wall_seconds": 21.00009275972843,
+      "harmonic_input_current_w": 4.470411898020215e-10,
+      "selected_index": 12,
+      "latest_index": 12,
+      "sigma_screen_ratios": {
+        "retarded": 0.7100568209503134,
+        "lesser": 0.7159300036673075,
+        "greater": 0.7159300036348175
+      },
+      "current_screen_ratios": {
+        "contact_balance": 6.561226841974947e-10,
+        "collision_power": 1.8983401050193976e-09,
+        "full_balance": 1.242217420821903e-09
+      },
+      "current_w": 4.4708627069550947e-10,
+      "finite_bias_conductance_w_per_k": 4.4708627069550947e-10,
+      "relative_difference_from_same_device_harmonic": 0.00010084281832712277
+    },
+    "acceptance": "Actual exit zero, selected state converged, all three unmixed Sigma screens and all three current screens pass, and all physical guards pass. A new bounded run must report its own result; this reference is not a substitute.",
+    "scope": "Coarse numerical solver and packaging check. It does not establish q/frequency/eta convergence or a unique physical-interface model."
+  },
+  "input_json": {
+    "path": "input.json",
+    "sha256": "4db46f5385dbd2ad5fb418f33ce4e8464459fe1874d07238b938421b3d0d3eed"
+  }
+}

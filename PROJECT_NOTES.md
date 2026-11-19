@@ -1,85 +1,19 @@
-# NEGFPy platform guide
+# Package contract
 
-The active development version is **2.0.0.dev0**. The canonical checkout is
-`negfpy/` in the workspace. See the [current README](README.md) and
-[complete-energy guide](docs/complete_energy_scba.md) for the research SCBA
-entry point. Historical qualification and planning statements below describe
-their named release lines; they do not certify the current development tree.
+Version 1.1.0 adds an optional authenticated external evaluated self-energy
+initial guess. Its original input/report/fields and fresh target identities
+must match. Only R/C/D are loaded; all history is fresh, and new original-six
+and physical checks remain mandatory. The public restart contract is documented
+in docs/RESTART.md. Prior releases and campaign archives remain unchanged.
 
-This repository contains the reusable NEGFPy implementation. Material inputs,
-generated calculations, validation artifacts, external programs, and compiled
-reports live in the sibling workspace directories described in the
-[workspace layout](docs/development/workspace_layout.md).
+Stable entity: `sw-negfpp`. Public entry points are `negfpp INPUT.json` and `python -m negfpp INPUT.json`. The numerical namespace `negfpy` is retained internally to preserve the existing implementation and imports.
 
-## Active code responsibilities
+Keep the original cubic convention, paired thermal contacts, complete endpoint support, independent channel fields and all six convergence screens. In-progress outputs and numerical nonconvergence must remain distinguishable from an accepted state. Do not replace the existing solver with fitted lifetimes, diagonal scattering, wrapper-specific physics or tolerance shortcuts.
 
-| Area | Location | Responsibility |
-| --- | --- | --- |
-| Harmonic NEGF | [core package](src/negfpy/core/) | Surface Green functions, device Green functions, transmission, currents, and harmonic observables |
-| Models and IFC mapping | [modeling package](src/negfpy/modeling/), [I/O package](src/negfpy/io/), and [workflows](src/negfpy/workflows/) | Unit-aware IFC ingestion, mapping, audits, and construction of harmonic transport problems |
-| Cubic anharmonic NEGF | [anharmonic package](src/negfpy/anharmonic/) | Signed grids, cubic contractions, Born and conserving SCBA solvers, currents, diagnostics, and restart state |
-| Bulk phonons and SMRTA | [bulk API](src/negfpy/bulk/) and [bulk guide](docs/bulk_rta.md) | Audited FC2-only bands/DOS/group velocities plus explicit heavy FC3 linewidth, lifetime, mean-free-path, and intrinsic SMRTA conductivity workflows |
-| Task-level MPI | [private MPI scheduler](src/negfpy/anharmonic/_mpi_tasks.py) | Parallel execution of complete validation cases; it does not partition an SCBA solve |
-| Silicon bulk oracle | [bulk three-phonon theory](docs/theory/bulk_three_phonon_oracle.md) and [validation record](docs/validation/silicon_bulk_oracle.md) | Pinned phono3py FC2/FC3 ingestion, crystal mapping, mode-space interactions, linewidths, complete-target-\(q\) MPI, and strict release evidence |
-| Tests | [test suite](tests/) | Scientific identities, analytic fixtures, release gates, MPI equivalence, restart integrity, and remote-lifecycle checks |
+`SOURCE_PROVENANCE.json` binds selected source files to their origin. `examples/silicon24/input-provenance.json` binds the compact example to its source dataset and saved energy model. Large campaign outputs and environments remain outside the source archive. Write new runs to a new output directory.
 
-The harmonic public interfaces remain the baseline. Anharmonic functionality
-is isolated under `negfpy.anharmonic`; historical inelastic implementations do
-not define production conventions.
+Selected unit checks exercise the existing numerical building blocks and the new command/input/output contracts. The silicon example is a bounded installation/calculation check, not an accuracy-refinement campaign.
 
-## Theory and validation
+Version 1.0.1 adds the existing same-run reference/increment SCBA controller with exact Green/Born increments and bounded analytic feedback. It preserves the original 18 nonlinear-attempt and six tangent-attempt ceilings. No foreign checkpoint initialization is implied by the reference-seeded command. The five-full-layer silicon example contains 40 atoms and three complete interacting center layers; keep that geometry explicit.
 
-- [Anharmonic theory contract](docs/anharmonic_theory.md)
-- [Anharmonic validation contract](docs/anharmonic_validation.md)
-- [Historical convention mapping](docs/anharmonic_historical_conventions.md)
-- [Remote heavy-validation protocol](docs/remote_heavy_validation.md)
-- [Silicon remote-validation protocol](docs/silicon_remote_validation.md)
-- [Bulk phonon and SMRTA user guide](docs/bulk_rta.md)
-- [Toy-model report source](docs/validation/toy-model-report/)
-- [Pinned remote MPI environment lock](validation/locks/negf-toy-gate-linux-64.lock)
-- [Pinned silicon/phono3py/Open-MPI lock](validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64.lock)
-- [SHA256-authenticated 1.0 release lock](validation/locks/phono3py-4.4.0-si-pbesol-openmpi-linux-64-sha256.lock)
-
-The dense toy solver is certified at tag `v0.1.0-rc1`, and the pinned silicon
-bulk three-phonon oracle is preserved at `v0.2.0`. The separate 1.0 line adds
-the user-facing periodic-crystal harmonic and intrinsic three-phonon SMRTA
-workflow. Its safe entry point is `BulkHarmonicProblem`; FC3 contraction is an
-explicit heavy operation through `BulkTransportProblem`.
-
-The 2.0 development line includes real-material anharmonic NEGF research. Sparse and
-transverse-momentum material-device SCBA remain gated on the independently
-validated toy and bulk-oracle foundations. Bulk SMRTA lifetimes are a useful
-oracle but are not inserted into harmonic transmission as a substitute for a
-conserving open-device self-energy.
-
-For periodic bulk transport, the 1.0 approximation is explicitly
-three-phonon SMRTA; iterative LBTE and additional scattering mechanisms are
-outside that result. For open devices, the production hierarchy remains
-harmonic NEGF, one-shot cubic Born for screening, and conserving cubic SCBA
-for interacting conductance. Historical Wang and Mingo implementations are
-regression or literature-reproduction work and cannot calibrate the
-production cubic prefactor.
-
-## Workspace responsibilities
-
-- Active studies: [harmonic](../studies/harmonic/),
-  [anharmonic](../studies/anharmonic/), and
-  [materials](../studies/materials/).
-- Public or externally supplied IFC data: [datasets](../datasets/).
-- Immutable run evidence: [validation artifacts](../artifacts/validation/).
-- Human-readable deliverables: [reports](../reports/).
-- Environment manifests: [environments](../environments/).
-- Recovery snapshots and superseded implementations: [archive](../archive/).
-
-Generated results must not be copied into the source package. A release result
-must identify one clean source commit and one explicit environment lock, pass
-the applicable scientific and orchestration gates, and be mirrored with
-checksums before a report cites it.
-
-## Historical notes
-
-- [Legacy inelastic implementation](docs/history/legacy_inelastic.md)
-- [TaN phonopy transport debugging](docs/history/tan_phonopy_transport_debugging.md)
-
-The TaN note was moved from this root guide because it is material-specific. It
-is preserved for context and does not establish a current release default.
+Version 1.0.2 adds the existing Method 1 frozen-retarded extension with local fluctuation–dissipation/Bose probes. It uses a separately authenticated short-device evaluated input, retaining complete overlapping support. The original recursive current/temperature methods are selected into normal package modules; frequency tiles may be distributed across CPU workers with every q/frequency point counted once. The approximately 1µm silicon example is a coarse Gamma/101-node, g=0.10 execution check. Donor six-screen SCBA convergence and target nonlinear/linear probe convergence are distinct. No long-device Born maps, physical-kernel repairs or full long-device SCBA claim are permitted.

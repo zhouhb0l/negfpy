@@ -450,8 +450,14 @@ def evaluate_channel_born_map(
         checks['inverse'] = _finish(inverse_metrics,rtol,atol,'inverse residuals',gate=False)
         checks['full_green_exports'] = _finish(full_exports,rtol,atol,'full Green exports',gate=False)
         green = ChannelSpectrum(*arrays)
-        checks['active_green'],checks['active_green_exports'] = _field_checks(
-            mesh,grid,green,rtol,atol,'active Green')
+        try:
+            checks['active_green'],checks['active_green_exports'] = _field_checks(
+                mesh,grid,green,rtol,atol,'active Green')
+        except ValueError as exc:
+            # Reflection/reality failures need the same already calculated
+            # source/operator evidence as local full-Green failures.  Keep
+            # every guard and raw field unchanged; do not rerun the solve.
+            raise ValueError(f'{exc}; zero_frequency_context={zero_context}') from exc
         if coupling == 0 or a == 0:
             born_c,born_d = np.zeros(shape,dtype=np.complex128),np.zeros(shape,dtype=np.complex128)
         else:

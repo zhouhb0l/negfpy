@@ -1,0 +1,4214 @@
+{
+  "schema": "negfpp.saved-site-energy-model.v1",
+  "model_parameters": {
+    "actual_ifc_tensor": false,
+    "array_bytes": 5824,
+    "coefficient_semantics": "two primitive-center classes; ordered cubic site-star monomials and normalization fixed by the bound source and energy identity",
+    "dtype": "float64",
+    "energy_identity_sha256": "dce0ab054db0999b8923e44ff7f1e85f4a778e91d8f84654f9c4db91636a867a",
+    "file_bytes": 5952,
+    "file_sha256": "92358d713fc2b622e94e9c977154124b6575f01b057fe2645a20fb85ccd6fad9",
+    "fit_configuration": {
+      "fit_rtol": 1e-12,
+      "identity_atol": 1e-11,
+      "identity_rtol": 1e-08,
+      "max_atoms": 128,
+      "max_bytes": 2147483648,
+      "max_iterations": 500,
+      "neighbors": 4
+    },
+    "hash_domain": "whole NPY file including header",
+    "model_identity_sha256": "ae5d0d7db3b80ddcfc6fc8e81b98fb1310424165a019abc67a6c075268209e65",
+    "production_ifc_adoption": false,
+    "profile_sha256": "a18a460ea4a671759bf3558c5b7ef35f5999feba125c681c643b440b03c96495",
+    "research_trajectory_parameters": true,
+    "role": "exact energy parameters used for this declared research trajectory",
+    "schema": "negfpy.site-energy-parameters.v1",
+    "shape": [
+      2,
+      364
+    ],
+    "source_commit": "998ab79d89fde57e0d81f3b123d79c4e66e6f6d0",
+    "source_tree": "ab5e3240de656a688d50c8178e94029cde32acf2"
+  },
+  "fit_report": {
+    "basis": {
+      "all_connected_four_atom_clusters_included": false,
+      "covered_ordered_tensor_rows": 188352,
+      "energy_coefficient_convention": "K*d_p*d_q*d_r divided by repeated-coordinate factorials; p<=q<=r",
+      "full_ordered_tensor_rows": 7077888,
+      "image_resolved_raw_bulk_equivalence_established": false,
+      "kind": "periodic nearest-neighbor site-star cubic energy",
+      "metric": "unweighted full ordered physical Cartesian FC3 Frobenius norm",
+      "monomials_per_class": 364,
+      "neighbors_per_site": 4,
+      "parameter_count": 728,
+      "rotational_constraints_imposed": false,
+      "sparse_nonzero_entries": 807168
+    },
+    "fit": {
+      "bounded_solver_converged": true,
+      "coefficient_norm": 26.800532930172142,
+      "frobenius": 1133.9910393592847,
+      "gauge": "zero-initialized unregularized minimum Euclidean coefficient norm at convergence; bounded iteration approximate",
+      "iteration_limit": 500,
+      "iteration_limit_reached": false,
+      "iterations": 40,
+      "max_abs": 33.12940235301946,
+      "parameter_count": 728,
+      "requested_solver_tolerance": 1e-12,
+      "solver": "scipy.sparse.linalg.lsmr",
+      "solver_condition_estimate": 17.34839841629906,
+      "solver_normal_residual_norm": 3.772996159442353e-09,
+      "solver_operator_norm_estimate": 612.5654718829355,
+      "solver_residual_norm": 8.859213080188777,
+      "source_reconstruction": {
+        "allowance": 3.313040235301946e-07,
+        "error_to_allowance_ratio": 301232.09605154634,
+        "frobenius_error": 24.289642611912438,
+        "max_abs_error": 0.09979940543831134,
+        "passed": false,
+        "scale": 33.12940235301946
+      },
+      "source_reconstruction_passed": false,
+      "stop_code": 2
+    },
+    "plan": {
+      "coo_entries_before_compression_bound": 884736,
+      "dense_design_matrix_allocated": false,
+      "monomials_per_class": 364,
+      "n_atoms": 64,
+      "n_classes": 2,
+      "neighbors_per_site": 4,
+      "ordered_source_rows": 7077888,
+      "parameter_count": 728,
+      "peak_owned_bytes": 511798272,
+      "relative_coordinates_per_site": 12,
+      "rss_guarantee": false,
+      "source_caller_payload_excluded": true,
+      "source_tensor_bytes": 56623104
+    },
+    "residual": {
+      "covered_fit_remainder": {
+        "frobenius": 8.859213080188733,
+        "max_abs": 0.09979940543831134
+      },
+      "explicitly_reported": true,
+      "frobenius": 24.289642611912438,
+      "included_in_surrogate_vertex": false,
+      "max_abs": 0.09979940543831134,
+      "outside_coverage_irreducible_floor": {
+        "frobenius": 22.616389672410854,
+        "max_abs": 0.08382997006809358
+      },
+      "outside_floor_relative_frobenius": 0.019939490240425517,
+      "raw_covered": {
+        "frobenius": 1134.0256447733343,
+        "max_abs": 33.02960294758116
+      },
+      "raw_source_retained": true,
+      "relative_frobenius": 0.021414695219655902,
+      "sum_closure": {
+        "allowance": 3.3030602947581165e-07,
+        "error_to_allowance_ratio": 1.0503734846922261e-11,
+        "frobenius_error": 2.8846897590451474e-16,
+        "max_abs_error": 3.469446951953614e-18,
+        "passed": true,
+        "scale": 33.02960294758116
+      }
+    },
+    "schema": "negfpy.compute-only-site-energy-model-fit.v1",
+    "scope": {
+      "coefficients_output_to_files": false,
+      "compute_only_array_model": true,
+      "ifc_repair_performed": false,
+      "no_projection_or_clipping": true,
+      "physical_interface_uniquely_recovered": false,
+      "physical_model_adopted": false,
+      "source_preserved": true,
+      "surrogate_omits_measured_remainder": true
+    },
+    "source": {
+      "center_class_counts": [
+        32,
+        32
+      ],
+      "center_class_labels": [
+        0,
+        32
+      ],
+      "fresh_hash_computed": false,
+      "frobenius": 1134.2511468301313,
+      "max_abs": 33.02960294758116,
+      "unchanged": true
+    }
+  },
+  "fit_geometry": {
+    "all_star_diameters_below_half_shortest_translation": true,
+    "class_environments_consistent": true,
+    "coherent_unwrapped_stars": true,
+    "coordinate_order": "lexicographic Cartesian bond vectors rounded to10decimals; original vectors retained",
+    "lattice_vectors_are_rows": true,
+    "minimum_image_algorithm": "bounded exact integer-image enumeration using smallest lattice singular value",
+    "minimum_image_integer_radius": 1,
+    "positions_are_fractional": true,
+    "shortest_nonzero_lattice_translation": 10.86712006,
+    "shortest_translation_integer_radius": 1,
+    "stars": [
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 0,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          60,
+          50,
+          41,
+          39
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 1,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          61,
+          51,
+          40,
+          38
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 2,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          62,
+          48,
+          43,
+          37
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 3,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          63,
+          49,
+          42,
+          36
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 4,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          56,
+          54,
+          45,
+          35
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 5,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          57,
+          55,
+          44,
+          34
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 6,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            1
+          ]
+        ],
+        "neighbors": [
+          58,
+          52,
+          47,
+          33
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 7,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ],
+        "neighbors": [
+          59,
+          53,
+          46,
+          32
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 8,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          48,
+          56,
+          33,
+          41
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 9,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          49,
+          57,
+          32,
+          40
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 10,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          50,
+          58,
+          35,
+          43
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 11,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          51,
+          59,
+          34,
+          42
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 12,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          52,
+          60,
+          37,
+          45
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 13,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          53,
+          61,
+          36,
+          44
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 14,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          54,
+          62,
+          39,
+          47
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 15,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          55,
+          63,
+          38,
+          46
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 16,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          40,
+          34,
+          56,
+          50
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 17,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          41,
+          35,
+          57,
+          51
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 18,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          42,
+          32,
+          58,
+          48
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 19,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          43,
+          33,
+          59,
+          49
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 20,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          44,
+          38,
+          60,
+          54
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 21,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          45,
+          39,
+          61,
+          55
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 22,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          46,
+          36,
+          62,
+          52
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 23,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ]
+        ],
+        "neighbors": [
+          47,
+          37,
+          63,
+          53
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 24,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          36,
+          40,
+          48,
+          60
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 25,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          37,
+          41,
+          49,
+          61
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 26,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          38,
+          42,
+          50,
+          62
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 27,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          39,
+          43,
+          51,
+          63
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 28,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          32,
+          44,
+          52,
+          56
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 29,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          33,
+          45,
+          53,
+          57
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 30,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          34,
+          46,
+          54,
+          58
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 31,
+        "class_index": 0,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            1
+          ]
+        ],
+        "neighbors": [
+          35,
+          47,
+          55,
+          59
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 32,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            -1,
+            -1
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          7,
+          9,
+          18,
+          28
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 33,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          6,
+          8,
+          19,
+          29
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 34,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            -1
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          5,
+          11,
+          16,
+          30
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 35,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          4,
+          10,
+          17,
+          31
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 36,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            -1,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          3,
+          13,
+          22,
+          24
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 37,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          2,
+          12,
+          23,
+          25
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 38,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          1,
+          15,
+          20,
+          26
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 39,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          0,
+          14,
+          21,
+          27
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 40,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          9,
+          1,
+          24,
+          16
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 41,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          8,
+          0,
+          25,
+          17
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 42,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          11,
+          3,
+          26,
+          18
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 43,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          10,
+          2,
+          27,
+          19
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 44,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          13,
+          5,
+          28,
+          20
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 45,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          12,
+          4,
+          29,
+          21
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 46,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            -1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          15,
+          7,
+          30,
+          22
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 47,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          14,
+          6,
+          31,
+          23
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 48,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          18,
+          24,
+          2,
+          8
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 49,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          19,
+          25,
+          3,
+          9
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 50,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          16,
+          26,
+          0,
+          10
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 51,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          17,
+          27,
+          1,
+          11
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 52,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          22,
+          28,
+          6,
+          12
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 53,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            -1,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          23,
+          29,
+          7,
+          13
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 54,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          20,
+          30,
+          4,
+          14
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 55,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          21,
+          31,
+          5,
+          15
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 56,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          28,
+          16,
+          8,
+          4
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 57,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          29,
+          17,
+          9,
+          5
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 58,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          30,
+          18,
+          10,
+          6
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 59,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            -1
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            -1
+          ]
+        ],
+        "neighbors": [
+          31,
+          19,
+          11,
+          7
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 60,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          24,
+          20,
+          12,
+          0
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 61,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          25,
+          21,
+          13,
+          1
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 62,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          26,
+          22,
+          14,
+          2
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      },
+      {
+        "bond_lengths": [
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868,
+          2.352800509483868
+        ],
+        "center": 63,
+        "class_index": 1,
+        "diameter_over_half_shortest_translation": 0.7071067811865476,
+        "minimum_images_unique": true,
+        "neighbor_cartesian_vectors": [
+          [
+            -1.3583900075,
+            -1.3583900075,
+            -1.3583900075
+          ],
+          [
+            -1.3583900075,
+            1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            -1.3583900075,
+            1.3583900075
+          ],
+          [
+            1.3583900075,
+            1.3583900075,
+            -1.3583900075
+          ]
+        ],
+        "neighbor_image_integers": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "neighbors": [
+          27,
+          23,
+          15,
+          3
+        ],
+        "unwrapped_diameter": 3.8421071431971807
+      }
+    ]
+  },
+  "material": {
+    "center_class_counts": [
+      32,
+      32
+    ],
+    "center_class_labels": [
+      0,
+      32
+    ],
+    "fit_coordinates": "physical Cartesian displacement differences before mass normalization",
+    "force_constant_units": "eV/angstrom^3",
+    "layered_geometry_sha256": "778afae03a7f83580b6eac8ab5529901cbf25fee7fa3ebacbdded85c50a85ab5",
+    "mass_units": "amu",
+    "permutation_complete": true,
+    "primitive_crystal_sha256": "14efe6eff8478b04873f8c9a38c01adbfc83d0a6a10d6ffee59d51d073587ec9",
+    "raw_fc3_certification_passed": true,
+    "raw_fc3_modified": false,
+    "source_asr_repaired": false,
+    "source_fc2_sha256": "d6e7796f41db7d0aad24e24404cfb2ec25b1ad52c5aebc5a47c79cb557b659e7",
+    "source_fc3_sha256": "6368368a4db9dcd324321fbc4d2d65519c2167e702641a098509afaf3de6c32e",
+    "source_normalized_fc3_sha256": "830ddd8d4a8d2732b17f0639fe7b2b85efdc6bc03b23e5df7c8e0e9f457bec94"
+  }
+}

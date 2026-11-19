@@ -1,0 +1,97 @@
+{
+  "schema": "negfpp.run.v1",
+  "run": {
+    "name": "silicon24",
+    "output_dir": "../../generated/silicon24"
+  },
+  "inputs_sha256": {
+    "fc2.full.hdf5": "6b26d489e6a7fffe61530e77b0c2a907eb4e4f13d5b352abb29d9c0c2c6c74f7",
+    "phono3py_disp.yaml": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7",
+    "coefficients.npy": "92358d713fc2b622e94e9c977154124b6575f01b057fe2645a20fb85ccd6fad9",
+    "model.json": "cd3c0e014a2d9bac2f46bafc3a233192c479d3195d32200dc954d1bf3ea00e87"
+  },
+  "model": {
+    "type": "saved_site_energy",
+    "coefficients": "coefficients.npy",
+    "metadata": "model.json"
+  },
+  "harmonic": {
+    "fc2": "fc2.full.hdf5",
+    "crystal": "phono3py_disp.yaml"
+  },
+  "geometry": {
+    "transport_supercell_matrix": [
+      [
+        -1,
+        1,
+        1
+      ],
+      [
+        1,
+        -1,
+        1
+      ],
+      [
+        1,
+        1,
+        -1
+      ]
+    ],
+    "n_device_layers": 3,
+    "interaction_layers": [
+      1
+    ]
+  },
+  "grid": {
+    "mesh": [
+      1,
+      1,
+      1
+    ],
+    "step": 0.15,
+    "n_positive": 50
+  },
+  "scale": {
+    "omega0_rad_s": 62831853071795.86,
+    "hbar_j_s": 1.0545718176461565e-34
+  },
+  "reservoirs": {
+    "left_temperature_k": 300.5,
+    "right_temperature_k": 299.5,
+    "eta_lead": 0.0015625,
+    "eta_device": 0.0
+  },
+  "scba": {
+    "method": "anderson1",
+    "g": 0.1,
+    "max_evaluations": 60,
+    "max_seconds": 180.0,
+    "mixing": 0.1,
+    "workers": 4,
+    "external_tile": 36,
+    "bin_tile": 16,
+    "max_bytes": 8589934592,
+    "max_contraction_work": 1000000000000000,
+    "max_dyson_evaluations": 2404,
+    "initial_map_estimate_seconds": 2.0,
+    "time_reserve_seconds": 5.0,
+    "next_map_safety_factor": 1.25,
+    "sigma_rtol": 0.0001,
+    "sigma_atol": 1e-10,
+    "current_rtol": 0.001,
+    "current_atol_w": 1e-14,
+    "identity_rtol": 1e-08,
+    "identity_atol": 1e-11
+  },
+  "resources": {
+    "model_max_bytes": 2147483648,
+    "vertex_max_bytes": 134217728,
+    "vertex_workspace_bytes": 536870912,
+    "harmonic_max_bytes": 134217728,
+    "contact_max_bytes": 3221225472,
+    "q_samples": 257,
+    "max_base_evaluations": 100000,
+    "max_geometry_evaluations": 100000,
+    "max_phase_evaluations": 50000000
+  }
+}

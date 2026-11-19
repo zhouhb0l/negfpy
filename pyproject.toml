@@ -3,36 +3,39 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "negfpy"
-version = "2.0.0.dev0"
-description = "Phonon transport and research anharmonic NEGF workflows"
+name = "negfpp"
+version = "1.1.0"
+description = "Phonon-phonon NEGF with native-channel cubic SCBA"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "h5py>=3,<4",
   "numpy>=2,<3",
   "scipy>=1.11,<2",
-  "spglib>=2.7,<3",
+  "spglib==2.7.0",
   "threadpoolctl>=3",
-]
-
-[project.optional-dependencies]
-fc3 = []
-material-oracle = [
-  "h5py>=3",
   "phono3py==4.4.0",
   "phonopy==4.4.0",
-  "spglib==2.7.0",
 ]
-mpi = ["mpi4py>=4"]
-report = ["h5py>=3", "matplotlib>=3.7", "pillow>=10"]
-test = ["h5py>=3", "spglib==2.7.0", "pytest>=8"]
+
+[project.scripts]
+negfpp = "negfpp.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = [
+  "negfpp*",
+  "negfpy",
+  "negfpy.anharmonic*",
+  "negfpy.core*",
+  "negfpy.models*",
+]
 
 [tool.setuptools.package-data]
 negfpy = ["_build_provenance.json"]
@@ -40,5 +43,5 @@ negfpy = ["_build_provenance.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-  "nightly: bounded validation cases that are too costly for pull-request CI",
+  "nightly: optional checks requiring larger resource budgets",
 ]

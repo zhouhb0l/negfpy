@@ -1,46 +1,43 @@
-# Changelog
+# Changes
 
-## Unreleased — 2.0.0.dev0 preparation
+## 1.1.0 — 2026-11-20
 
-- Propagate explicit contact allocation budgets through the spectrum constructor,
-  fixing refined-grid admission while keeping the default and physical checks.
-- Allow explicitly requested contact allocation budgets up to 4 GiB for finer
-  q/frequency grids, retaining the 64 MiB default and all contact equations and
-  physical checks.
-- Expose the existing fitted complete-energy, native R/C/D SCBA, bounded
-  Anderson, proposal-feasibility and checkpoint implementations through
-  `negfpy.anharmonic.complete_energy`.
-- Add a portable caller-input example and document model, boundary and
-  convergence assumptions. The fitted model remains a research surrogate.
-- Remove 23 dated experimental launch scripts and their 24 driver-only tests
-  from the active checkout. Their exact sources remain in Git history and
-  external recovery snapshots. Reusable solver and model modules are retained.
-- Align the Python minimum with the checkpoint code's Python 3.11
-  `hashlib.file_digest` API. Default test discovery is limited to `tests/`;
-  historical report checks can still be invoked explicitly.
+- Add optional `initial_self_energy` to SCBA JSON inputs. Authenticate the prior
+  input, converged result report and evaluated R/C/D fields by SHA-256, including
+  their cross-file binding. Older result bundles use their original checksum
+  manifest.
+- Require the same physical inputs, geometry, ordered active DOFs, q/frequency
+  grids, coupling, reservoirs and units; retain all original physical guards.
+- Start with fresh solver history and a new full-map evaluation, including for
+  an already converged guess. Never reuse saved Green fields or a Born image.
+- Support linear, Anderson and reference/increment SCBA while preserving the
+  original default zero start and all six fresh convergence screens.
 
-This is source consolidation for a future release. It changes no solver
-physics, physical guards or convergence thresholds, and does not publish or
-certify a new software release or physical transport result.
+## 1.0.2 — 2026-11-15
 
-## 1.0.0 — 2026-08-02
+- Add Method 1 transport using the existing frozen retarded-kernel and
+  conserving local thermal-probe implementation through the direct JSON command.
+- Authenticate a converged, evaluated one-center short-device donor and preserve
+  its complete endpoint support, normalization and physical guards.
+- Reconstruct repeated FC2 blocks and contacts without new cubic construction,
+  fitting or long-device SCBA maps; retain separate donor and probe qualification.
+- Include a bounded silicon input near 1 µm on the donor's coarse grid, with
+  explicit model and resource limits. Preserve 1.0.0 and 1.0.1 releases and inputs.
 
-This release establishes two validated, explicitly separated workflows:
+## 1.0.1 — 2026-11-15
 
-- the existing harmonic open-device NEGF solver; and
-- periodic-crystal intrinsic three-phonon thermal transport in the
-  single-mode relaxation-time approximation (SMRTA).
+- Expose the existing reference/increment SCBA method through
+  `scba.method: "reference-seeded"` and the same direct JSON command.
+- Construct references freshly within each calculation and retain the existing
+  complete cubic model, independent channel fields and six convergence screens.
+- Include bounded analytic-feedback proposals, with separate accounting for
+  nonlinear maps, rejected trials and signed tangent evaluations.
+- Add a five-layer silicon input while preserving version 1.0.0 inputs, releases
+  and the original zero-start methods.
 
-The new stable `negfpy.bulk` namespace provides audited phono3py FC2/FC3
-ingestion, phonon bands, total and atom/Cartesian-projected DOS, analytic
-group velocities, mode heat capacities, three-phonon linewidths and
-population lifetimes, mean free paths, mode- and tensor-resolved SMRTA
-conductivity, cumulative conductivity, and schema-checked HDF5 archives.
+## 1.0.0 — 2026-11-15
 
-The silicon qualification is an exact-input implementation comparison on
-3x3x3, 5x5x5, and 11x11x11 meshes. It does not certify physical mesh or
-smearing convergence for a quoted silicon conductivity.
-
-Not included in 1.0 are iterative LBTE, isotope/boundary/four-phonon
-scattering, polar non-analytical corrections, or real-material anharmonic
-device NEGF. The latter is the principal 2.0 development target.
+- Package the existing complete-center cubic SCBA implementation as `negfpp`.
+- Add direct JSON execution, authenticated external inputs and standard result files.
+- Include the compact 24-atom silicon example with exact saved coefficients.
+- Keep finite-device support and original numerical/physical checks; omit long-range extensions from the first release.

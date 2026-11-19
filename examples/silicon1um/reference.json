@@ -1,0 +1,82 @@
+{
+  "schema": "negfpp.frozen-source.v1",
+  "description": "Compact evaluated input Sigma-R from the converged 24-atom Gamma101 g=0.1 direct release smoke calculation. The saved fitted model and coarse grid remain approximations; this is not the historical q44 g=1 micron reference.",
+  "documents": {
+    "report": {
+      "path": "source-report.json",
+      "bytes": 82539,
+      "sha256": "e8488d5d0232f3ca83a7a1f6754afb688944a15b4d6103d6e7726827537ef340"
+    },
+    "input": {
+      "path": "source-input.json",
+      "bytes": 2247,
+      "sha256": "4db46f5385dbd2ad5fb418f33ce4e8464459fe1874d07238b938421b3d0d3eed"
+    },
+    "qualification": {
+      "path": "source-qualification.json",
+      "bytes": 923,
+      "sha256": "182027457d4bce8df9427784c7dc51ce198b92acb065ac75de3cc95af9221df0"
+    },
+    "original_checksums": {
+      "path": "source-SHA256SUMS",
+      "bytes": 475,
+      "sha256": "21ff42daf37755c187a480d389f4a70e0595191075b86cc234c6b9b9fb1b8a8c"
+    }
+  },
+  "inputs": {
+    "fc2": {
+      "path": "../silicon24/fc2.full.hdf5",
+      "bytes": 86059,
+      "sha256": "6b26d489e6a7fffe61530e77b0c2a907eb4e4f13d5b352abb29d9c0c2c6c74f7"
+    },
+    "crystal": {
+      "path": "../silicon24/phono3py_disp.yaml",
+      "bytes": 32796,
+      "sha256": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7"
+    },
+    "coefficients": {
+      "path": "../silicon24/coefficients.npy",
+      "bytes": 5952,
+      "sha256": "92358d713fc2b622e94e9c977154124b6575f01b057fe2645a20fb85ccd6fad9"
+    },
+    "metadata": {
+      "path": "../silicon24/model.json",
+      "bytes": 87040,
+      "sha256": "cd3c0e014a2d9bac2f46bafc3a233192c479d3195d32200dc954d1bf3ea00e87"
+    }
+  },
+  "origin": {
+    "product": "negfpp",
+    "version": "1.0.0",
+    "report_sha256": "e8488d5d0232f3ca83a7a1f6754afb688944a15b4d6103d6e7726827537ef340",
+    "input_sha256": "4db46f5385dbd2ad5fb418f33ce4e8464459fe1874d07238b938421b3d0d3eed",
+    "fields_sha256": "3a724d71045483a99c58786c3d0b38c25993f00decbc3d9319fad7e1ce792fa7",
+    "selected_state": 12,
+    "selected_dataset": "sigma_input_evaluated/retarded",
+    "original_files_unchanged": true
+  },
+  "retarded": {
+    "file": {
+      "path": "reference.h5",
+      "bytes": 1758398,
+      "sha256": "2dafe3982830fb5f050f43f634aad90c2492ef9c797487153551700c3a8c1e40"
+    },
+    "role": "sigma_input_evaluated/retarded",
+    "evaluated_state_index": 12,
+    "shape": [
+      1,
+      101,
+      36,
+      36
+    ],
+    "dtype": "complex128",
+    "payload_order": "C-little-endian",
+    "payload_sha256": "17765664e4be5f7058b3261e6ac91148db3eb0852ab667c6b3c26bd4817dd80f"
+  },
+  "transformations": [
+    "Original report, input, exit receipt and checksum manifest copied byte-for-byte.",
+    "Only sigma_input_evaluated/retarded and its original active/grid coordinates are copied into reference.h5; Green functions, Keldysh components and the unevaluated Born image are omitted.",
+    "All selected retarded matrix entries and endpoint ordering are unchanged; no clipping, projection, rescaling, refitting or normalization.",
+    "Four unchanged material inputs are shared by relative references to ../silicon24/."
+  ]
+}

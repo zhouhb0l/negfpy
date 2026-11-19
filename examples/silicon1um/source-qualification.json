@@ -1,0 +1,36 @@
+{
+  "schema": "negfpp.silicon24-check.v1",
+  "actual_exit_code": 0,
+  "passed": true,
+  "counts": {
+    "attempted": 12,
+    "completed": 12,
+    "selected": 12,
+    "rejected": 0
+  },
+  "elapsed_seconds": 20.55950552597642,
+  "left_current_w": 4.4708627069550947e-10,
+  "historical_left_current_w": 4.4708627069550947e-10,
+  "current_difference_w": 0.0,
+  "sigma_ratios": {
+    "retarded": 0.7100568209503134,
+    "lesser": 0.7159300036673075,
+    "greater": 0.7159300036348175
+  },
+  "current_ratios": {
+    "contact_balance": 6.561226841974947e-10,
+    "collision_power": 1.8983401050193976e-09,
+    "full_balance": 1.242217420821903e-09
+  },
+  "input_hashes_verified": true,
+  "result_hashes_verified": true,
+  "field_shape": [
+    1,
+    101,
+    36,
+    36
+  ],
+  "input_sigma_nonzero": true,
+  "mapped_image_unevaluated": true,
+  "report_sha256": "e8488d5d0232f3ca83a7a1f6754afb688944a15b4d6103d6e7726827537ef340"
+}

@@ -1,0 +1,86 @@
+{
+  "schema": "negfpp.example-input-provenance.v1",
+  "example": "silicon5layer",
+  "source_configuration": "../silicon24/input.json",
+  "source_configuration_sha256": "4db46f5385dbd2ad5fb418f33ce4e8464459fe1874d07238b938421b3d0d3eed",
+  "inputs": [
+    {
+      "path": "../silicon24/fc2.full.hdf5",
+      "bytes": 86059,
+      "sha256": "6b26d489e6a7fffe61530e77b0c2a907eb4e4f13d5b352abb29d9c0c2c6c74f7",
+      "origin": "silicon24 selected input bundle",
+      "transformation": "none; referenced in place without duplication"
+    },
+    {
+      "path": "../silicon24/phono3py_disp.yaml",
+      "bytes": 32796,
+      "sha256": "1375e3ae19a2c4138a888af8177a3becfcaa3b127ca50755773c405c3e28a2a7",
+      "origin": "silicon24 selected input bundle",
+      "transformation": "none; referenced in place without duplication"
+    },
+    {
+      "path": "../silicon24/coefficients.npy",
+      "bytes": 5952,
+      "sha256": "92358d713fc2b622e94e9c977154124b6575f01b057fe2645a20fb85ccd6fad9",
+      "origin": "silicon24 selected input bundle",
+      "transformation": "none; referenced in place without duplication"
+    },
+    {
+      "path": "../silicon24/model.json",
+      "bytes": 87040,
+      "sha256": "cd3c0e014a2d9bac2f46bafc3a233192c479d3195d32200dc954d1bf3ea00e87",
+      "origin": "silicon24 selected input bundle",
+      "transformation": "none; referenced in place without duplication"
+    }
+  ],
+  "input_json_sha256": "c764aaff83302ba9e57322a2f0cd16bf9015420889a994aa5c1967f4106274a7",
+  "model_or_ifc_changes": false,
+  "coefficients_refitted": false,
+  "historical_reference_arrays_loaded": false,
+  "reference_method": "Fresh same-run reference/increment SCBA with bounded analytic feedback. The reference is built for this geometry, grid, coupling, harmonic inputs and reservoirs.",
+  "geometry": {
+    "device_layers": 5,
+    "full_atoms": 40,
+    "full_dofs": 120,
+    "interaction_layers": [
+      1,
+      2,
+      3
+    ],
+    "energy_centers": 24,
+    "expected_active_endpoint_atoms": 28,
+    "expected_active_dofs": 84,
+    "active_support_status": "Expected from the existing complete-center star support; the runtime builder must verify the actual support.",
+    "derivatives_cropped": false
+  },
+  "grid": {
+    "mesh": [
+      1,
+      1,
+      1
+    ],
+    "signed_frequency_nodes": 101,
+    "step": 0.15,
+    "range": [
+      -7.5,
+      7.5
+    ]
+  },
+  "reservoir_temperatures_k": [
+    300.5,
+    299.5
+  ],
+  "g": 0.1,
+  "budget": {
+    "max_nonlinear_attempts_including_rejected_trials": 18,
+    "max_tangent_directions": 6,
+    "max_seconds": 900.0,
+    "workers": 4,
+    "blas_threads": 1,
+    "time_admission_note": "The shared budget admits work conservatively; an already running numerical call is not interrupted."
+  },
+  "validation_scope": "Bounded execution and solver-behavior check using a coarse grid. No historical five-layer current or convergence result is asserted.",
+  "bulk_fc3_relative_frobenius_fit_residual": 0.021414695219655902,
+  "long_range_extension": false,
+  "calculation_performed_during_example_preparation": false
+}

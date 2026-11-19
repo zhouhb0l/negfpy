@@ -137,7 +137,7 @@ def _validated_embedded_build_provenance(
         return None
     if (
         document.get("schema") != _BUILD_PROVENANCE_SCHEMA
-        or document.get("project") != "negfpy"
+        or document.get("project") != "negfpp"
         or installed_version == "unknown"
         or document.get("package_version") != installed_version
         or _SHA256_RE.fullmatch(package_source_sha256) is None
@@ -584,7 +584,7 @@ def code_provenance() -> dict[str, str | bool]:
     """Return package version, source-tree hash, and Git state when available."""
 
     try:
-        installed_version = importlib_metadata.version("negfpy")
+        installed_version = importlib_metadata.version("negfpp")
     except importlib_metadata.PackageNotFoundError:
         installed_version = "unknown"
 

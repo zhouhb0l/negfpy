@@ -1,0 +1,4 @@
+# Preserve exact supplied numerical and crystal input bytes.
+silicon24/fc2.full.hdf5 -text
+silicon24/coefficients.npy -text
+silicon24/phono3py_disp.yaml -text

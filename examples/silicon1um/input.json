@@ -1,0 +1,42 @@
+{
+  "schema": "negfpp.local-fd.v1",
+  "frozen_source": {
+    "manifest": "reference.json",
+    "sha256": "feb67f886337acb5b8366a689542463c90fa74c6bed4a0683174f3b660946b68"
+  },
+  "geometry": {
+    "center_layers": 1840
+  },
+  "reservoirs": {
+    "left_temperature_k": 300.5,
+    "right_temperature_k": 299.5,
+    "equilibrium_temperature_k": 300.0
+  },
+  "resources": {
+    "workers": 4,
+    "frequency_tile": 1,
+    "max_cache_bytes": 4294967296,
+    "numeric_cap_bytes": 21474836480,
+    "parent_reserve_bytes": 2147483648,
+    "runtime_reserve_bytes": 4294967296,
+    "available_margin_bytes": 4294967296,
+    "max_seconds": 2400.0,
+    "exit_reserve_seconds": 60.0,
+    "harmonic_max_bytes": 134217728,
+    "contact_max_bytes": 3221225472
+  },
+  "solver": {
+    "max_newton_steps": 8,
+    "max_krylov_iterations": 128,
+    "krylov_restart": 20,
+    "max_line_search_steps": 20,
+    "max_current_calls": 24,
+    "max_jacobian_calls": 160,
+    "max_seconds": 1800.0,
+    "preconditioner_seconds": 120.0
+  },
+  "run": {
+    "name": "silicon1um-local-fd",
+    "output_dir": "../../generated/silicon1um-1.0.2"
+  }
+}

@@ -1,110 +1,15 @@
-# =========================
-# Python
-# =========================
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-*.pyd
-*.dll
-
-# =========================
-# Build / Packaging
-# =========================
-build/
-dist/
-*.egg-info/
-.eggs/
-pip-wheel-metadata/
-
-# =========================
-# Conda / Virtual Envs
-# =========================
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-.conda/
-
-# =========================
-# VSCode
-# =========================
-.vscode/*
-!.vscode/settings.json
-!.vscode/launch.json
-
-# =========================
-# Jupyter
-# =========================
-.ipynb_checkpoints/
-
-# =========================
-# Logs
-# =========================
-*.log
-
-# =========================
-# Testing
-# =========================
 .pytest_cache/
-.ruff_cache/
 .coverage
 htmlcov/
-
-# =========================
-# HPC outputs
-# =========================
-*.out
-*.err
-slurm-*
-pbs-*
-
-# =========================
-# OS files
-# =========================
+.venv/
+/.venv
+/.local/
+/build/
+/dist/
+*.egg-info/
+/generated/
+/examples/silicon24/generated/
 .DS_Store
 Thumbs.db
-
-# =========================
-# Large data
-# =========================
-data/
-!/docs/research-results/converged-20261028/data/
-!/docs/research-results/converged-20261028/data/*.csv
-!/docs/research-results/converged-20261028/data/*.json
-results/
-cache/
-outputs/
-validation-artifacts
-
-# Workspace experiments and runtime payloads stay outside the code repository.
-/tmp/
-/reports/
-/archives/
-/datasets/
-/synchronization/
-/studies/
-/external/
-checkpoints/
-runtime-env/
-*.npy
-*.npz
-*.h5
-*.hdf5
-*.pkl
-*.pickle
-*.tar.gz
-*.tar.zst
-*.tgz
-*.bundle
-
-# Report artifacts are regenerated from checksum-anchored validation data.
-docs/validation/toy-model-report/release_config.tex
-docs/validation/toy-model-report/output/
-docs/validation/toy-model-report/production-staging-*/
-docs/validation/toy-model-report/production-figures-*/
-docs/validation/toy-model-report/historical-figures/
-docs/validation/toy-model-report/tmp/
